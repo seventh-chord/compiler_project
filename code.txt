@@ -1,0 +1,7 @@
+var a = 1
+var x = a + 2 + 3 + 4
+var y = x - 2 + 3
+var z = y + 2 + 3
+var w = z
+w = w + a
+output = w + 55
