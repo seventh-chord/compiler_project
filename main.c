@@ -14,6 +14,8 @@
 #define U32_MAX 0xffffffff
 #define U8_MAX 0xff
 
+#define max(a, b)  ((a) > (b)? (a) : (b))
+
 #include <stdarg.h>
 #include "fake_winapi.h" // our substitute for windows.h
 
@@ -29,15 +31,8 @@ void program_entry() {
 }
 
 void printf(u8* string, ...);
-/*
-#define assert(x) do { \
-    if (!(x)) { \
-        printf("assert(%s) failed, %s:%u\n", #x, __FILE__, __LINE__); \
-        ExitProcess(-1); \
-    } \
-} while (0)
-*/
-#define assert(x) ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, __LINE__), ExitProcess(-1), null))
+#define assert(x)        ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, __LINE__), ExitProcess(-1), null))
+#define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, __LINE__), ExitProcess(-1), null)
 
 
 // Memory
@@ -102,6 +97,7 @@ typedef struct Buf_Header {
 #define buf_free(b)        ((b)? (free(_buf_header(b)), (b) = null) : (0))
 #define buf_end(b)         ((b)? ((b) + buf_length(b)) : null)
 #define buf_empty(b)       (buf_length(b) <= 0)
+#define buf_clear(b)       (((b))? (_buf_header(b)->length = 0) : ())
 
 void* _buf_grow(void* buf, u64 new_len, u64 element_size) {
     Buf_Header* new_header;
@@ -524,23 +520,23 @@ typedef struct Token {
     File_Pos pos;
 } Token;
 
+
+#define BINARY_ADD 0
+#define BINARY_SUB 1
+
 typedef struct Expr Expr;
 struct Expr {
     enum {
         expr_variable,
         expr_literal,
+        expr_binary,
     } kind;
+
     union {
         u32 variable;
         u32 literal;
+        struct { u8 op; Expr* left; Expr* right; } binary;
     };
-
-    enum {
-        chain_none = 0,
-        chain_add,
-        chain_sub,
-    } chain_op;
-    Expr* chain; // or null if `chain_op = chain_none`
 };
 
 typedef struct Stmt {
@@ -555,21 +551,31 @@ typedef struct Stmt {
 } Stmt;
 
 
-/*
-#define OP_KIND_SET 0
-#define OP_KIND_ADD 1
-#define OP_KIND_SUB 2
 
-#define OP_SOURCE_VAR 0
-#define OP_SOURCE_LIT 1
+typedef struct Local {
+    enum { local_temporary, local_variable } kind;
+    u32 index; // either variable index of temporary nubmer
+} Local;
+
+inline bool local_cmp(Local a, Local b) {
+    return a.kind == b.kind && a.index == b.index;
+}
 
 typedef struct Op {
-    u8 kind;
-    u8 source_kind;
-    u32 var;
-    union { u32 var; u32 lit; } source;
+    enum {
+        op_end_of_stream = 0,
+        op_reset_temporaries,
+
+        op_set,
+        op_add,
+        op_sub,
+    } kind;
+
+    enum { op_source_literal, op_source_local } source_kind;
+    union { u32 literal; Local local; } source;
+
+    Local target;
 } Op;
-*/
 
 
 typedef struct Var {
@@ -577,10 +583,16 @@ typedef struct Var {
     File_Pos declaration_pos;
 } Var;
 
+
 typedef struct AST {
     u8* string_table; // stretchy-buffer string table
+
+    Var* vars; // stretchy-buffer
+
     Stmt* stmts; // stretchy-buffer
-    Var* vars;
+
+    Op* ops; // stretchy-buffer, linearized for of stmts
+    u32 max_temporaries;
 } AST;
 
 void free_ast(AST ast) {
@@ -628,34 +640,28 @@ void token_print(u8* string_table, Token* t) {
 }
 
 void expr_print(AST* ast, Expr* expr) {
-    while (1) {
-        switch (expr->kind) {
-            case expr_variable: {
-                Var* var = &ast->vars[expr->variable];
-                u8* name = string_table_access(ast->string_table, var->name);
-                printf("%s", name);
-            } break;
+    switch (expr->kind) {
+        case expr_variable: {
+            Var* var = &ast->vars[expr->variable];
+            u8* name = string_table_access(ast->string_table, var->name);
+            printf("%s", name);
+        } break;
 
-            case expr_literal: {
-                printf("%u", expr->literal);
-            } break;
+        case expr_literal: {
+            printf("%u", expr->literal);
+        } break;
 
-            default: {
-                printf("<unkown expression %x>", expr->kind);
-            } break;
-        }
+        case expr_binary: {
+            expr_print(ast, expr->binary.left);
+            switch (expr->binary.op) {
+                case BINARY_ADD: printf(" + "); break;
+                case BINARY_SUB: printf(" - "); break;
+                default: assert(false);
+            }
+            expr_print(ast, expr->binary.right);
+        } break;
 
-        if (expr->chain_op == chain_none) {
-            break;
-        }
-
-        switch (expr->chain_op) {
-            case chain_add: printf(" + "); break;
-            case chain_sub: printf(" - "); break;
-            default:        printf(" <unkown operator> "); break;
-        }
-
-        expr = expr->chain;
+        default: assert(false);
     }
 }
 
@@ -672,9 +678,65 @@ void stmt_print(AST* ast, Stmt* stmt) {
             printf("end of stream");
         } break;
 
-        default: {
-            printf("<unkown statement %x>", stmt->kind);
+        default: assert(false);
+    }
+}
+
+void op_print(AST* ast, Op* op) {
+    bool print_operands = true;
+
+    switch (op->kind) {
+        case op_reset_temporaries: {
+            printf("reset temporaries");
+            print_operands = false;
         } break;
+
+        case op_set: printf("set "); break;
+        case op_add: printf("add "); break;
+        case op_sub: printf("sub "); break;
+
+        default: assert(false);
+    }
+
+    if (print_operands) {
+        switch (op->target.kind) {
+            case local_variable: {
+                Var* var = &ast->vars[op->target.index];
+                u8* name = string_table_access(ast->string_table, var->name);
+                printf("%s, ", name);
+            } break;
+
+            case local_temporary: {
+                printf("$%u, ", op->target.index);
+            } break;
+
+            default: assert(false);
+        }
+
+        switch (op->source_kind) {
+            case op_source_literal: {
+                printf("%u", op->source.literal);
+            } break;
+
+            case op_source_local: {
+                Local local = op->source.local;
+                switch (local.kind) {
+                    case local_variable: {
+                        Var* var = &ast->vars[local.index];
+                        u8* name = string_table_access(ast->string_table, var->name);
+                        printf("%s", name);
+                    } break;
+
+                    case local_temporary: {
+                        printf("$%u", local.index);
+                    } break;
+
+                    default: assert(false);
+                }
+            } break;
+
+            default: assert(false);
+        }
     }
 }
 
@@ -694,171 +756,207 @@ Expr* expr_parse_with_length(Arena* arena, AST* ast, Token* t, u32 length) {
         return null;
     }
 
-    Expr* start_expr = arena_insert(arena, ((Expr) {0}));
-    Expr* expr = start_expr;
-
-    Token* end = (t + length);
-    while (t != end) {
-        // Parse a identifier or literal
+    if (length == 1) {
         switch (t->kind) {
             case token_literal: {
+                Expr* expr = arena_insert(arena, ((Expr) {0}));
                 expr->kind = expr_literal;
                 expr->literal = t->literal_value;
+                return expr;
             } break;
 
             case token_identifier: {
                 u32 name_index = t->identifier_string_table_index;
                 u32 var_index = ast_find_var(ast, name_index);
-
                 if (var_index == U32_MAX) {
                     u8* name = string_table_access(ast->string_table, name_index);
                     printf("Found undeclared variable '%s' in expression (Line %u)\n", name, t->pos.line);
                     return null;
                 }
 
+                Expr* expr = arena_insert(arena, ((Expr) {0}));
                 expr->kind = expr_variable;
                 expr->variable = var_index;
-            } break;
-
-            default: {
-                printf("Expected identifier or literal after ");
-                token_print(ast->string_table, t - 1);
-                printf(", but found ");
-                token_print(ast->string_table, t);
-                printf(" (Line %u)\n", t->pos.line);
-                return null;
+                return expr;
             } break;
         }
 
-        t += 1;
-        if (t == end) { break; }
+        printf("Expected literal or variable, but got ");
+        token_print(ast->string_table, t);
+        printf(" (Line %u)\n", t->pos.line);
+        return null;
+    }
 
-        // Maybe parse a chaining operator
-        if (t->kind == token_operator) {
-            int chain_op;
-            switch (t->operator_symbol) {
-            case '+': chain_op = chain_add; break;
-            case '-': chain_op = chain_sub; break;
-            default: {
-                printf("Expected binary operator, but got '%c' (Line %u)\n", t->operator_symbol, t->pos.line);
-                return null;
-            } break;
-            }
-
-            expr->chain_op = chain_op;
-            expr->chain = arena_insert(arena, ((Expr) {0}));
-            expr = expr->chain;
-
-            t += 1;
-        } else {
-            printf("Expected end of expression or operator after ");
-            token_print(ast->string_table, t - 1);
-            printf(", but found ");
-            token_print(ast->string_table, t);
-            printf(" (Line %u)\n");
-            return null;
+    u32 op_pos = U32_MAX;
+    for (u32 i = 0; i < length; i += 1) {
+        if (t[i].kind == token_operator) {
+            op_pos = i;
         }
     }
 
-    return start_expr;
+    if (op_pos == U32_MAX) {
+        printf("Found no operator in expression (Starting on line %u)\n", t->pos.line);
+        return null;
+    }
+
+
+    u8 binary_op;
+    Token* op_token = t + op_pos;
+    switch (op_token->operator_symbol) {
+        case '+': binary_op = BINARY_ADD; break;
+        case '-': binary_op = BINARY_SUB; break;
+        default: {
+            printf("Expected binary operator, but got %c (Line %u)\n", op_token->operator_symbol, op_token->pos.line);
+            return null;
+        } break;
+    }
+
+    Expr* left  = expr_parse_with_length(arena, ast, t, op_pos);
+    Expr* right = expr_parse_with_length(arena, ast, t + op_pos + 1, length - op_pos - 1);
+
+    if (left == null || right == null) { return null; }
+
+    Expr* expr = arena_insert(arena, ((Expr) {0}));
+    expr->kind = expr_binary;
+    expr->binary.op = binary_op;
+    expr->binary.left = left;
+    expr->binary.right = right;
+    return expr;
 }
 
-void expr_collapse(Expr* first) {
-    u32 literal_count = 0;
-    u32 literal_positive = 0;
-    u32 literal_negative = 0;
-    Expr* e;
+void expr_linearize_recursive(AST* ast, Expr* expr, u32 tmp) {
+    Op op = {0};
+    op.target.kind = local_temporary;
+    op.target.index = tmp;
 
-    int chain_op = chain_add;
-    e = first;
-    while (1) {
-        if (e->kind == expr_literal) {
-            literal_count += 1;
-            switch (chain_op) {
-                case chain_add: literal_positive += e->literal; break;
-                case chain_sub: literal_negative += e->literal; break;
+    switch (expr->kind) {
+        case expr_variable: {
+            op.kind = op_set;
+            op.source_kind = op_source_local;
+            op.source.local.kind = local_variable;
+            op.source.local.index = expr->variable;
+        } break;
+
+        case expr_literal: {
+            op.kind = op_set;
+            op.source_kind = op_source_literal;
+            op.source.literal = expr->literal;
+        } break;
+
+        case expr_binary: {
+            expr_linearize_recursive(ast, expr->binary.left, tmp);
+
+            switch (expr->binary.op) {
+                case BINARY_ADD: op.kind = op_add; break;
+                case BINARY_SUB: op.kind = op_sub; break;
                 default: assert(false);
             }
-        }
 
-        chain_op = e->chain_op;
-        if (chain_op == chain_none) {
-            break;
-        } else {
-            e = e->chain;
-        }
+            // The `expr_binary` case is the fallthrough case. This case works for all kinds of
+            // expressions. We handle some expressions differently though, which results in
+            // less temporaries allocated.
+            switch (expr->binary.right->kind) {
+                case expr_literal: {
+                    op.source_kind = op_source_literal;
+                    op.source.literal = expr->binary.right->literal;
+                } break;
+
+                case expr_variable: {
+                    op.source_kind = op_source_local;
+                    op.source.local.kind = local_variable;
+                    op.source.local.index = expr->binary.right->variable;
+                } break;
+
+                case expr_binary: {
+                    expr_linearize_recursive(ast, expr->binary.right, tmp + 1);
+
+                    op.source_kind = op_source_local;
+                    op.source.local.kind = local_temporary;
+                    op.source.local.index = tmp + 1;
+                } break;
+
+                default: assert(false);
+            }
+        } break;
+
+        default: assert(false);
     }
 
-    if (literal_count <= 1) {
-        return;
-    }
-
-    e = first;
-    Expr* unused_expr = null;
-    Expr* prev = null;
-    while (1) {
-        if (e->chain_op == chain_none) break;
-        if (e->kind == expr_literal) {
-            unused_expr = e->chain;
-            mem_copy((u8*) e->chain, (u8*) e, sizeof(Expr));
-        } else {
-            prev = e;
-            e = e->chain;
-        }
-    }
-
-    if (e->kind != expr_literal) {
-        if (literal_positive == literal_negative) return;
-
-        assert(unused_expr != null);
-        e->chain = unused_expr;
-        prev = e;
-        e = e->chain;
-    }
-
-    mem_clear((u8*) e, sizeof(Expr));
-    e->kind = expr_literal;
-
-    if (prev == null) {
-        e->literal = literal_positive - literal_negative; // We have no choise but to encode a wrapped literal
-    } else {
-        if (literal_negative > literal_positive) {
-            prev->chain_op = chain_sub;
-            e->literal = literal_negative - literal_positive;
-        } else {
-            prev->chain_op = chain_add;
-            e->literal = literal_positive - literal_negative;
-        }
-    }
+    buf_push(ast->ops, op);
 }
 
-u32 expr_eval(Expr* expr, u32* var_values) {
-    int chain_op = chain_add;
-    u32 value = 0;
+void linearize_assignment(AST* ast, u32 var, Expr* root) {
+    u32 initial_op_count = buf_length(ast->ops);
 
-    while (1) {
-        u32 sub_value = 0;
-        switch (expr->kind) {
-            case expr_variable: sub_value = var_values[expr->variable]; break;
-            case expr_literal:  sub_value = expr->literal; break;
-            default: assert(false);
+    expr_linearize_recursive(ast, root, 0);
+
+    // Try replacing temporary $0 with our variable
+    bool need_temporary_0 = false;
+    for (u32 i = initial_op_count; i < buf_length(ast->ops); i += 1) {
+        Op* op = ast->ops + i;
+
+        if (i == 0) {
+            // We allways start linearization by creating a new temporary and setting it
+            assert(op->target.kind == local_temporary && op->target.index == 0 && op->kind == op_set);
+            continue;
         }
+        
+        assert(op->target.kind == local_temporary); // Before optimizing, we allways assign to temporaries
 
-        switch (chain_op) {
-            case chain_add: value += sub_value; break;
-            case chain_sub: value -= sub_value; break;
-            default: assert(false);
-        }
+        // Check if source or target are our variable
+        bool source_is_our_variable =
+            op->source_kind == op_source_local &&
+            op->source.local.kind == local_variable &&
+            op->source.local.index == var;
 
-        if (expr->chain_op == chain_none) {
+        if (source_is_our_variable) {
+            need_temporary_0 = true;
             break;
-        } else {
-            chain_op = expr->chain_op;
-            expr = expr->chain;
         }
     }
 
-    return value;
+    if (need_temporary_0) {
+        buf_push(ast->ops, ((Op) {
+            .kind = op_set,
+            .source_kind = op_source_local,
+            .source = { .local = { .kind = local_temporary, .index = 0 } },
+            .target = { .kind = local_variable, .index = var }
+        }));
+    } else {
+        for (u32 i = initial_op_count; i < buf_length(ast->ops); i += 1) {
+            Op* op = ast->ops + i;
+
+            if (op->target.kind == local_temporary && op->target.index == 0) {
+                op->target.kind = local_variable;
+                op->target.index = var; 
+            }
+        }
+    }
+
+    // TODO Optimize
+    // * Summing constants
+    // * Reorganizing trees so as many right branches are leaves. We only need temporaries if we
+    //   have non-leaf expressions on right branches (Draw it up, it makes sense!).
+    
+    // Figure out how many temporaries we ended up using
+    bool used_temporaries = false;
+
+    for (u32 i = initial_op_count; i < buf_length(ast->ops); i += 1) {
+        Op* op = &ast->ops[i];
+        if (op->source_kind == op_source_local && op->source.local.kind == local_temporary) {
+            used_temporaries = true;
+            ast->max_temporaries = max(op->source.local.index + 1, ast->max_temporaries);
+        }
+        if (op->target.kind == local_temporary) {
+            used_temporaries = true;
+            ast->max_temporaries = max(op->target.index + 1, ast->max_temporaries);
+        }
+    }
+
+    // TODO only do this if we actually used any temporaries
+    if (used_temporaries) {
+        buf_push(ast->ops, ((Op) { op_reset_temporaries }));
+    }
 }
 
 AST* build_ast(Arena* arena, u8* path) {
@@ -1053,6 +1151,7 @@ AST* build_ast(Arena* arena, u8* path) {
                 }
                 initial_value = expr_parse_with_length(arena, ast, start, length);
                 if (initial_value == null) {
+                    valid = false;
                     break;
                 }
             } else {
@@ -1114,6 +1213,7 @@ AST* build_ast(Arena* arena, u8* path) {
                 }
                 expr = expr_parse_with_length(arena, ast, start, length);
                 if (expr == null) {
+                    valid = false;
                     break;
                 }
             } else {
@@ -1167,12 +1267,6 @@ AST* build_ast(Arena* arena, u8* path) {
     }
     buf_push(ast->stmts, ((Stmt) { stmt_end_of_stream }));
 
-    for (Stmt* stmt = ast->stmts; stmt->kind != stmt_end_of_stream; stmt += 1) {
-        if (stmt->kind == stmt_assignment) {
-            expr_collapse(stmt->assignment.expr);
-        }
-    }
-
     printf("%u variables:\n", buf_length(ast->vars));
     for (Var* var = ast->vars; var != buf_end(ast->vars); var += 1) {
         u8* name = string_table_access(ast->string_table, var->name);
@@ -1193,35 +1287,78 @@ AST* build_ast(Arena* arena, u8* path) {
         return null;
     }
 
-    // Try evaluating the ast
-    printf("Evaluating...\n");
-
-    u32* var_values = (u32*) arena_alloc(arena, sizeof(u32) * buf_length(ast->vars), 4);
-    mem_clear((u8*) var_values, sizeof(u32) * buf_length(ast->vars));
-
+    // Linearize statements
     for (Stmt* stmt = ast->stmts; stmt->kind != stmt_end_of_stream; stmt += 1) {
         switch (stmt->kind) {
+            case stmt_assignment: {
+                linearize_assignment(ast, stmt->assignment.var, stmt->assignment.expr);
+            } break;
 
-        case stmt_assignment: {
-            u32 value = expr_eval(stmt->assignment.expr, var_values);
-            var_values[stmt->assignment.var] = value;
-        } break;
-
-        default: case stmt_end_of_stream: {
-            printf("Invalid statement, we should have broken out of the loop earlier!\n");
-            assert(false);
-        } break;
-
+            default: assert(false);
         }
     }
-    for (u32 i = 0; i < buf_length(ast->vars); i += 1) {
-        u32 name_index = ast->vars[i].name;
-        u8* name = string_table_access(ast->string_table, name_index);
-        u32 value = var_values[i];
-        printf("  %s = %u\n", name, value);
+    buf_push(ast->ops, ((Op) { op_end_of_stream }));
+
+    printf("%u operations:\n", buf_length(ast->ops));
+    for (Op* op = ast->ops; op->kind != op_end_of_stream; op += 1) {
+        printf("  ");
+        op_print(ast, op);
+        printf("\n");
     }
 
     return ast;
+}
+
+
+void eval_ops(Arena* arena, AST* ast) {
+    u32* var_values = (u32*) arena_alloc(arena, sizeof(u32) * buf_length(ast->vars), sizeof(u32));
+    u32* tmp_values = (u32*) arena_alloc(arena, sizeof(u32) * ast->max_temporaries, sizeof(u32));
+    // TODO rewind arena
+
+    for (Op* op = ast->ops; op->kind != op_end_of_stream; op += 1) {
+        if (op->kind == op_reset_temporaries) continue;
+
+        u32* left_value;
+        switch (op->target.kind) {
+            case local_temporary: left_value = tmp_values + op->target.index; break;
+            case local_variable:  left_value = var_values + op->target.index; break;
+            default: assert(false);
+        }
+
+        u32 right_literal;
+        u32* right_value;
+        switch (op->source_kind) {
+            case op_source_literal: {
+                right_literal = op->source.literal;
+                right_value = &right_literal;
+            } break;
+            case op_source_local: {
+                switch (op->source.local.kind) {
+                    case local_temporary: right_value = tmp_values + op->source.local.index; break;
+                    case local_variable:  right_value = var_values + op->source.local.index; break;
+                    default: assert(false);
+                }
+            } break;
+            default: assert(false);
+        }
+
+        switch (op->kind) {
+            case op_set: *left_value = *right_value; break;
+            case op_add: *left_value = *left_value + *right_value; break;
+            case op_sub: *left_value = *left_value - *right_value; break;
+
+            default: assert(false);
+        }
+    }
+
+    printf("Evaluated intermediate bytecode:\n");
+    for (u32 i = 0; i < buf_length(ast->vars); i += 1) {
+        Var* var = &ast->vars[i];
+        u8* name = string_table_access(ast->string_table, var->name);
+        u32 value = var_values[i];
+
+        printf("  %s = %u\n", name, value);
+    }
 }
 
 // Codegen
@@ -1249,22 +1386,8 @@ typedef struct COFF_Header {
 
 const u16 COFF_MACHINE_AMD64 = 0x8664;
 
-const u16 COFF_FLAGS_EXECUTABLE_IMAGE           = 0x0002;
-const u16 COFF_FLAGS_LARGE_ADDRESS_AWARE        = 0x0020;
-// the rest are not used...
-const u16 COFF_FLAGS_RELOCS_STRIPPED            = 0x0001;
-const u16 COFF_FLAGS_LINE_NUMS_STRIPPED         = 0x0004;
-const u16 COFF_FLAGS_LOCAL_SYMS_STRIPPED        = 0x0008;
-const u16 COFF_FLAGS_AGGRESSIVE_WS_TRIM         = 0x0010;
-const u16 COFF_FLAGS_BYTES_REVERSED_LO          = 0x0080;
-const u16 COFF_FLAGS_32BIT_MACHINE              = 0x0100;
-const u16 COFF_FLAGS_DEBUG_STRIPPED             = 0x0200;
-const u16 COFF_FLAGS_REMOVABLE_RUN_FROM_SWAP    = 0x0400;
-const u16 COFF_FLAGS_NET_RUN_FROM_SWAP          = 0x0800;
-const u16 COFF_FLAGS_SYSTEM                     = 0x1000;
-const u16 COFF_FLAGS_DLL                        = 0x2000;
-const u16 COFF_FLAGS_UP_SYSTEM_ONLY             = 0x4000;
-const u16 COFF_FLAGS_BYTES_REVERSED_HI          = 0x8000;
+const u16 COFF_FLAGS_EXECUTABLE_IMAGE    = 0x0002;
+const u16 COFF_FLAGS_LARGE_ADDRESS_AWARE = 0x0020;
 
 typedef struct Image_Header {
     u16 magic;
@@ -1363,6 +1486,13 @@ typedef struct Fixup {
     };
 } Fixup;
 
+typedef struct Stack_Fixup {
+    u64 text_location;
+    u32 stack_offset;
+    u32 element_size;
+} Stack_Fixup;
+
+
 // Data needed to generate import table
 typedef struct Import_Function {
     u8* name; // c-str
@@ -1374,21 +1504,21 @@ typedef struct DynlibImport {
     Import_Function* functions; // stretchy-buffer
 } DynlibImport;
 
+
 #define REG_COUNT 4 // eax, ecx, edx, ebx
 #define REG_BAD 255
-
-#define PRINT_CODEGEN
 u8* reg_names[REG_COUNT] = { "eax", "ecx", "edx", "ebx" };
 
+typedef struct Reg {
+    bool used;
+    u32 alloc_time;
+    Local local;
+} Reg;
+
+
+//#define PRINT_GENERATED_INSTRUCTIONS
+
 #define NO_STACK_SPACE_ALLOCATED U32_MAX
-
-typedef struct Stack_Fixup {
-    u64 text_location;
-    u32 stack_offset;
-    u32 element_size;
-} Stack_Fixup;
-
-
 
 typedef struct Exe {
     // For full executable
@@ -1397,18 +1527,12 @@ typedef struct Exe {
     Fixup* fixups;
     DynlibImport* dlls;
 
-    // Per function
-    struct {
-        enum {
-            reg_unused = 0,
-            reg_local,
-        } usage;
-        u32 var;
-        u32 alloc_time;
-    } regs[REG_COUNT];
+    // Used during codegen
+    Reg regs[REG_COUNT];
 
     u32 var_count;
-    u32* stack_offsets; // one per variable, arena allocated
+    u32* var_stack_offsets; // one per variable, arena allocated
+    u32* tmp_stack_offsets; // also arena allocated
     u32 next_stack_offset;
 
     Stack_Fixup* stack_fixups; // stretchy-buffer
@@ -1428,7 +1552,35 @@ void free_win64exe(Exe exe) {
 }
 
 
-u8 reg_allocate(Exe* exe, AST* ast, u32 var) {
+u32 local_stack_offset(Exe* exe, Local local, bool allocate) {
+    u32 stack_offset;
+
+    switch (local.kind) {
+        case local_temporary: {
+            stack_offset = exe->tmp_stack_offsets[local.index];
+            if (stack_offset == NO_STACK_SPACE_ALLOCATED && allocate) {
+                stack_offset = exe->next_stack_offset;
+                exe->next_stack_offset += sizeof(u32);
+                exe->tmp_stack_offsets[local.index] = stack_offset;
+            }
+        } break;
+
+        case local_variable: {
+            stack_offset = exe->var_stack_offsets[local.index];
+            if (stack_offset == NO_STACK_SPACE_ALLOCATED && allocate) {
+                stack_offset = exe->next_stack_offset;
+                exe->next_stack_offset += sizeof(u32);
+                exe->var_stack_offsets[local.index] = stack_offset;
+            }
+        } break;
+
+        default: assert(false);
+    }
+
+    return stack_offset;
+}
+
+u8 reg_allocate(Exe* exe, AST* ast, Local local) {
     bool deallocate = true;
     bool reallocate = true;
 
@@ -1445,16 +1597,16 @@ u8 reg_allocate(Exe* exe, AST* ast, u32 var) {
         }
 
         // Or better, use a unused register
-        if (exe->regs[r].usage == reg_unused) {
-            oldest_time = 0;
+        if (!exe->regs[r].used) {
+            oldest_time = 0; // makes sure we don't try to reallocate in the 'if' above
             reg = r;
 
             reallocate = true;
             deallocate = false;
         }
 
-        // Or even better, find a previously allocated regsiter
-        if (exe->regs[r].usage == reg_local && exe->regs[r].var == var) {
+        // Or even better, use a register we allready allocated for this
+        if (exe->regs[r].used && local_cmp(exe->regs[r].local, local)) {
             reg = r;
 
             reallocate = false;
@@ -1467,25 +1619,17 @@ u8 reg_allocate(Exe* exe, AST* ast, u32 var) {
 
     // Deallocate old contents of register if needed
     if (deallocate) {
-        u32 old_var = exe->regs[reg].var;
-        u32 stack_offset = exe->stack_offsets[old_var];
-        if (stack_offset == NO_STACK_SPACE_ALLOCATED) {
-            stack_offset = exe->next_stack_offset;
-            exe->next_stack_offset += sizeof(u32);
-            exe->stack_offsets[old_var] = stack_offset;
-        }
-
-        #ifdef PRINT_CODEGEN
-        u8* var_name = string_table_access(ast->string_table, ast->vars[old_var].name);
-        printf("  ; de-alloc %s for %s\n", reg_names[reg], var_name);
-        #endif
+        Local old_local = exe->regs[reg].local;
+        u32 stack_offset = local_stack_offset(exe, old_local, true);
 
         // TODO check if we need to deallocate the register at all, or if we can get away
         // with just overwriting it!
-        // To do this, we need info about the last use of a certain variable.
+        // To do this, we need info about the last use of a certain variable/temporary.
+        // To do this, we can just read ahead in the current ops list. Might not be terribly fast though...
 
         // Eventually, this assertion will trip. We then need to encode disp32 instead of always encoding disp8
         // The assert checks for signed values, not sure if that is needed...
+        // We also have to fix the code for loading values of the stack below once we get here!
         assert((stack_offset & 0x7f) == stack_offset);
 
         buf_push(exe->text, 0x89); // mov r/m32 r32     (MR)
@@ -1500,23 +1644,18 @@ u8 reg_allocate(Exe* exe, AST* ast, u32 var) {
         stack_fixup.element_size = sizeof(u32);
         buf_push(exe->stack_fixups, stack_fixup);
 
-        #ifdef PRINT_CODEGEN
-        printf("  mov [stack %u], %s\n", stack_offset, reg_names[reg]);
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("mov [stack %u], %s\n", stack_offset, reg_names[reg]);
         #endif
     }
 
     // Reallocate regsiter
     if (reallocate) {
-        #ifdef PRINT_CODEGEN
-        u8* var_name = string_table_access(ast->string_table, ast->vars[var].name);
-        printf("  ; alloc %s for %s\n", reg_names[reg], var_name);
-        #endif
-
-        exe->regs[reg].usage = reg_local;
-        exe->regs[reg].var = var;
+        exe->regs[reg].used = true;
+        exe->regs[reg].local = local;
         exe->regs[reg].alloc_time = exe->time;
 
-        u32 stack_offset = exe->stack_offsets[var];
+        u32 stack_offset = local_stack_offset(exe, local, false);
         if (stack_offset != NO_STACK_SPACE_ALLOCATED) {
             // mov r32 r/m32
             buf_push(exe->text, 0x8b);
@@ -1531,10 +1670,24 @@ u8 reg_allocate(Exe* exe, AST* ast, u32 var) {
             stack_fixup.element_size = sizeof(u32);
             buf_push(exe->stack_fixups, stack_fixup);
 
-            #ifdef PRINT_CODEGEN
-            printf("  mov %s, [stack %u]\n", reg_names[reg], stack_offset);
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            printf("mov %s, [stack %u] ", reg_names[reg], stack_offset);
             #endif
         }
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        switch (local.kind) {
+            case local_temporary: {
+                printf("; alloc %s for $%u\n", reg_names[reg], local.index);
+            } break;
+            case local_variable: {
+                Var* var = &ast->vars[local.index];
+                u8* name = string_table_access(ast->string_table, var->name);
+                printf("; alloc %s for %s\n", reg_names[reg], name);
+            } break;
+            default: assert(false);
+        }
+        #endif
     }
 
     return reg;
@@ -1544,11 +1697,14 @@ Exe* gen_win64exe(Arena* arena, AST* ast) {
     Exe* exe = arena_insert(arena, ((Exe) {0}));
 
     exe->var_count = buf_length(ast->vars);
-    exe->stack_offsets = (u32*) arena_alloc(arena, sizeof(u32) * exe->var_count, sizeof(u32));
-    for (u32 i = 0; i < exe->var_count; i += 1) { exe->stack_offsets[i] = NO_STACK_SPACE_ALLOCATED; }
+    exe->var_stack_offsets = (u32*) arena_alloc(arena, sizeof(u32) * exe->var_count, sizeof(u32));
+    exe->tmp_stack_offsets = (u32*) arena_alloc(arena, sizeof(u32) * ast->max_temporaries, sizeof(u32));
 
-    #ifdef PRINT_CODEGEN
-    printf("Codegen:\n");
+    for (u32 i = 0; i < exe->var_count; i += 1)         { exe->var_stack_offsets[i] = NO_STACK_SPACE_ALLOCATED; }
+    for (u32 i = 0; i < ast->max_temporaries; i += 1)   { exe->tmp_stack_offsets[i] = NO_STACK_SPACE_ALLOCATED; }
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("; generating assembly\n");
     #endif
 
     // sub rsp, stack frame size
@@ -1557,117 +1713,99 @@ Exe* gen_win64exe(Arena* arena, AST* ast) {
     buf_push(exe->text, 0xec);
     buf_push(exe->text, 0x00);
     u64 stack_frame_size_text_location = buf_length(exe->text) - sizeof(u8);
-    #ifdef PRINT_CODEGEN
-    printf("  ; enter function\n  sub rsp, stack_size\n");
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("sub rsp, stack_frame_size\n");
     #endif
 
-    for (Stmt* stmt = ast->stmts; stmt->kind != stmt_end_of_stream; stmt += 1) {
-        #ifdef PRINT_CODEGEN
-        printf("  ; ");
-        stmt_print(ast, stmt);
-        printf("\n");
-        #endif
+    for (Op* op = ast->ops; op->kind != op_end_of_stream; op += 1) {
+        exe->time += 1;
 
-        switch (stmt->kind) {
-            case stmt_assignment: {
-                u8 reg = reg_allocate(exe, ast, stmt->assignment.var);
+        if (op->kind == op_reset_temporaries) {
+            for (u32 r = 0; r < REG_COUNT; r += 1) {
+                if (exe->regs[r].used && exe->regs[r].local.kind == local_temporary) {
+                    exe->regs[r] = (Reg) {0};
+                }
+            }
 
-                Expr* prev = null;
-                Expr* expr = stmt->assignment.expr;
+            continue;
+        }
 
-                while (1) {
-                    switch(expr->kind) {
-                        case expr_literal: {
-                            u32 value = expr->literal;
+        u8 left_reg, right_reg;
+        u32 right_literal;
+        bool use_right_literal;
 
-                            if (prev == null) {
-                                // mov reg, literal
-                                buf_push(exe->text, 0xb8 | reg);
-                                exe->time += 1;
-                                    
-                                #ifdef PRINT_CODEGEN
-                                printf("  mov %s, %u\n", reg_names[reg], value);
-                                #endif
-                            } else {
-                                // add/sub reg, literal
-                                u8 modrm;
-                                switch (prev->chain_op) {
-                                    case chain_add: modrm = 0xc0; break;
-                                    case chain_sub: modrm = 0xe8; break;
-                                    default: assert(false);
-                                }
-                                modrm |= reg;
+        left_reg = reg_allocate(exe, ast, op->target);
 
-                                buf_push(exe->text, 0x81);
-                                buf_push(exe->text, modrm);
+        if (op->source_kind == op_source_literal) {
+            use_right_literal = true;
+            right_literal = op->source.literal;
+        } else {
+            use_right_literal = false;
+            right_reg = reg_allocate(exe, ast, op->source.local);
+        }
 
-                                #ifdef PRINT_CODEGEN
-                                if (prev->chain_op == chain_add) {
-                                    printf("  add %s, %u\n", reg_names[reg], value);
-                                } else {
-                                    printf("  sub %s, %u\n", reg_names[reg], value);
-                                }
-                                #endif
-                            }
+        switch (op->kind) {
+            case op_set: {
+                if (use_right_literal) {
+                    buf_push(exe->text, 0xb8 | left_reg);
+                    buf_push(exe->text, (right_literal >> 0x00) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x08) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x10) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x18) & 0xff);
 
-                            // the literal for the above instructions
-                            buf_push(exe->text, value & 0xff);
-                            buf_push(exe->text, (value >> 8) & 0xff);
-                            buf_push(exe->text, (value >> 16) & 0xff);
-                            buf_push(exe->text, (value >> 24) & 0xff);
-                            exe->time += 1;
-                        } break;
+                    #ifdef PRINT_GENERATED_INSTRUCTIONS
+                    printf("mov %s, %u\n", reg_names[left_reg], right_literal);
+                    #endif
+                } else {
+                    buf_push(exe->text, 0x89);
+                    buf_push(exe->text, 0xc0 | left_reg | (right_reg << 3));
 
-                        case expr_variable: {
-                            // TODO optimization:
-                            // If we don't have a register allocated, we can use 'mov r32 r/m32' to
-                            // add without pulling the second operand into a separate register.
+                    #ifdef PRINT_GENERATED_INSTRUCTIONS
+                    printf("mov %s, %s\n", reg_names[left_reg], reg_names[right_reg]);
+                    #endif
+                }
+            } break;
 
-                            u8 source_reg = reg_allocate(exe, ast, expr->variable);
+            case op_add: {
+                if (use_right_literal) {
+                    buf_push(exe->text, 0x81);
+                    buf_push(exe->text, 0xc0 | left_reg);
+                    buf_push(exe->text, (right_literal >> 0x00) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x08) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x10) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x18) & 0xff);
 
-                            if (prev == null) {
-                                // mov reg, source_reg
-                                if (reg != source_reg) {
-                                    buf_push(exe->text, 0x8b);
-                                    buf_push(exe->text, 0xc0 | source_reg | (reg << 3));
-                                    exe->time += 1;
+                    #ifdef PRINT_GENERATED_INSTRUCTIONS
+                    printf("add %s, %u\n", reg_names[left_reg], right_literal);
+                    #endif
+                } else {
+                    buf_push(exe->text, 0x01);
+                    buf_push(exe->text, 0xc0 | left_reg | (right_reg << 3));
 
-                                    #ifdef PRINT_CODEGEN
-                                    printf("  mov %s, %s\n", reg_names[reg], reg_names[source_reg]);
-                                    #endif
-                                }
-                            } else {
-                                // add/sub reg, source_reg
-                                u8 instruction;
-                                switch (prev->chain_op) {
-                                    case chain_add: instruction = 0x03; break;
-                                    case chain_sub: instruction = 0x2b; break;
-                                    default: assert(false);
-                                }
+                    #ifdef PRINT_GENERATED_INSTRUCTIONS
+                    printf("add %s, %s\n", reg_names[left_reg], reg_names[right_reg]);
+                    #endif
+                }
+            } break;
 
-                                buf_push(exe->text, instruction);
-                                buf_push(exe->text, 0xc0 | source_reg | (reg << 3));
-                                exe->time += 1;
+            case op_sub: {
+                if (use_right_literal) {
+                    buf_push(exe->text, 0x81);
+                    buf_push(exe->text, 0xe8 | left_reg);
+                    buf_push(exe->text, (right_literal >> 0x00) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x08) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x10) & 0xff);
+                    buf_push(exe->text, (right_literal >> 0x18) & 0xff);
 
-                                #ifdef PRINT_CODEGEN
-                                if (prev->chain_op == chain_add) {
-                                    printf("  add %s, %s\n", reg_names[reg], reg_names[source_reg]);
-                                } else {
-                                    printf("  sub %s, %s\n", reg_names[reg], reg_names[source_reg]);
-                                }
-                                #endif
-                            }
-                        } break;
+                    #ifdef PRINT_GENERATED_INSTRUCTIONS
+                    printf("sub %s, %u\n", reg_names[left_reg], right_literal);
+                    #endif
+                } else {
+                    unimplemented();
 
-                        default: assert(false);
-                    }
-
-                    if (expr->chain_op == chain_none) {
-                        break;
-                    } else {
-                        prev = expr;
-                        expr = expr->chain;
-                    }
+                    #ifdef PRINT_GENERATED_INSTRUCTIONS
+                    printf("sub %s, %s\n", reg_names[left_reg], reg_names[right_reg]);
+                    #endif
                 }
             } break;
 
@@ -1676,9 +1814,9 @@ Exe* gen_win64exe(Arena* arena, AST* ast) {
     }
 
     // Fix up stack
-
     u32 stack_size = exe->next_stack_offset; // TODO + stack space for function parameters
     stack_size = ((stack_size + 0x0f) & (~0x0f)); // Round up to 16-byte align
+
     // If this assertion trips, we have to encode stack size as a imm32 in the add/sub
     // instructions setting up the stack frame.
     // While we are at it, me might want to figure out a way of removing the add/sub
@@ -1690,11 +1828,11 @@ Exe* gen_win64exe(Arena* arena, AST* ast) {
     buf_push(exe->text, 0x83);
     buf_push(exe->text, 0xc4);
     buf_push(exe->text, stack_size);
-    #ifdef PRINT_CODEGEN
-    printf("  ; leave function (stack_size = %u)\n  add rsp, stack_size\n", stack_size);
-    #endif
+    exe->text[stack_frame_size_text_location] = stack_size; // fixes up initial 'sub rsp, ...'
 
-    exe->text[stack_frame_size_text_location] = stack_size; // fixes up initial sub
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("add rsp, stack_frame_size (stack_frame_size is %u)\n", stack_size);
+    #endif
 
     for (u32 i = 0; i < buf_length(exe->stack_fixups); i += 1) {
         Stack_Fixup* f = &exe->stack_fixups[i];
@@ -1710,7 +1848,7 @@ Exe* gen_win64exe(Arena* arena, AST* ast) {
 
     // Move output into .data+0
     {
-        u8 output_reg = reg_allocate(exe, ast, 0);
+        u8 output_reg = reg_allocate(exe, ast, (Local) { .kind = local_variable, .index = 0 });
 
         buf_push(exe->text, 0x88);
         buf_push(exe->text, 0x05 | (output_reg << 3));
@@ -2151,7 +2289,9 @@ void write_executable(u8* path, Exe* exe) {
     mem_copy(pdata,    output_file + pdata_file_start, pdata_length);
     mem_copy(idata,    output_file + idata_file_start, idata_length);
 
-    write_entire_file(path, output_file, file_image_size);
+    bool success = write_entire_file(path, output_file, file_image_size);
+    // TODO proper error handling for file write failure
+    assert(success);
 
     buf_free(idata);
 }
@@ -2337,6 +2477,8 @@ void main() {
         return;
     }
 
+    eval_ops(&arena, ast);
+
     Exe* exe = gen_win64exe(&arena, ast);
     if (exe == null) {
         printf("Failed generating executable\n");
@@ -2345,7 +2487,7 @@ void main() {
 
     write_executable("out.exe", exe);
 
-    printf("Running generated executable\n");
+    printf("Running generated executable:\n");
     STARTUPINFO startup_info = {0};
     startup_info.size = sizeof(STARTUPINFO);
     PROCESSINFO process_info = {0};
