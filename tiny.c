@@ -16,10 +16,16 @@ WINAPI_PRE int WINAPI_POST WriteFile(
     void* overlapped // We don't use this, let it be nil
 );
 
+int foo() {
+    return 7;
+}
+
 void main() {
+    int x = foo() - 6;
+
     unsigned __int8* text = "Gh\n"; 
     text[0] += 1;
-    text[1] += 1;
+    text[1] += x;
 
     Handle handle = GetStdHandle((unsigned __int32) -11);
     unsigned __int32 written = 0;
