@@ -1110,7 +1110,10 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
                     op.binary.source.local.index = expr->binary.right->variable;
                 } break;
 
-                case expr_binary: {
+                // for more complex expression kinds
+                case expr_binary:
+                case expr_call:
+                {
                     expr_linearize_recursive(context, expr->binary.right, tmp + 1);
 
                     op.binary.source_kind = op_source_local;

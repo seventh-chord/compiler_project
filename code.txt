@@ -4,10 +4,10 @@ fn foo {
 }
 
 fn main {
-    var x = (foo)
+    var x = 11 + (foo)
     var y = x - 2 + 3
     var z = y + 2 + 3
     var w = z
     w = 1 + w
-    output = w + 55
+    output = w + 45
 }
