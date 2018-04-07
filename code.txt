@@ -1,10 +1,13 @@
 
 fn foo {
-    output = 10
+    output = 2 * 5
 }
 
 fn main {
-    var x = 11 + (foo)
+    var x = (foo) + (foo)
+
+    x = 30*2 - x*2 # Operator precedence!
+
     var y = x - 2 + 3
     var z = y + 2 + 3
     var w = z
