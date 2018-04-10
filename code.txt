@@ -1,12 +1,16 @@
 
-fn foo {
-    output = 2 * 5
+fn foo(a) {
+    output = a * 5
 }
 
-fn main {
-    var x = (foo) + (foo)
+fn bar(a, b) {
+    output = a + b*2
+}
 
-    x = 30*2 - x*2 # Operator precedence!
+fn main() {
+    var x = bar(1, 2) + foo(4*3 - 3*(1 + 2))
+
+    x = 2*(20 + 10) - x*2
 
     var y = x - 2 + 3
     var z = y + 2 + 3
@@ -14,3 +18,10 @@ fn main {
     w = 1 + w
     output = w + 45
 }
+
+#   Types (just basic integers for now)
+#   Pointers (our first compound type)
+#   Memory (Somewhere our text to print can go)
+#   Calling external functions (This probably isnt that bad)
+#   Parsing .lib files for external function info
+#   .pdata so we can crash properly, or whatever that is for
