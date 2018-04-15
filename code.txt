@@ -1,25 +1,28 @@
 
-fn foo(a) {
-    output = a * 5
+fn bar(a: u8, b: u8) -> u8 {
+    var dingus: u64 = 3;
+    dingus = dingus + 9;
+
+    output = a + b*2;
 }
 
-fn bar(a, b) {
-    output = a + b*2
+fn foo(a: u8) -> u8 {
+    output = a*5 + (255 + 1);
 }
 
-fn main() {
-    var x = bar(1, 2) + foo(4*3 - 3*(1 + 2))
+fn main() -> u8 {
+    var x: u8 = bar(1, 2) + foo(4*3 - 3*(1 + 2));
 
-    x = 2*(20 + 10) - x*2
+    x = 2*(20 + 10) - x*2;
 
-    var y = x - 2 + 3
-    var z = y + 2 + 3
-    var w = z
-    w = 1 + w
-    output = w + 45
+    var y: u8 = x - 2 + 3;
+    var z: u8 = y + 2 + 3;
+    var w: u8 = z;
+    w = 1 + w;
+    output = w + 45 + (255 + 1);
 }
 
-#   Types (just basic integers for now)
+#   Casts!
 #   Pointers (our first compound type)
 #   Memory (Somewhere our text to print can go)
 #   Calling external functions (This probably isnt that bad)
