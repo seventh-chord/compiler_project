@@ -1,17 +1,23 @@
 
-fn bar(a: u8, b: u8) -> u8 {
-    var dingus: u64 = 3;
-    dingus = dingus + 9;
+fn funky(p: 'u8) {
+    'p = 5;
+}
 
-    output = a + b*2;
+fn bar(a: u8, b: u8) -> u8 {
+    var dingus: u64 = 1;
+    dingus = dingus + u64(1 + u8(2));
+
+    output = a + b*2 + u8(dingus);
 }
 
 fn foo(a: u8) -> u8 {
-    output = a*5 + (255 + 1);
+    var five: u8 = 20;
+    funky(@five);
+    output = a*five + (255 + 1);
 }
 
 fn main() -> u8 {
-    var x: u8 = bar(1, 2) + foo(4*3 - 3*(1 + 2));
+    var x: u8 = bar(1, 0) + foo(4*3 - 3*(1 + 2));
 
     x = 2*(20 + 10) - x*2;
 
@@ -22,8 +28,6 @@ fn main() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
-#   Casts!
-#   Pointers (our first compound type)
 #   Memory (Somewhere our text to print can go)
 #   Calling external functions (This probably isnt that bad)
 #   Parsing .lib files for external function info

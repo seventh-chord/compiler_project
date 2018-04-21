@@ -12,6 +12,7 @@
 #define u64 unsigned __int64
 
 #define U32_MAX 0xffffffff
+#define U16_MAX 0xff
 #define U8_MAX 0xff
 #define I16_MAX 32767
 #define I16_MIN -32768
@@ -123,10 +124,7 @@ void* _buf_grow(void* buf, u64 new_len, u64 element_size) {
     Buf_Header* new_header;
 
     if (buf == null) {
-        u64 new_capacity = 64;
-        if (new_capacity < new_len) {
-            new_capacity = new_len;
-        }
+        u64 new_capacity = max(64, new_len);
         u64 new_bytes = new_capacity*element_size + BUF_HEADER_SIZE;
 
         new_header = (Buf_Header*) alloc(new_bytes);
@@ -226,12 +224,12 @@ void arena_make_space(Arena* arena, u64 size) {
 
     u8* start = ((u8*) arena->current_page) + sizeof(Arena_Page) + arena->current_page->used;
 
-    u64 ARENA_ALIGN_offset = ((u64) start) % ARENA_ALIGN;
-    if (ARENA_ALIGN_offset != 0) {
-        ARENA_ALIGN_offset = ARENA_ALIGN - ARENA_ALIGN_offset;
+    u64 align_offset = ((u64) start) % ARENA_ALIGN;
+    if (align_offset != 0) {
+        align_offset = ARENA_ALIGN - align_offset;
     }
 
-    if (size + ARENA_ALIGN_offset > free_space) {
+    if (size + align_offset > free_space) {
         if (arena->current_page->next == null) {
             Arena_Page* page = (Arena_Page*) alloc(sizeof(Arena_Page) + ARENA_PAGE_SIZE);
             page->used = 0;
@@ -254,13 +252,13 @@ u8* arena_alloc(Arena* arena, u64 size) {
     arena_make_space(arena, size);
 
     u8* ptr = ((u8*) arena->current_page) + sizeof(Arena_Page) + arena->current_page->used;
-    u64 ARENA_ALIGN_offset = ((u64) ptr) % ARENA_ALIGN;
-    if (ARENA_ALIGN_offset != 0) {
-        ARENA_ALIGN_offset = ARENA_ALIGN - ARENA_ALIGN_offset;
-        ptr += ARENA_ALIGN_offset;
+    u64 align_offset = ((u64) ptr) % ARENA_ALIGN;
+    if (align_offset != 0) {
+        align_offset = ARENA_ALIGN - align_offset;
+        ptr += align_offset;
     }
 
-    arena->current_page->used += size + ARENA_ALIGN_offset;
+    arena->current_page->used += size + align_offset;
 
     return ptr;
 }
@@ -589,6 +587,8 @@ typedef struct Token {
         token_semicolon,
         token_comma,
         token_colon,
+        token_tick,
+        token_at,
 
         token_keyword_var,
         token_keyword_fn,
@@ -607,100 +607,78 @@ typedef struct Token {
     File_Pos pos;
 } Token;
 
-typedef u8 Type;
-enum Type_Kind {
-    type_invalid = 0,
 
-    type_unsolidified_int,
-    type_u8,
-    type_u16,
-    type_u32,
-    type_u64,
-    type_i8,
-    type_i16,
-    type_i32,
-    type_i64,
-};
-#define PRIMITIVE_TYPE_COUNT 10
 
-void init_primitive_type_names(u32* names, u8** string_table) {
-    names[type_unsolidified_int] = string_table_canonicalize(string_table, "<int>", 5);
+typedef enum Primitive {
+    primitive_invalid = 0,
 
-    names[type_u8]  = string_table_canonicalize(string_table, "u8",  2);
-    names[type_u16] = string_table_canonicalize(string_table, "u16", 3);
-    names[type_u32] = string_table_canonicalize(string_table, "u32", 3);
-    names[type_u64] = string_table_canonicalize(string_table, "u64", 3);
-    names[type_i8]  = string_table_canonicalize(string_table, "i8",  2);
-    names[type_i16] = string_table_canonicalize(string_table, "i16", 3);
-    names[type_i32] = string_table_canonicalize(string_table, "i32", 3);
-    names[type_i64] = string_table_canonicalize(string_table, "i64", 3);
+    primitive_void,
+    primitive_pointer,
+
+    primitive_unsolidified_int,
+    primitive_u8,
+    primitive_u16,
+    primitive_u32,
+    primitive_u64,
+    primitive_i8,
+    primitive_i16,
+    primitive_i32,
+    primitive_i64,
+
+    PRIMITIVE_COUNT,
+} Primitive;
+
+void init_primitive_names(u32* names, u8** string_table) {
+    names[primitive_unsolidified_int] = string_table_canonicalize(string_table, "<int>", 5);
+
+    names[primitive_void] = string_table_canonicalize(string_table, "void", 4);
+    names[primitive_u8]   = string_table_canonicalize(string_table, "u8",   2);
+    names[primitive_u16]  = string_table_canonicalize(string_table, "u16",  3);
+    names[primitive_u32]  = string_table_canonicalize(string_table, "u32",  3);
+    names[primitive_u64]  = string_table_canonicalize(string_table, "u64",  3);
+    names[primitive_i8]   = string_table_canonicalize(string_table, "i8",   2);
+    names[primitive_i16]  = string_table_canonicalize(string_table, "i16",  3);
+    names[primitive_i32]  = string_table_canonicalize(string_table, "i32",  3);
+    names[primitive_i64]  = string_table_canonicalize(string_table, "i64",  3);
 }
 
-u8* type_name(Type t) {
-    switch (t) {
-        case type_invalid: return "<invalid type>";
-        case type_unsolidified_int: return "<int>";
-        case type_u8:  return "u8";
-        case type_u16: return "u16";
-        case type_u32: return "u32";
-        case type_u64: return "u64";
-        case type_i8:  return "i8";
-        case type_i16: return "i16";
-        case type_i32: return "i32";
-        case type_i64: return "i64";
-        default: assert(false); return null;
-    }
-}
+u8* primitive_name(Primitive primitive) {
+    switch (primitive) {
+        case primitive_invalid: return "<invalid>";
+        case primitive_void: return "void";
+        case primitive_pointer: return "pointer";
+        case primitive_unsolidified_int: return "<int>";
 
-bool type_can_solidify_to(Type type) {
-    switch (type) {
-        case type_u8:  return true;
-        case type_u16: return true;
-        case type_u32: return true;
-        case type_u64: return true;
-        case type_i8:  return true;
-        case type_i16: return true;
-        case type_i32: return true;
-        case type_i64: return true;
+        case primitive_u8:  return "u8";
+        case primitive_u16: return "u16";
+        case primitive_u32: return "u32";
+        case primitive_u64: return "u64";
+        case primitive_i8:  return "i8";
+        case primitive_i16: return "i16";
+        case primitive_i32: return "i32";
+        case primitive_i64: return "i64";
 
-        case type_invalid: return false;
-        case type_unsolidified_int: return false;
         default: assert(false);
     }
-    return false;
+
+    return null;
 }
 
-bool type_is_signed(Type type) {
-    switch (type) {
-        case type_u8:  return false;
-        case type_u16: return false;
-        case type_u32: return false;
-        case type_u64: return false;
-        case type_i8:  return true;
-        case type_i16: return true;
-        case type_i32: return true;
-        case type_i64: return true;
+u8 primitive_size_of(Primitive primitive) {
+    switch (primitive) {
+        case primitive_u8:  return 1;
+        case primitive_u16: return 2;
+        case primitive_u32: return 4;
+        case primitive_u64: return 8;
+        case primitive_i8:  return 1;
+        case primitive_i16: return 2;
+        case primitive_i32: return 4;
+        case primitive_i64: return 8;
 
-        case type_invalid: return false;
-        case type_unsolidified_int: return false;
-        default: assert(false);
-    }
-    return false;
-}
-
-u8 type_size_of(Type type) {
-    switch (type) {
-        case type_u8:  return 1;
-        case type_u16: return 2;
-        case type_u32: return 4;
-        case type_u64: return 8;
-        case type_i8:  return 1;
-        case type_i16: return 2;
-        case type_i32: return 4;
-        case type_i64: return 8;
-
-        case type_invalid: return 0;
-        case type_unsolidified_int: return 0;
+        case primitive_void: return 0;
+        case primitive_pointer: return 8;
+        case primitive_invalid: return 0;
+        case primitive_unsolidified_int: return 0;
         default: assert(false); return 0;
     }
 }
@@ -717,14 +695,13 @@ u64 SIZE_MASKS[9] = {
     0x00ffffffffffffff,
     0xffffffffffffffff
 };
-
-u64 type_mask(u8 size) {
+u64 size_mask(u8 size) {
     assert(size <= 8);
     return SIZE_MASKS[size];
 }
 
 
-enum {
+enum Binary_Op {
     binary_add,
     binary_sub,
     binary_mul,
@@ -732,18 +709,23 @@ enum {
 };
 
 #define EXPR_FLAG_UNRESOLVED 0x01
+#define EXPR_FLAG_ASSIGNABLE 0x02
+
+enum Expr_Kind {
+    expr_variable,
+    expr_literal,
+    expr_binary,
+    expr_call,
+    expr_cast,
+    expr_address_of,
+    expr_dereference,
+};
 
 typedef struct Expr Expr;
 struct Expr {
-    enum {
-        expr_variable,
-        expr_literal,
-        expr_binary,
-        expr_call,
-    } kind;
+    u8 kind;
     u8 flags;
-
-    Type type;
+    u32 type_index;
 
     union {
         union { u32 index; u32 unresolved_name; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
@@ -756,6 +738,10 @@ struct Expr {
             Expr** params; // Pointer to an array of pointers to expressions! (*[*Expr] as opposed to **[Expr])
             u32 param_count;
         } call;
+
+        Expr* cast_from;
+        Expr* dereference_from;
+        Expr* address_from;
     };
 
     File_Pos pos;
@@ -763,11 +749,13 @@ struct Expr {
 
 typedef struct Stmt {
     enum {
+        stmt_expr,
         stmt_assignment,
     } kind;
 
     union {
-        struct { u32 var; Expr* expr; } assignment;
+        Expr* expr;
+        struct { Expr* left; Expr* right; } assignment;
     };
 
     File_Pos pos;
@@ -797,19 +785,23 @@ u32 local_index(Local local) {
 }
 
 
-#define OP_KIND_BINARY_FLAG 0x80
 enum Op_Kind {
     op_end_of_function = 0,
     op_reset_temporaries,
 
     op_call,
-
+    op_cast,
+    
     // 'binary'
-    op_set = 0 | OP_KIND_BINARY_FLAG,
-    op_add = 1 | OP_KIND_BINARY_FLAG,
-    op_sub = 2 | OP_KIND_BINARY_FLAG,
-    op_mul = 3 | OP_KIND_BINARY_FLAG,
-    op_div = 4 | OP_KIND_BINARY_FLAG,
+    op_set,
+    op_add,
+    op_sub,
+    op_mul,
+    op_div,
+
+    op_read_pointer,
+    op_write_pointer,
+    op_address_of,
 };
 
 typedef struct Op_Call_Param {
@@ -830,7 +822,7 @@ typedef struct Op_Call_Param {
 // what needs to go into an 'Op'.
 typedef struct Op {
     u8 kind;
-    Type type;
+    u8 primitive;
         
     // NB (Morten, 07.04.18) In general, we rely on 'Op's being well formed. We have some assertions
     // to ensure that e.g. 'Local's are valid.
@@ -846,15 +838,19 @@ typedef struct Op {
             u32 func_index;
             Op_Call_Param* params;
         } call;
+
+        struct {
+            Local local;
+            u8 old_primitive;
+        } cast;
     };
 } Op;
-
 
 typedef struct Var {
     u32 name;
     u32 declared_before_stmt;
     File_Pos declaration_pos;
-    Type type;
+    u32 type_index;
 } Var;
 
 
@@ -869,7 +865,7 @@ typedef struct Func {
 
     Var* params; // pointer into 'vars'
     u32 param_count;
-    Type return_type;
+    u32 return_type_index;
 
     u64* literals;
     u32 literal_count;
@@ -938,7 +934,7 @@ typedef struct DynlibImport {
 
 
 #define REG_COUNT 4 // eax, ecx, edx, ebx
-#define REG_BAD 255
+#define REG_BAD U8_MAX
 
 enum Reg_Names {
     reg_rax = 0,
@@ -967,7 +963,7 @@ typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
 
     u8* string_table; // stretchy-buffer string table
-    u32 primitive_type_names[PRIMITIVE_TYPE_COUNT]; // indices to string table
+    u32 primitive_names[PRIMITIVE_COUNT]; // indices to string table
 
     // AST & intermediate representation
     Func* funcs; // stretchy-buffer
@@ -976,7 +972,12 @@ typedef struct Context {
     Stmt* tmp_stmts; // stretchy-buffer
     Var* tmp_vars; // stretchy-buffer
     u64* tmp_literals; // stretchy-buffer
-    Op* tmp_ops; // stretchy-buffer, linearized for of stmts
+    Op* tmp_ops; // stretchy-buffer, linearized from of stmts
+
+    // NB the first 'PRIMITIVE_COUNT' elements are the respective primitives, which
+    // simplifies refering directly to primitives: A type index of 'primitive_i64' points
+    // to 'primitive_i64'
+    u8* type_buf; // stretchy-buffer of chained 'Primitive's
 
     // Low level representation
     u8* bytecode;
@@ -994,7 +995,97 @@ typedef struct Context {
     u32 time; // incremented with each emitted instruction
 } Context;
 
-void token_print(u8* string_table, Token* t) {
+
+bool type_cmp(Context* context, u32 a, u32 b) {
+    while (1) {
+        Primitive a_primitive = context->type_buf[a];
+        Primitive b_primitive = context->type_buf[b];
+        a += 1;
+        b += 1;
+
+        if (a_primitive != b_primitive) {
+            return false;
+        }
+
+        bool a_ptr = a_primitive == primitive_pointer;
+        bool b_ptr = b_primitive == primitive_pointer;
+
+        if (!a_ptr && !b_ptr) {
+            break;
+        } else if (a_ptr && b_ptr) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+u64 type_size_mask(Context* context, u32 type_index) {
+    u8 size;
+
+    if (type_index < PRIMITIVE_COUNT) {
+        size = primitive_size_of(type_index);
+    } else {
+        size = primitive_size_of(context->type_buf[type_index]);
+    }
+
+    return size_mask(size);
+}
+
+u32 type_duplicate(Context* context, u32 type_index) {
+    u32 new = buf_length(context->type_buf);
+
+    u32 i = type_index;
+    while (1) {
+        Primitive p = context->type_buf[i];
+        i += 1;
+
+        buf_push(context->type_buf, p);
+
+        if (p != primitive_pointer) {
+            break;
+        }
+    }
+
+    return new;
+}
+
+
+void print_type(Context* context, u32 type_index) {
+    u32 i = type_index;
+    while (1) {
+        Primitive p = context->type_buf[i];
+        i += 1;
+
+        u8* name;
+        switch (p) {
+            case primitive_invalid:          name = "<invalid>"; break;
+            case primitive_void:             name = "void"; break;
+            case primitive_pointer:          name = "'"; break;
+            case primitive_unsolidified_int: name = "<int>"; break;
+
+            case primitive_u8:  name = "u8"; break;
+            case primitive_u16: name = "u16"; break;
+            case primitive_u32: name = "u32"; break;
+            case primitive_u64: name = "u64"; break;
+            case primitive_i8:  name = "i8"; break;
+            case primitive_i16: name = "i16"; break;
+            case primitive_i32: name = "i32"; break;
+            case primitive_i64: name = "i64"; break;
+
+            default: assert(false);
+        }
+        printf(name);
+
+        if (p != primitive_pointer) {
+            break;
+        }
+    }
+}
+
+void print_token(u8* string_table, Token* t) {
     switch (t->kind) {
         case token_end_of_stream: {
             printf("end of file");
@@ -1030,6 +1121,14 @@ void token_print(u8* string_table, Token* t) {
             printf("->");
         } break;
 
+        case token_tick: {
+            printf("'");
+        } break;
+
+        case token_at: {
+            printf("@");
+        } break;
+
         case token_keyword_var: {
             printf("keyword var");
         } break;
@@ -1041,7 +1140,7 @@ void token_print(u8* string_table, Token* t) {
     }
 }
 
-void expr_print(Context* context, Func* func, Expr* expr) {
+void print_expr(Context* context, Func* func, Expr* expr) {
     switch (expr->kind) {
         case expr_variable: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
@@ -1060,7 +1159,7 @@ void expr_print(Context* context, Func* func, Expr* expr) {
 
         case expr_binary: {
             printf("(");
-            expr_print(context, func, expr->binary.left);
+            print_expr(context, func, expr->binary.left);
             switch (expr->binary.op) {
                 case binary_add: printf(" + "); break;
                 case binary_sub: printf(" - "); break;
@@ -1068,7 +1167,7 @@ void expr_print(Context* context, Func* func, Expr* expr) {
                 case binary_div: printf(" / "); break;
                 default: assert(false);
             }
-            expr_print(context, func, expr->binary.right);
+            print_expr(context, func, expr->binary.right);
             printf(")");
         } break;
 
@@ -1085,29 +1184,51 @@ void expr_print(Context* context, Func* func, Expr* expr) {
             printf("(");
             for (u32 i = 0; i < expr->call.param_count; i += 1) {
                 if (i != 0) printf(", ");
-                expr_print(context, func, expr->call.params[i]);
+                print_expr(context, func, expr->call.params[i]);
             }
             printf(")");
         } break;
 
-        default: assert(false);
-    }
-}
+        case expr_cast: {
+            print_type(context, expr->type_index);
+            printf("(");
+            print_expr(context, func, expr->cast_from);
+            printf(")");
+        } break;
 
-void stmt_print(Context* context, Func* func, Stmt* stmt) {
-    switch (stmt->kind) {
-        case stmt_assignment: {
-            Var* var = &func->vars[stmt->assignment.var];
-            u8* name = string_table_access(context->string_table, var->name);
-            printf("%s = ", name);
-            expr_print(context, func, stmt->assignment.expr);
+        case expr_address_of: {
+            printf("@");
+            print_expr(context, func, expr->address_from);
+        } break;
+
+        case expr_dereference: {
+            printf("'");
+            print_expr(context, func, expr->dereference_from);
         } break;
 
         default: assert(false);
     }
 }
 
-void local_print(Context* context, Func* func, Local local) {
+void print_stmt(Context* context, Func* func, Stmt* stmt) {
+    switch (stmt->kind) {
+        case stmt_assignment: {
+            print_expr(context, func, stmt->assignment.left);
+            printf(" = ");
+            print_expr(context, func, stmt->assignment.right);
+            printf(";");
+        } break;
+
+        case stmt_expr: {
+            print_expr(context, func, stmt->expr);
+            printf(";");
+        } break;
+
+        default: assert(false);
+    }
+}
+
+void print_local(Context* context, Func* func, Local local) {
     u32 index = local_index(local);
 
     switch (local_kind(local)) {
@@ -1129,40 +1250,57 @@ void local_print(Context* context, Func* func, Local local) {
     }
 }
 
-
-
-void op_print(Context* context, Func* func, Op* op) {
-    if (op->kind & OP_KIND_BINARY_FLAG) {
-        printf("(%s", type_name(op->type));
-
-        switch (op->kind) {
-            case op_set: printf(") set "); break;
-            case op_add: printf(") add "); break;
-            case op_sub: printf(") sub "); break;
-            case op_mul: printf(") mul "); break;
-            case op_div: printf(") div "); break;
-            default: assert(false);
-        }
-
-        local_print(context, func, op->binary.target);
-        printf(", ");
-        local_print(context, func, op->binary.source);
-    } else switch (op->kind) {
+void print_op(Context* context, Func* func, Op* op) {
+    switch (op->kind) {
         case op_reset_temporaries: {
             printf("reset temporaries");
+        } break;
+
+        case op_set:
+        case op_add:
+        case op_sub:
+        case op_mul:
+        case op_div:
+        case op_read_pointer:
+        case op_write_pointer:
+        {
+            u8* op_name;
+            switch (op->kind) {
+                case op_set: op_name = "set"; break;
+                case op_add: op_name = "add"; break;
+                case op_sub: op_name = "sub"; break;
+                case op_mul: op_name = "mul"; break;
+                case op_div: op_name = "div"; break;
+                case op_read_pointer:  op_name = "read pointer"; break;
+                case op_write_pointer: op_name = "write pointer"; break;
+                default: assert(false);
+            }
+
+            printf("(%s) %s ", primitive_name(op->primitive), op_name);
+
+            print_local(context, func, op->binary.target);
+            printf(", ");
+            print_local(context, func, op->binary.source);
+        } break;
+
+        case op_address_of: {
+            printf("address of ");
+            print_local(context, func, op->binary.target);
+            printf(", ");
+            print_local(context, func, op->binary.source);
         } break;
 
         case op_call: {
             Func* callee = context->funcs + op->call.func_index;
             u8* name = string_table_access(context->string_table, callee->name);
 
-            printf("(%s) set ", type_name(op->type));
-            local_print(context, func, op->call.target);
+            printf("(%s) set ", primitive_name(op->primitive));
+            print_local(context, func, op->call.target);
             printf(", (call %s with ", name);
 
             for (u32 p = 0; p < callee->param_count; p += 1) {
                 if (p != 0) printf(", ");
-                local_print(context, func, op->call.params[p].local);
+                print_local(context, func, op->call.params[p].local);
                 printf(" (%u)", (u64) (op->call.params[p].size*8));
             }
 
@@ -1170,9 +1308,16 @@ void op_print(Context* context, Func* func, Op* op) {
 
         } break;
 
+        case op_cast: {
+            printf("cast ");
+            print_local(context, func, op->cast.local);
+            printf(" (from %s to %s)", primitive_name(op->cast.old_primitive), primitive_name(op->primitive));
+        } break;
+
         default: assert(false);
     }
 }
+
 
 u32 find_var(Func* func, u32 name) {
     for (u32 i = 0; i < func->var_count; i += 1) {
@@ -1193,28 +1338,68 @@ u32 find_func(Context* context, u32 name) {
     return U32_MAX;
 }
 
-Type parse_type(Context* context, Token* t, u32* length) {
-    if (t->kind != token_identifier) { goto invalid; }
+u32 parse_type(Context* context, Token* t, u32 length) {
+    u32 start = buf_length(context->type_buf);
+    u32 type_length = 0;
 
-    Type id = type_invalid;
-    for (u32 i = 0; i < PRIMITIVE_TYPE_COUNT; i += 1) {
-        if (context->primitive_type_names[i] == t->identifier_string_table_index) {
-            id = i;
+    bool valid = true;
+    bool done = false;
+
+    for (u32 i = 0; i < length; i += 1) {
+        if (done) {
+            printf("Unexpected token after type ");
+            print_token(context->string_table, &t[i]);
+            printf(" (Line %u)\n", t[i].pos.line);
+
+            valid = false;
+            break;
+        }
+
+        switch (t[i].kind) {
+            case token_identifier: {
+                Primitive primitive = primitive_invalid;
+                for (u32 p = 0; p < PRIMITIVE_COUNT; p += 1) {
+                    if (context->primitive_names[p] == t[i].identifier_string_table_index) {
+                        primitive = p;
+                        break;
+                    }
+                }
+
+                if (primitive != primitive_invalid) {
+                    if (type_length == 0) {
+                        start = primitive; // because we have entries for all primitives at start of context->type_buf
+                    } else {
+                        buf_push(context->type_buf, primitive);
+                        type_length += 1;
+                    }
+
+                    done = true;
+                } else {
+                    valid = false;
+                }
+            } break;
+
+            case token_tick: {
+                buf_push(context->type_buf, primitive_pointer);
+                type_length += 1;
+            } break;
+
+            default: break;
+        }
+
+        if (!valid) {
             break;
         }
     }
 
-    if (id == type_invalid) { goto invalid; }
-
-    *length = 1;
-    return id;
-
-    invalid:
-    printf("Expected type, but got ");
-    token_print(context->string_table, t);
-    printf(" (Line %u)\n", (u64) t->pos.line);
-    *length = 1;
-    return type_invalid;
+    if (valid) {
+        return start;
+    } else {
+        printf("Expected type, but got ");
+        print_token(context->string_table, t);
+        printf(" (Line %u)\n", (u64) t->pos.line);
+        return U32_MAX;
+    }
 }
 
 bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u32 length) {
@@ -1228,7 +1413,7 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
         u32 length = end - start;
         if (length < 1 || t[start].kind != token_identifier) {
             printf("Expected parameter name, but got ");
-            token_print(context->string_table, &t[start]);
+            print_token(context->string_table, &t[start]);
             printf(" (Line %u)\n", (u64) t[start].pos.line);
             return false;
         }
@@ -1244,29 +1429,21 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
             u8* name = string_table_access(context->string_table, name_index);
             printf("Expected ': type' after parameter '%s', but got ", name);
             for (u32 j = start + 1;  j < end; j += 1) {
-                token_print(context->string_table, &t[j]);
+                print_token(context->string_table, &t[j]);
             }
             printf(" (Line %u)\n", (u64) t[start + 1].pos.line);
             return false;
         }
 
-        u32 type_length = 0;
-        Type type = parse_type(context, &t[start + 2], &type_length);
-        if (type == type_invalid) {
-            return false;
-        }
-
-        if (type_length != length - 2) {
-            printf("Unexpected token after type: ");
-            token_print(context->string_table, &t[start + 2 + type_length]);
-            printf(" (Line %u)\n", (u64) t[start + 2 + type_length].pos.line);
+        u32 type_index = parse_type(context, &t[start + 2], length - 2);
+        if (type_index == U32_MAX) {
             return false;
         }
 
         Var var = {0};
         var.name = name_index;
         var.declaration_pos = t->pos;
-        var.type = type;
+        var.type_index = type_index;
         buf_push(context->tmp_vars, var);
         func->param_count += 1;
     }
@@ -1312,6 +1489,18 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
     if (length == 0) {
         printf("Expected expression but found nothing (Line %u)\n", (u64) t->pos.line);
         return null;
+    }
+
+    bool brackets_enclosed =
+        t[0].kind == token_bracket &&
+        t[0].bracket.kind == BRACKET_ROUND_OPEN &&
+        t[0].bracket.offset_to_matching == length - 1;
+    if (brackets_enclosed) {
+        assert(
+            t[length - 1].kind == token_bracket &&
+            t[length - 1].bracket.kind == BRACKET_ROUND_CLOSE
+        );
+        return parse_expr(context, t + 1, length - 2);
     }
 
     u32 op_pos = U32_MAX;
@@ -1365,19 +1554,6 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
         }
     }
 
-    bool brackets_enclosed =
-        t[0].kind == token_bracket &&
-        t[0].bracket.kind == BRACKET_ROUND_OPEN &&
-        t[0].bracket.offset_to_matching == length - 1;
-    if (brackets_enclosed) {
-        assert(
-            t[length - 1].kind == token_bracket &&
-            t[length - 1].bracket.kind == BRACKET_ROUND_CLOSE
-        );
-        return parse_expr(context, t + 1, length - 2);
-    }
-
-
     // We didnt find an operator
     if (op_pos == U32_MAX) {
         switch (t->kind) {
@@ -1386,7 +1562,7 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
                     printf("Unexpected token(s) after %u: ", t->literal_value);
                     for (u32 i = 1; i < length; i += 1) {
                         if (i > 1) printf(", ");
-                        token_print(context->string_table, &t[i]);
+                        print_token(context->string_table, &t[i]);
                     }
                     printf(" (Line %u)\n", (u64) t->pos.line);
                     return null;
@@ -1425,7 +1601,7 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
                         printf("Expected parentheses after function '%s', surounding arguments. Got the following tokens instead: ", name);
                         for (u32 i = 1; i < length; i += 1) {
                             if (i > 1) printf(", ");
-                            token_print(context->string_table, &t[i]);
+                            print_token(context->string_table, &t[i]);
                         }
                         printf(" (Starting on line %u)\n", (u64) t[1].pos.line);
                         return null;
@@ -1435,21 +1611,66 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
                         t[length - 1].bracket.kind == BRACKET_ROUND_CLOSE
                     );
 
-                    Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                    expr->kind = expr_call;
-                    expr->call.unresolved_name = t[0].identifier_string_table_index;
-                    expr->flags |= EXPR_FLAG_UNRESOLVED;
-                    expr->pos = t->pos;
+                    u32 name_index = t[0].identifier_string_table_index;
 
-                    bool result = parse_call_parameter_list(
-                        context, &t[2], length - 3,
-                        &expr->call.params,
-                        &expr->call.param_count
-                    );
-                    if (!result) return null;
+                    Primitive cast_primitive = primitive_invalid;
+                    for (u32 i = 0; i < PRIMITIVE_COUNT; i += 1) {
+                        if (context->primitive_names[i] == name_index) {
+                            cast_primitive = i;
+                            break;
+                        }
+                    }
 
-                    return expr;
+                    if (cast_primitive != primitive_invalid) {
+                        Expr* cast_from = parse_expr(context, t + 2, length - 3);
+                        if (cast_from == null) return null;
+
+                        Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
+                        expr->kind = expr_cast;
+                        expr->cast_from = cast_from;
+                        expr->pos = t->pos;
+                        expr->type_index = cast_primitive; // because we have entries for all primitives at start of context->type_buf
+                        return expr;
+
+                    } else { // Parse as a normal function call
+                        Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
+                        expr->kind = expr_call;
+                        expr->call.unresolved_name = name_index;
+                        expr->flags |= EXPR_FLAG_UNRESOLVED;
+                        expr->pos = t->pos;
+
+                        bool result = parse_call_parameter_list(
+                            context, &t[2], length - 3,
+                            &expr->call.params,
+                            &expr->call.param_count
+                        );
+                        if (!result) return null;
+
+                        return expr;
+                    }
                 }
+            } break;
+
+            case token_tick: {
+                Expr* sub_expr = parse_expr(context, t + 1, length - 1);
+                if (sub_expr == null) return null;
+
+                Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
+                expr->kind = expr_dereference;
+                expr->address_from = sub_expr;
+                expr->pos = t->pos;
+                return expr;
+            } break;
+
+            case token_at: {
+                Expr* sub_expr = parse_expr(context, t + 1, length - 1);
+                if (sub_expr == null) return null;
+
+                Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
+                expr->kind = expr_address_of;
+                expr->address_from = sub_expr;
+                expr->pos = t->pos;
+                return expr;
             } break;
 
             case token_operator:
@@ -1462,7 +1683,7 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
             case token_keyword_fn:
             {
                 printf("Expected literal or variable, but got ");
-                token_print(context->string_table, t);
+                print_token(context->string_table, t);
                 printf(" (Line %u)\n", (u64) t->pos.line);
                 return null;
             }
@@ -1520,12 +1741,19 @@ bool parse_function(Context* context, Token* t, u32* length) {
     t += 1;
     if (t->kind != token_identifier) {
         printf("Expected function name, but found ");
-        token_print(context->string_table, t);
+        print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
 
         return false;
     }
     u32 name_index = t->identifier_string_table_index;
+
+    buf_foreach (Func, func, context->funcs) {
+        if (func->name == name_index) {
+            u8* name = string_table_access(context->string_table, name_index);
+            printf("Second definition of function %s on line %u\n", name, (u64) declaration_pos.line);
+        }
+    }
 
 
     buf_clear(context->tmp_vars); // NB we will these while parsing, and then copy them into the arena
@@ -1548,7 +1776,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
     if (t->kind != token_bracket || t->bracket.kind != BRACKET_ROUND_OPEN) {
         u8* name = string_table_access(context->string_table, name_index);
         printf("Expected a open parenthesis '(' to after 'fn %s', but got ", name);
-        token_print(context->string_table, t);
+        print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
     }
@@ -1563,28 +1791,38 @@ bool parse_function(Context* context, Token* t, u32* length) {
 
     // Return type
     t += 1;
-    if (t->kind != token_arrow) {
-        // TODO Infer '-> void'. But we don't have a void type yet!
-        unimplemented();
-    } else {
-        t += 1;
 
-        u32 type_length = 0;
-        func->return_type = parse_type(context, t, &type_length);
-        if (func->return_type == type_invalid) {
+    Token* return_type_start = t;
+    while (t->kind != token_end_of_stream) {
+        if (t->kind == token_bracket && t->bracket.kind == BRACKET_CURLY_OPEN) {
+            break;
+        } else {
+            t += 1;
+        }
+    }
+    u32 return_type_length = (u32) (t - return_type_start);
+
+    if (return_type_length > 0) {
+        return_type_start += 1;
+        return_type_length -= 1;
+
+        u32 return_type_index = parse_type(context, return_type_start, return_type_length);
+        if (return_type_index == U32_MAX) {
             return false;
         }
 
-        t += type_length;
+        func->return_type_index = return_type_index;
+    } else {
+        func->return_type_index = primitive_void;
     }
 
-    context->tmp_vars[0].type = func->return_type;
+    context->tmp_vars[0].type_index = func->return_type_index;
 
     // Body
     if (t->kind != token_bracket || t->bracket.kind != BRACKET_CURLY_OPEN) {
         u8* name = string_table_access(context->string_table, name_index);
         printf("Expected an open curly brace '{' after 'fn %s ...', but found ", name);
-        token_print(context->string_table, t);
+        print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
     }
@@ -1618,7 +1856,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
             case token_keyword_var: {
                 if (stmt_length < 2 || body[stmt_start + 1].kind != token_identifier) {
                     printf("Expecetd identifier after 'var', but found ");
-                    token_print(context->string_table, &body[stmt_start + 1]);
+                    print_token(context->string_table, &body[stmt_start + 1]);
                     printf(" (Line %u)\n", (u64) body[stmt_start + 1].pos.line);
                     body_valid = false;
                     break;
@@ -1652,38 +1890,37 @@ bool parse_function(Context* context, Token* t, u32* length) {
                 if (stmt_length > 2 && body[stmt_start + 2].kind != token_colon) {
                     u8* name = string_table_access(context->string_table, name_index);
                     printf("Expected 'var %s: type', but got ", name);
-                    token_print(context->string_table, &body[stmt_start + 2]);
+                    print_token(context->string_table, &body[stmt_start + 2]);
                     printf(" (Line %u)\n", body[stmt_start].pos.line);
                     body_valid = false;
                     break;
                 }
 
-                u32 type_length = 0;
-                var->type = parse_type(context, &body[stmt_start + 3], &type_length);
+                u32 type_length = min(equals_position, stmt_length) - 3;
+                var->type_index = parse_type(context, &body[stmt_start + 3], type_length);
 
-                if (var->type == type_invalid) {
+                if (var->type_index == U32_MAX) {
                     body_valid = false;
                     break;
                 }
 
-                if (type_length + 3 != min(equals_position, stmt_length)) {
-                    printf("Unexpected token after type: ");
-                    token_print(context->string_table, &body[stmt_start + 3 + type_length]);
-                    printf(" (Line %u)\n", (u64) body[stmt_start + 3 + type_length].pos.line);
-                    return false;
-                }
-
                 if (equals_position != U32_MAX) {
-                    Expr* expr = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
-                    if (expr == null) {
+                    Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
+                    if (right == null) {
                         body_valid = false;
                         break;
                     }
 
+                    Expr* left = arena_insert(&context->arena, ((Expr) {0}));
+                    left->kind = expr_variable;
+                    left->variable.index = buf_length(context->tmp_vars) - 1;
+                    left->type_index = var->type_index;
+                    left->pos = body[stmt_start].pos;
+
                     Stmt stmt = {0};
                     stmt.kind = stmt_assignment;
-                    stmt.assignment.var = buf_length(context->tmp_vars) - 1;
-                    stmt.assignment.expr = expr;
+                    stmt.assignment.left = left;
+                    stmt.assignment.right = right;
                     stmt.pos = body[stmt_start].pos;
                     buf_push(context->tmp_stmts, stmt);
                 }
@@ -1696,53 +1933,36 @@ bool parse_function(Context* context, Token* t, u32* length) {
             case token_comma:
             case token_colon:
             case token_arrow:
+            case token_tick:
+            case token_at:
             {
-                if (stmt_length < 1 || body[stmt_start].kind != token_identifier) {
-                    printf("Expected identifier, but got ");
-                    token_print(context->string_table, &body[stmt_start]);
-                    printf(" (Line %u)\n", (u64) body[stmt_start].pos.line);
-                    body_valid = false;
-                    break;
-                }
+                Stmt stmt = {0};
+                stmt.pos = body[stmt_start].pos;
 
-                u32 name_index = body[stmt_start].identifier_string_table_index;
+                if (equals_position == U32_MAX) {
+                    Expr* expr = parse_expr(context, &body[stmt_start], stmt_length);
 
-                u32 var_index = U32_MAX;
-                for (u32 i = 0; i < buf_length(context->tmp_vars); i += 1) {
-                    if (context->tmp_vars[i].name == name_index) {
-                        var_index = i;
+                    if (expr == null) {
+                        body_valid = false;
                         break;
                     }
+
+                    stmt.kind = stmt_expr;
+                    stmt.expr = expr;
+                } else {
+                    Expr* left = parse_expr(context, &body[stmt_start], equals_position);
+                    Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
+
+                    if (left == null || right == null) {
+                        body_valid = false;
+                        break;
+                    }
+
+                    stmt.kind = stmt_assignment;
+                    stmt.assignment.left = left;
+                    stmt.assignment.right = right;
                 }
 
-                if (var_index == U32_MAX) {
-                    u8* name = string_table_access(context->string_table, name_index);
-                    printf(
-                        "Assignment to undeclared variable '%s' (Line %u)\n",
-                        name, (u64) body[stmt_start].pos.line
-                    );
-                    break;
-                }
-
-                if (equals_position != 1) {
-                    printf("Expected equals sign '=' following %s, but got ");
-                    token_print(context->string_table, &body[stmt_start + 1]);
-                    printf(" (Line %u)\n", (u64) body[stmt_start + 1].pos.line);
-                    body_valid = false;
-                    break;
-                }
-
-                Expr* expr = parse_expr(context, &body[stmt_start + 2], stmt_length - 2);
-                if (expr == null) {
-                    body_valid = false;
-                    break;
-                }
-
-                Stmt stmt = {0};
-                stmt.kind = stmt_assignment;
-                stmt.assignment.var = var_index;
-                stmt.assignment.expr = expr;
-                stmt.pos = body[stmt_start].pos;
                 buf_push(context->tmp_stmts, stmt);
             } break;
 
@@ -1753,11 +1973,6 @@ bool parse_function(Context* context, Token* t, u32* length) {
 
             case token_semicolon: assert(false);
             default: assert(false);
-        }
-
-        if (equals_position == U32_MAX) {
-            printf("Invalid statement, ");
-            continue;
         }
     }
 
@@ -1790,7 +2005,11 @@ bool build_ast(Context* context, u8* path) {
 
     u32 keyword_var = string_table_canonicalize(&context->string_table, "var", 3);
     u32 keyword_fn  = string_table_canonicalize(&context->string_table, "fn", 2);
-    init_primitive_type_names(context->primitive_type_names, &context->string_table);
+    init_primitive_names(context->primitive_names, &context->string_table);
+
+    for (u32 t = 0; t < PRIMITIVE_COUNT; t += 1) {
+        buf_push(context->type_buf, t);
+    }
 
     // Lex
     arena_stack_push(&context->stack); // pop at end of lexing
@@ -1980,6 +2199,15 @@ bool build_ast(Context* context, u8* path) {
             buf_push(tokens, ((Token) { token_semicolon, .pos = file_pos }));
         } break;
 
+        case '\'': {
+            i += 1;
+            buf_push(tokens, ((Token) { token_tick, .pos = file_pos }));
+        } break;
+        case '@': {
+            i += 1;
+            buf_push(tokens, ((Token) { token_at, .pos = file_pos }));
+        } break;
+
         case '\n':
         case '\r': {
             i += 1;
@@ -2018,7 +2246,7 @@ bool build_ast(Context* context, u8* path) {
     printf("%u tokens:\n", (u64) buf_length(tokens));
     for (Token* t = tokens; t->kind != token_end_of_stream; t += 1) {
         printf("  ");
-        token_print(string_table, t);
+        print_token(string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
     }
     */
@@ -2040,9 +2268,11 @@ bool build_ast(Context* context, u8* path) {
         case token_comma:
         case token_colon:
         case token_keyword_var:
+        case token_tick:
+        case token_at:
         {
             printf("Found invalid token at global scope: ");
-            token_print(context->string_table, t);
+            print_token(context->string_table, t);
             printf(" (Line %u)\n", (u64) t->pos.line);
 
             t += 1;
@@ -2064,23 +2294,26 @@ bool build_ast(Context* context, u8* path) {
     }
 }
 
-bool expr_find_types(Context* context, Func* func, u32 stmt, Expr* expr, Type solidify_to) {
+bool expr_find_types(Context* context, Func* func, u32 stmt, Expr* expr, u32 solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
-            if (type_can_solidify_to(solidify_to)) {
-                expr->type = solidify_to;
+            Primitive solidify_to_primitive = context->type_buf[solidify_to];
+            bool can_solidify = solidify_to_primitive >= primitive_u8 && solidify_to_primitive <= primitive_i64;
 
-                u64 mask = type_mask(type_size_of(expr->type));
+            if (can_solidify) {
+                expr->type_index = solidify_to_primitive;
+
+                u64 mask = size_mask(primitive_size_of(solidify_to_primitive));
                 u64 value = func->literals[expr->literal_index];
 
                 if (value != (value & mask)) {
                     printf(
                         "Warning: Literal %u won't fit fully into a %s and will be masked! (Line %u)\n",
-                        (u64) value, type_name(expr->type), (u64) expr->pos.line
+                        (u64) value, primitive_name(solidify_to_primitive), (u64) expr->pos.line
                     );
                 }
             } else {
-                expr->type = type_unsolidified_int;
+                expr->type_index = primitive_unsolidified_int;
             }
         } break;
 
@@ -2111,28 +2344,41 @@ bool expr_find_types(Context* context, Func* func, u32 stmt, Expr* expr, Type so
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            expr->type = func->vars[expr->variable.index].type;
+            expr->type_index = func->vars[expr->variable.index].type_index;
+
+            expr->flags |= EXPR_FLAG_ASSIGNABLE;
         } break;
 
         case expr_binary: {
             if (!expr_find_types(context, func, stmt, expr->binary.left, solidify_to))  return false;
             if (!expr_find_types(context, func, stmt, expr->binary.right, solidify_to)) return false;
 
-            assert(expr->binary.left->type != type_unsolidified_int);
-            assert(expr->binary.left->type != type_unsolidified_int);
+            assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
+            assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
 
-            if (expr->binary.left->type != expr->binary.right->type) {
-                printf(
-                    "Types don't match: %s vs %s (Line %u)\n",
-                    type_name(expr->binary.left->type),
-                    type_name(expr->binary.right->type),
-                    (u64) expr->pos.line
-                );
+            // We take one shot at matching the types to each other by chaning what we try solidifying to
+            if (!type_cmp(context, expr->binary.left->type_index, expr->binary.right->type_index)) {
+                bool left_strong = context->type_buf[expr->binary.left->type_index] != solidify_to;
+                bool right_strong = context->type_buf[expr->binary.right->type_index] != solidify_to;
 
-                expr->type = type_invalid;
+                if (left_strong) {
+                    assert(expr_find_types(context, func, stmt, expr->binary.right, expr->binary.left->type_index));
+                } else if (right_strong) {
+                    assert(expr_find_types(context, func, stmt, expr->binary.left, expr->binary.right->type_index));
+                }
+            }
+
+            if (!type_cmp(context, expr->binary.left->type_index, expr->binary.right->type_index)) {
+                printf("Types don't match: ");
+                print_type(context, expr->binary.left->type_index);
+                printf(" vs ");
+                print_type(context, expr->binary.right->type_index);
+                printf(" (Line %u)\n", (u64) expr->pos.line);
+
+                expr->type_index = primitive_invalid;
                 return false;
             } else {
-                expr->type = expr->binary.left->type;
+                expr->type_index = expr->binary.left->type_index;
             }
         } break;
 
@@ -2150,7 +2396,7 @@ bool expr_find_types(Context* context, Func* func, u32 stmt, Expr* expr, Type so
             }
 
             Func* callee = &context->funcs[expr->call.func_index];
-            expr->type = callee->return_type;
+            expr->type_index = callee->return_type_index;
 
             if (expr->call.param_count != callee->param_count) {
                 u8* name = string_table_access(context->string_table, callee->name);
@@ -2162,25 +2408,66 @@ bool expr_find_types(Context* context, Func* func, u32 stmt, Expr* expr, Type so
             }
 
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
-                Type expected = callee->params[p].type;
+                u32 expected_type_index = callee->params[p].type_index;
 
-                if (!expr_find_types(context, func, stmt, expr->call.params[p], expected)) {
+                if (!expr_find_types(context, func, stmt, expr->call.params[p], expected_type_index)) {
                     return false;
                 }
 
-                Type actual = expr->call.params[p]->type;
-                if (expected != actual) {
+                u32 actual_type_index = expr->call.params[p]->type_index;
+                if (!type_cmp(context, expected_type_index, actual_type_index)) {
                     u8* func_name = string_table_access(context->string_table, callee->name);
-                    printf(
-                        "Invalid type for parameter %u to %s: Expected %s but got %s (Line %u)\n",
-                        (u64) (p + 1), func_name,
-                        type_name(expected), type_name(actual),
-                        (u64) expr->pos.line
-                    );
+                    printf("Invalid type for parameter %u to %s: Expected ", (u64) (p + 1), func_name);
+                    print_type(context, expected_type_index);
+                    printf(" but got ");
+                    print_type(context, actual_type_index);
+                    printf(" (Line %u)\n", (u64) expr->pos.line);
 
                     return false;
                 }
             }
+        } break;
+
+        case expr_cast: {
+            Primitive primitive = context->type_buf[expr->type_index];
+            assert(primitive >= primitive_u8 && primitive <= primitive_i64);
+            expr_find_types(context, func, stmt, expr->cast_from, expr->type_index);
+        } break;
+
+        case expr_address_of: {
+            if (!expr_find_types(context, func, stmt, expr->address_from, primitive_invalid)) {
+                return false;
+            }
+
+            if (!(expr->address_from->flags & EXPR_FLAG_ASSIGNABLE)) {
+                printf("Can't take address of ");
+                print_expr(context, func, expr->address_from);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
+
+            expr->type_index = buf_length(context->type_buf);
+            buf_push(context->type_buf, primitive_pointer);
+            u32 duped = type_duplicate(context, expr->address_from->type_index);
+            assert(duped == expr->type_index + 1);
+        } break;
+
+        case expr_dereference: {
+            if (!expr_find_types(context, func, stmt, expr->dereference_from, primitive_invalid)) {
+                return false;
+            }
+
+            u8 child_primitive = context->type_buf[expr->dereference_from->type_index];
+            if (child_primitive != primitive_pointer) {
+                printf("Can't dereference non-pointer ");
+                print_expr(context, func, expr->dereference_from);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
+
+            expr->type_index = expr->dereference_from->type_index + 1;
+
+            expr->flags |= EXPR_FLAG_ASSIGNABLE;
         } break;
 
         default: assert(false);
@@ -2199,19 +2486,41 @@ bool typecheck(Context* context) {
             Stmt* stmt = func->stmts + i;
             switch (stmt->kind) {
                 case stmt_assignment: {
-                    Var* var = &func->vars[stmt->assignment.var];
-                    Expr* expr = stmt->assignment.expr;
-
-                    bool left = true;
-                    bool right = expr_find_types(context, func, i, expr, var->type);
-                    if (!(left && right)) { valid = false; break; }
-
-                    if (var->type != stmt->assignment.expr->type) {
-                        printf(
-                            "Types on left and right side of assignment don't match: %s vs %s (Line %u)\n",
-                            type_name(var->type), type_name(stmt->assignment.expr->type), (u64) stmt->pos.line
-                        );
+                    if (!expr_find_types(context, func, i, stmt->assignment.left, primitive_invalid)) {
                         valid = false;
+                        break;
+                    }
+                    u32 left_type_index = stmt->assignment.left->type_index;
+
+                    if (!expr_find_types(context, func, i, stmt->assignment.right, left_type_index)) {
+                        valid = false;
+                        break;
+                    }
+                    u32 right_type_index = stmt->assignment.right->type_index;
+
+                    if (!type_cmp(context, left_type_index, right_type_index)) {
+                        printf("Types on left and right side of assignment don't match: ");
+                        print_type(context, left_type_index);
+                        printf(" vs ");
+                        print_type(context, right_type_index);
+                        printf(" (Line %u)\n", (u64) stmt->pos.line);
+                        valid = false;
+                        break;
+                    }
+
+                    if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
+                        printf("Can't assign to left hand side: ");
+                        print_expr(context, func, stmt->assignment.left);
+                        printf(" (Line %u)\n", (u64) stmt->pos.line);
+                        valid = false;
+                        break;
+                    }
+                } break;
+
+                case stmt_expr: {
+                    if (!expr_find_types(context, func, i, stmt->expr, primitive_invalid)) {
+                        valid = false;
+                        break;
                     }
                 } break;
 
@@ -2224,14 +2533,13 @@ bool typecheck(Context* context) {
 }
 
 
-
 void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
     assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
     switch (expr->kind) {
         case expr_variable: {
             Op op = {0};
-            op.type = expr->type;
+            op.primitive = context->type_buf[expr->type_index];
             op.kind = op_set;
             op.binary.target = new_local(local_temporary, tmp);
             op.binary.source = new_local(local_variable, expr->variable.index);
@@ -2240,7 +2548,7 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
 
         case expr_literal: {
             Op op = {0};
-            op.type = expr->type;
+            op.primitive = context->type_buf[expr->type_index];
             op.kind = op_set;
             op.binary.target = new_local(local_temporary, tmp);
             op.binary.source = new_local(local_literal, expr->literal_index);
@@ -2251,12 +2559,9 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
             expr_linearize_recursive(context, expr->binary.left, tmp);
 
             Op op = {0};
-            op.type = expr->type;
+            op.primitive = context->type_buf[expr->type_index];
             op.binary.target = new_local(local_temporary, tmp);
 
-            bool right_may_be_literal =
-                (expr->binary.op == binary_add || expr->binary.op == binary_sub) &&
-                type_size_of(expr->type) < 4;
 
             switch (expr->binary.op) {
                 case binary_add: op.kind = op_add; break;
@@ -2266,30 +2571,35 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
                 default: assert(false);
             }
 
-            // The `expr_binary` case is the fallthrough case. This case works for all kinds of
-            // expressions. We handle some expressions differently though, which results in
-            // less temporaries allocated.
-            if (right_may_be_literal) {
-                switch (expr->binary.right->kind) {
-                    case expr_literal: {
+            bool compute_right_in_tmp = !(
+                (expr->binary.op == binary_add || expr->binary.op == binary_sub) &&
+                primitive_size_of(op.primitive) <= 4
+            );
+
+            switch (expr->binary.right->kind) {
+                case expr_literal: {
+                    if (!compute_right_in_tmp) {
                         op.binary.source = new_local(local_literal, expr->binary.right->literal_index);
-                    } break;
-                    case expr_variable: {
-                        op.binary.source = new_local(local_variable, expr->binary.right->variable.index);
-                    } break;
+                    }
+                } break;
 
-                    // for more complex expression kinds
-                    case expr_binary:
-                    case expr_call:
-                    {
-                        right_may_be_literal = false; // oof, messy control flow
-                    } break;
+                case expr_variable: {
+                    op.binary.source = new_local(local_variable, expr->binary.right->variable.index);
+                } break;
 
-                    default: assert(false);
-                }
+                case expr_binary:
+                case expr_call:
+                case expr_cast:
+                case expr_address_of:
+                case expr_dereference:
+                {
+                    compute_right_in_tmp = true; // oof, messy control flow
+                } break;
+
+                default: assert(false);
             }
 
-            if (!right_may_be_literal) {
+            if (compute_right_in_tmp) {
                 expr_linearize_recursive(context, expr->binary.right, tmp + 1);
                 op.binary.source = new_local(local_temporary, tmp + 1);
             }
@@ -2305,7 +2615,7 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
                 Expr* param = expr->call.params[p];
 
-                call_params[p].size = type_size_of(param->type);
+                call_params[p].size = primitive_size_of(context->type_buf[param->type_index]);
 
                 switch (param->kind)  {
                     case expr_literal: {
@@ -2318,6 +2628,9 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
 
                     case expr_binary:
                     case expr_call:
+                    case expr_cast:
+                    case expr_address_of:
+                    case expr_dereference:
                     {
                         call_params[p].local = new_local(local_temporary, tmp);
                         expr_linearize_recursive(context, param, tmp);
@@ -2330,10 +2643,68 @@ void expr_linearize_recursive(Context* context, Expr* expr, u32 tmp) {
 
             Op op = {0};
             op.kind = op_call;
-            op.type = expr->type;
+            op.primitive = context->type_buf[expr->type_index];
             op.call.func_index = expr->call.func_index;
             op.call.target = new_local(local_temporary, result_tmp);
             op.call.params = call_params;
+            buf_push(context->tmp_ops, op);
+        } break;
+
+        case expr_cast: {
+            expr_linearize_recursive(context, expr->cast_from, tmp);
+
+            if (!type_cmp(context, expr->type_index, expr->cast_from->type_index)) {
+                Op op = {0};
+                op.kind = op_cast;
+                op.primitive = context->type_buf[expr->type_index];
+                op.cast.local = new_local(local_temporary, tmp);
+                op.cast.old_primitive = context->type_buf[expr->cast_from->type_index];
+                buf_push(context->tmp_ops, op);
+            }
+        } break;
+
+        case expr_dereference: {
+            Local source;
+            switch (expr->dereference_from->kind) {
+                case expr_literal: assert(false); break;
+
+                case expr_variable: {
+                    source = new_local(local_variable, expr->dereference_from->variable.index);
+                } break;
+
+                case expr_binary:
+                case expr_call:
+                case expr_cast:
+                case expr_address_of:
+                case expr_dereference:
+                {
+                    expr_linearize_recursive(context, expr->dereference_from, tmp + 1);
+                    source = new_local(local_temporary, tmp + 1);
+                } break;
+
+                default: assert(false);
+            }
+
+            Op op = {0};
+            op.kind = op_read_pointer;
+            op.primitive = context->type_buf[expr->type_index];
+            op.binary.source = source;
+            op.binary.target = new_local(local_temporary, tmp);
+            buf_push(context->tmp_ops, op);
+        } break;
+
+        case expr_address_of: {
+            u32 var_index;
+            if (expr->address_from->kind == expr_variable) {
+                var_index = expr->address_from->variable.index;
+            } else {
+                panic("Can only take address of variable!\n");
+            }
+
+            Op op = {0};
+            op.kind = op_address_of;
+            op.binary.source = new_local(local_variable, var_index);
+            op.binary.target = tmp;
             buf_push(context->tmp_ops, op);
         } break;
 
@@ -2352,145 +2723,86 @@ void local_decrement_temporary(Local* local, u32 fallback_var) {
     }
 }
 
-void linearize_assignment(Context* context, Func* func, u32 var, Expr* root) {
-    // TODO Optimize
-    // * Summing constants
-    // * Reorganizing trees so as many right branches are leaves. We only need temporaries if we
-    //   have non-leaf expressions on right branches (Draw it up, it makes sense!).
-    //
-    // TODO TODO TODO Cleanup
-    // There are three loops below which go through all locals we have, and do some checks/transforms on them. They are
-    // very repetitive, but probably tricky to refactor. Adding to complexity, one of them distinguishes between source
-    // and target locals :/
+void linearize_assignment(Context* context, Func* func, Expr* left, Expr* right) {
+    expr_linearize_recursive(context, right, 0);
 
-    u32 initial_op_count = buf_length(context->tmp_ops);
+    assert(left->flags & EXPR_FLAG_ASSIGNABLE);
+    switch (left->kind) {
+        case expr_dereference: {
+            expr_linearize_recursive(context, left->dereference_from, 1);
 
-    expr_linearize_recursive(context, root, 0);
+            Op op = {0};
+            op.kind = op_write_pointer;
+            op.primitive = context->type_buf[left->type_index];
+            op.binary.source = new_local(local_temporary, 0);
+            op.binary.target = new_local(local_temporary, 1);
+            buf_push(context->tmp_ops, op);
+        } break;
 
-    // Try replacing temporary $0 with our variable.
-    // If we write to $0 after reading from 'var' we need $0
-    bool need_temporary_0 = false;
-    bool has_assigned_to_0 = false;
-    for (u32 i = initial_op_count; i < buf_length(context->tmp_ops); i += 1) {
-        Op* op = context->tmp_ops + i;
+        case expr_variable: {
+            Op op = {0};
+            op.kind = op_set;
+            op.primitive = context->type_buf[left->type_index];
+            op.binary.source = new_local(local_temporary, 0);
+            op.binary.target = new_local(local_variable, left->variable.index);
+            buf_push(context->tmp_ops, op);
+        } break;
 
-        if (op->kind & OP_KIND_BINARY_FLAG) {
-            if (local_kind(op->binary.source) == local_variable && local_index(op->binary.source) == var) {
-                if (has_assigned_to_0) {
-                    need_temporary_0 = true;
-                    break;
-                }
-            }
-            if (local_kind(op->binary.target) == local_temporary && local_index(op->binary.target) == 0) {
-                has_assigned_to_0 = true;
-            }
-        } else switch (op->kind) {
+        case expr_literal:
+        case expr_binary:
+        case expr_call:
+        case expr_cast:
+        case expr_address_of:
+        {
+            panic("Invalid lexpr\n");
+        } break;
+
+        default: assert(false);
+    }
+}
+
+void find_max_temps(Context* context, Func* func) {
+    func->max_tmps = 0;
+
+    for (u32 i = 0; i < func->op_count; i += 1) {
+        Op* op = func->ops + i;
+        switch (op->kind) {
             case op_end_of_function: break;
             case op_reset_temporaries: break;
+
             case op_call: {
+                if (local_kind(op->call.target) == local_temporary) {
+                    func->max_tmps = max(func->max_tmps, local_index(op->call.target) + 1);
+                }
+
                 u32 param_count = context->funcs[op->call.func_index].param_count;
                 for (u32 p = 0; p < param_count; p += 1) {
-                    if (local_kind(op->call.params[p].local) == local_variable && local_index(op->call.params[p].local) == var) {
-                        if (has_assigned_to_0) {
-                            need_temporary_0 = true;
-                            break;
-                        }
+                    Local local = op->call.params[p].local;
+                    if (local_kind(local) == local_temporary) {
+                        func->max_tmps = max(func->max_tmps, local_index(local) + 1);
                     }
-                }
-
-                if (local_kind(op->call.target) == local_temporary && local_index(op->call.target) == 0) {
-                    has_assigned_to_0 = true;
                 }
             } break;
-            default: assert(false);
-        }
-    }
 
-    if (need_temporary_0) {
-        // Move the temporary $0 into our variable
-        Type type = func->vars[var].type;
-        buf_push(context->tmp_ops, ((Op) {
-            .kind = op_set,
-            .binary = {
-                .source = new_local(local_temporary, 0),
-                .target = new_local(local_variable, var),
-            },
-            .type = type,
-        }));
-    } else { 
-        for (u32 i = initial_op_count; i < buf_length(context->tmp_ops); i += 1) {
-            Op* op = context->tmp_ops + i;
+            case op_cast: {
+                if (local_kind(op->cast.local) == local_temporary) {
+                    func->max_tmps = max(func->max_tmps, local_index(op->cast.local) + 1);
+                }
+            } break;
 
-            if (op->kind & OP_KIND_BINARY_FLAG) {
-                local_decrement_temporary(&op->binary.source, var);
-                local_decrement_temporary(&op->binary.target, var);
-            } else switch (op->kind) {
-                case op_end_of_function: break;
-                case op_reset_temporaries: break;
-                case op_call: {
-                    u32 param_count = context->funcs[op->call.func_index].param_count;
-                    for (u32 p = 0; p < param_count; p += 1) {
-                        local_decrement_temporary(&op->call.params[p].local, var);
-                    }
-                    local_decrement_temporary(&op->call.target, var);
-                } break;
-                default: assert(false);
-            }
-        }
-
-        // By removing temporary $0 we might convert 'set $0, x' to 'set x, x' as the first instruction
-        Op* first = context->tmp_ops + initial_op_count;
-        if (first->kind == op_set && first->binary.source == first->binary.target) {
-            // NB this is buf_remove
-            for (u32 i = initial_op_count; i < buf_length(context->tmp_ops) - 1; i += 1) {
-                context->tmp_ops[i] = context->tmp_ops[i + 1];
-            }
-            buf_pop(context->tmp_ops);
-        }
-    }
-    
-    // Figure out how many temporaries we ended up using
-    bool used_temporaries = false;
-
-    for (u32 i = initial_op_count; i < buf_length(context->tmp_ops); i += 1) {
-        Op* op = &context->tmp_ops[i];
-        if (!(op->kind & OP_KIND_BINARY_FLAG)) continue;
-
-        for (u32 i = initial_op_count; i < buf_length(context->tmp_ops); i += 1) {
-            Op* op = context->tmp_ops + i;
-
-            if (op->kind & OP_KIND_BINARY_FLAG) {
+            case op_set: case op_add: case op_sub: case op_mul: case op_div:
+            case op_read_pointer: case op_write_pointer: case op_address_of:
+            {
                 if (local_kind(op->binary.source) == local_temporary) {
-                    used_temporaries = true;
-                    func->max_tmps = max(local_index(op->binary.source) + 1, func->max_tmps);
+                    func->max_tmps = max(func->max_tmps, local_index(op->binary.source) + 1);
                 }
                 if (local_kind(op->binary.target) == local_temporary) {
-                    used_temporaries = true;
-                    func->max_tmps = max(local_index(op->binary.target) + 1, func->max_tmps);
+                    func->max_tmps = max(func->max_tmps, local_index(op->binary.target) + 1);
                 }
-            } else switch (op->kind) {
-                case op_end_of_function: break;
-                case op_reset_temporaries: break;
-                case op_call: {
-                    u32 param_count = context->funcs[op->call.func_index].param_count;
-                    for (u32 p = 0; p < param_count; p += 1) {
-                        if (local_kind(op->call.params[p].local) == local_temporary) {
-                            used_temporaries = true;
-                            func->max_tmps = max(local_index(op->call.params[p].local) + 1, func->max_tmps);
-                        }
-                    }
-                    if (local_kind(op->call.target) == local_temporary) {
-                        used_temporaries = true;
-                        func->max_tmps = max(local_index(op->call.target) + 1, func->max_tmps);
-                    }
-                } break;
-                default: assert(false);
-            }
-        }
-    }
+            } break;
 
-    if (used_temporaries) {
-        buf_push(context->tmp_ops, ((Op) { op_reset_temporaries }));
+            default: assert(false);
+        }
     }
 }
 
@@ -2504,7 +2816,13 @@ void build_intermediate(Context* context) {
 
             switch (stmt->kind) {
                 case stmt_assignment: {
-                    linearize_assignment(context, func, stmt->assignment.var, stmt->assignment.expr);
+                    linearize_assignment(context, func, stmt->assignment.left, stmt->assignment.right);
+                    buf_push(context->tmp_ops, ((Op) { op_reset_temporaries }));
+                } break;
+
+                case stmt_expr: {
+                    expr_linearize_recursive(context, stmt->expr, 0);
+                    buf_push(context->tmp_ops, ((Op) { op_reset_temporaries }));
                 } break;
 
                 default: assert(false);
@@ -2519,12 +2837,14 @@ void build_intermediate(Context* context) {
 
         buf_clear(context->tmp_ops);
 
+        find_max_temps(context, func);
+
         #if 1
         u8* name = string_table_access(context->string_table, func->name);
         printf("%s has %u operations:\n", name, (u64) func->op_count);
         for (u32 i = 0; i < func->op_count; i += 1) {
             printf("  ");
-            op_print(context, func, &func->ops[i]);
+            print_op(context, func, &func->ops[i]);
             printf("\n");
         }
         #endif
@@ -2574,54 +2894,168 @@ void eval_ops(Context* context) {
             Op* op = frame->current_op;
             frame->current_op += 1;
 
-            if (op->kind & OP_KIND_BINARY_FLAG) {
-                u64* left;
-                switch (local_kind(op->binary.target)) {
-                    case local_temporary: left = frame->tmp_values + local_index(op->binary.target); break;
-                    case local_variable:  left = frame->var_values + local_index(op->binary.target); break;
-                    case local_literal: assert(false);
-                    default: assert(false);
-                }
-
-                u64 right;
-                switch (local_kind(op->binary.source)) {
-                    case local_temporary: {
-                        right = frame->tmp_values[local_index(op->binary.source)];
-                    } break;
-                    case local_variable: {
-                        right = frame->var_values[local_index(op->binary.source)];
-                    } break;
-
-                    case local_literal: {
-                        right = frame->func->literals[local_index(op->binary.source)];
-                    } break;
-
-                    default: assert(false);
-                }
-
-                u64 mask = type_mask(type_size_of(op->type));
-
-                *left &= mask;
-                right &= mask;
-
-                switch (op->kind) {
-                    case op_set: *left = right; break;
-                    case op_add: *left = *left + right; break;
-                    case op_sub: *left = *left - right; break;
-                    case op_mul: *left = *left * right; break;
-                    case op_div: *left = *left / right; break;
-
-                    default: assert(false);
-                }
-
-                *left &= mask;
-
-                // TODO we need different arithmetic here. Keep in mind we want signed integer overflow to be defined!
-                if (type_is_signed(op->type)) unimplemented();
-
-            // Other operators
-            } else switch (op->kind) {
+            switch (op->kind) {
                 case op_reset_temporaries: break;
+
+                case op_set: {
+                    u64* left;
+                    switch (local_kind(op->binary.target)) {
+                        case local_temporary: left = frame->tmp_values + local_index(op->binary.target); break;
+                        case local_variable:  left = frame->var_values + local_index(op->binary.target); break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    u64 right;
+                    switch (local_kind(op->binary.source)) {
+                        case local_temporary: right = frame->tmp_values[local_index(op->binary.source)]; break;
+                        case local_variable:  right = frame->var_values[local_index(op->binary.source)]; break;
+                        case local_literal:   right = frame->func->literals[local_index(op->binary.source)]; break;
+                        default: assert(false);
+                    }
+
+                    u64 mask = size_mask(primitive_size_of(op->primitive));
+                    *left = right & mask;
+                } break;
+
+                case op_add:
+                case op_sub:
+                case op_mul:
+                case op_div:
+                {
+                    u64* left;
+                    switch (local_kind(op->binary.target)) {
+                        case local_temporary: left = frame->tmp_values + local_index(op->binary.target); break;
+                        case local_variable:  left = frame->var_values + local_index(op->binary.target); break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    u64 right;
+                    switch (local_kind(op->binary.source)) {
+                        case local_temporary: right = frame->tmp_values[local_index(op->binary.source)]; break;
+                        case local_variable:  right = frame->var_values[local_index(op->binary.source)]; break;
+                        case local_literal:   right = frame->func->literals[local_index(op->binary.source)]; break;
+                        default: assert(false);
+                    }
+
+                    u64 mask = size_mask(primitive_size_of(op->primitive));
+
+                    *left &= mask;
+                    right &= mask;
+
+                    Primitive primitive = op->primitive;
+                    switch (primitive) {
+                        case primitive_invalid:
+                        case primitive_void:
+                        case primitive_pointer:
+                        case primitive_unsolidified_int:
+                        {
+                            panic("Can't do arithmetic on a %s\n", primitive_name(primitive));
+                        } break;
+
+                        case primitive_u8:
+                        case primitive_u16:
+                        case primitive_u32:
+                        case primitive_u64:
+                        {
+                            switch (op->kind) {
+                                case op_add: *left = *left + right; break;
+                                case op_sub: *left = *left - right; break;
+                                case op_mul: *left = *left * right; break;
+                                case op_div: *left = *left / right; break;
+
+                                default: assert(false);
+                            }
+                        } break;
+
+                        case primitive_i8:
+                        case primitive_i16:
+                        case primitive_i32:
+                        case primitive_i64:
+                        {
+                            unimplemented();
+                        } break;
+
+                        default: assert(false);
+                    }
+
+
+                    *left &= mask;
+                } break;
+
+                case op_read_pointer: {
+                    u64 pointer;
+                    switch (local_kind(op->binary.source)) {
+                        case local_temporary: pointer = frame->tmp_values[local_index(op->binary.source)]; break;
+                        case local_variable:  pointer = frame->var_values[local_index(op->binary.source)]; break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    u64* target;
+                    switch (local_kind(op->binary.target)) {
+                        case local_temporary: target = frame->tmp_values + local_index(op->binary.target); break;
+                        case local_variable:  target = frame->var_values + local_index(op->binary.target); break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    u64 mask = size_mask(primitive_size_of(op->primitive));
+
+                    *target = (*((u64*) pointer)) & mask;
+                } break;
+
+                case op_write_pointer: {
+                    u64 pointer;
+                    switch (local_kind(op->binary.target)) {
+                        case local_temporary: pointer = frame->tmp_values[local_index(op->binary.target)]; break;
+                        case local_variable:  pointer = frame->var_values[local_index(op->binary.target)]; break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    u64 source;
+                    switch (local_kind(op->binary.source)) {
+                        case local_temporary: source = frame->tmp_values[local_index(op->binary.source)]; break;
+                        case local_variable:  source = frame->var_values[local_index(op->binary.source)]; break;
+                        case local_literal:   source = frame->func->literals[local_index(op->binary.source)]; break;
+                        default: assert(false);
+                    }
+
+                    u8 size = primitive_size_of(op->primitive);
+                    u64 mask = size_mask(primitive_size_of(op->primitive));
+
+                    source = source & mask;
+
+                    switch (size) {
+                        case 1: *((u8*) pointer)  = (u8)  source; break;
+                        case 2: *((u16*) pointer) = (u16) source; break;
+                        case 4: *((u32*) pointer) = (u32) source; break;
+                        case 8: *((u64*) pointer) = (u64) source; break;
+                        default: assert(false);
+                    }
+                } break;
+
+                case op_address_of: {
+                    u64* target;
+                    switch (local_kind(op->binary.target)) {
+                        case local_temporary: target = frame->tmp_values + local_index(op->binary.target); break;
+                        case local_variable:  target = frame->var_values + local_index(op->binary.target); break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    u64* source;
+                    switch (local_kind(op->binary.source)) {
+                        case local_temporary: source = frame->tmp_values + local_index(op->binary.source); break;
+                        case local_variable:  source = frame->var_values + local_index(op->binary.source); break;
+                        case local_literal:   assert(false);
+                        default: assert(false);
+                    }
+
+                    *target = (u64) source;
+                } break;
 
                 case op_call: {
                     Func* callee = context->funcs + op->call.func_index;
@@ -2655,6 +3089,40 @@ void eval_ops(Context* context) {
 
                     frame = next_frame;
                     break_into_call = true;
+                } break;
+
+                case op_cast: {
+                    assert(local_kind(op->cast.local) == local_temporary);
+                    u64* value = frame->tmp_values + local_index(op->cast.local);
+
+                    switch (op->primitive) {
+                        case primitive_invalid:
+                        case primitive_void:
+                        case primitive_unsolidified_int:
+                        {
+                            panic("Invalid cast to %s\n", primitive_name(op->primitive));
+                        } break;
+
+                        case primitive_pointer: break;
+
+                        case primitive_u8:
+                        case primitive_u16:
+                        case primitive_u32:
+                        case primitive_u64:
+                        {
+                            *value &= size_mask(primitive_size_of(op->cast.old_primitive));
+                        } break;
+
+                        case primitive_i8:
+                        case primitive_i16:
+                        case primitive_i32:
+                        case primitive_i64:
+                        {
+                            unimplemented(); // TODO Sign extend if we up-cast!
+                        } break;
+
+                        default: assert(false);
+                    }
                 } break;
 
                 default: assert(false);
@@ -2722,6 +3190,32 @@ void write_lit(Context* context, u8 size, u64 lit) {
     }
 }
 
+void write_xor_reg(Context* context, u8 size, u8 reg) {
+    switch (size) {
+        case 1: {
+            buf_push(context->bytecode, 0x32);
+        } break;
+        case 2: {
+            buf_push(context->bytecode, 0x66);
+            buf_push(context->bytecode, 0x33);
+        } break;
+        case 4: {
+            buf_push(context->bytecode, 0x33);
+        } break;
+        case 8: {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x33);
+        } break;
+        default: assert(false);
+    }
+
+    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("xor%u %s, %s\n", (u64) (size*8), reg_names[reg], reg_names[reg]);
+    #endif
+}
+
 void write_mov_reg_to_reg(Context* context, u8 size, u8 from_reg, u8 to_reg) {
     assert(to_reg < 8 && from_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
 
@@ -2774,11 +3268,95 @@ void write_mov_lit_to_reg(Context* context, u8 size, u64 lit, u8 to_reg) {
     write_lit(context, size, lit);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u %s, %u\n", (u64) (size*8), reg_names[to_reg], type_mask(size) & lit);
+    printf("mov%u %s, %u\n", (u64) (size*8), reg_names[to_reg], size_mask(size) & lit);
     #endif
 }
 
-void write_mov_reg_to_stack(Context* context, u8 size, u8 from_reg, u32 stack_item_index) {
+void write_zero_extend(Context* context, u8 from_size, u8 to_size, u8 reg) {
+    // From the intel manual, 3.4.1.1 (./reference/intel_introduction.pdf):
+    // • 64-bit operands generate a 64-bit result in the destination
+    //   general-purpose register.
+    // • 32-bit operands generate a 32-bit result, zero-extended to a 64-bit
+    //   result in the destination general-purpose register.
+    // • 8-bit and 16-bit operands generate an 8-bit or 16-bit result. The
+    //   upper 56 bits or 48 bits (respectively) of the destination
+    //   general-purpose register are not modified by the operation. If the
+    //   result of an 8-bit or 16-bit operation is intended for 64-bit address
+    //   calculation, explicitly sign-extend the register to the full 64-bits.
+
+    bool invalid = false;
+
+    switch (from_size) {
+        case 1: {
+            switch (to_size) {
+                case 1: invalid = true; break;
+
+                case 2: {
+                    buf_push(context->bytecode, 0x66);
+                    buf_push(context->bytecode, 0x0f);
+                    buf_push(context->bytecode, 0xb6);
+                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
+                } break;
+
+                case 4: {
+                    buf_push(context->bytecode, 0x0f);
+                    buf_push(context->bytecode, 0xb6);
+                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
+                } break;
+
+                case 8: {
+                    buf_push(context->bytecode, 0x48);
+                    buf_push(context->bytecode, 0x0f);
+                    buf_push(context->bytecode, 0xb6);
+                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
+                } break;
+
+                default: assert(false);
+            }
+        } break;
+
+        case 2: {
+            switch (to_size) {
+                case 1: invalid = true; break;
+                case 2: invalid = true; break;
+
+                case 4: {
+                    buf_push(context->bytecode, 0x0f);
+                    buf_push(context->bytecode, 0xb7);
+                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
+                } break;
+
+                case 8: {
+                    buf_push(context->bytecode, 0x48);
+                    buf_push(context->bytecode, 0x0f);
+                    buf_push(context->bytecode, 0xb7);
+                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
+                } break;
+
+                default: assert(false);
+            }
+        } break;
+
+        case 4: {
+            // This should be a nop probably, read the notes from the manual above just to verify, then remove the 'unimplemented' if appropriate
+            unimplemented();
+        } break;
+
+        case 8: invalid = true; break;
+
+        default: assert(false);
+    }
+
+    if (invalid) {
+        panic("Can't movzx from %u bytes to %u bytes\n", from_size, to_size);
+    }
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("movzx %s, %s (%u to %u)\n", reg_names[reg], reg_names[reg], (u64) (from_size*8), (u64) (to_size*8));
+    #endif
+}
+
+void write_mov_reg_to_stack(Context* context, u8 size, u32 stack_item_index, u8 from_reg) {
     assert(from_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
 
     switch (size) {
@@ -2849,6 +3427,81 @@ void write_mov_stack_to_reg(Context* context, u8 size, u32 stack_item_index, u8 
     #endif
 }
 
+void write_lea_stack_to_reg(Context* context, u32 stack_item_index, u8 to_reg) {
+    assert(to_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
+
+    buf_push(context->bytecode, 0x48);
+    buf_push(context->bytecode, 0x8d);
+    buf_push(context->bytecode, 0x44 | (to_reg << 3)); // 0x44 is x+imm8, 0x84 is x+imm32
+    buf_push(context->bytecode, 0x24); // x is rsp
+
+    buf_push(context->bytecode, 0x00);
+    Stack_Fixup stack_fixup = {0};
+    stack_fixup.text_location = buf_length(context->bytecode) - sizeof(u8);
+    stack_fixup.stack_item_index = stack_item_index;
+    buf_push(context->stack_fixups, stack_fixup);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("lea %s, [stack %u]\n", reg_names[to_reg], (u64) stack_item_index);
+    #endif
+}
+
+void write_mov_reg_to_mem(Context* context, u8 size, u8 value_reg, u8 address_reg) {
+    assert(value_reg < 8 && address_reg < 4); // otherwise we need to encode registers using rex.{r, x, b}
+
+    switch (size) {
+        case 1: {
+            buf_push(context->bytecode, 0x88);
+        } break;
+        case 2: {
+            buf_push(context->bytecode, 0x66);
+            buf_push(context->bytecode, 0x89);
+        } break;
+        case 4: {
+            buf_push(context->bytecode, 0x89);
+        } break;
+        case 8: {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x89);
+        } break;
+        default: assert(false);
+    }
+
+    buf_push(context->bytecode, (value_reg << 3) | (address_reg));
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov%u [%s], %s\n", (u64) (size*8), reg_names[address_reg], reg_names[value_reg]);
+    #endif
+}
+
+void write_mov_mem_to_reg(Context* context, u8 size, u8 value_reg, u8 address_reg) {
+    assert(value_reg < 8 && address_reg < 4); // otherwise we need to encode registers using rex.{r, x, b}
+
+    switch (size) {
+        case 1: {
+            buf_push(context->bytecode, 0x8a);
+        } break;
+        case 2: {
+            buf_push(context->bytecode, 0x66);
+            buf_push(context->bytecode, 0x8b);
+        } break;
+        case 4: {
+            buf_push(context->bytecode, 0x8b);
+        } break;
+        case 8: {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x8b);
+        } break;
+        default: assert(false);
+    }
+
+    buf_push(context->bytecode, (value_reg << 3) | (address_reg));
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov%u %s, [%s]\n", (u64) (size*8), reg_names[value_reg], reg_names[address_reg]);
+    #endif
+}
+
 void write_add_or_sub_lit_to_reg(Context* context, u8 size, bool add, u64 lit, u8 to_reg) {
     assert(to_reg < 8);
 
@@ -2872,7 +3525,7 @@ void write_add_or_sub_lit_to_reg(Context* context, u8 size, bool add, u64 lit, u
     write_lit(context, size, lit);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u %s, %u\n", add? "add" : "sub", (u64) (size*8), reg_names[to_reg], type_mask(size) & lit);
+    printf("%s%u %s, %u\n", add? "add" : "sub", (u64) (size*8), reg_names[to_reg], size_mask(size) & lit);
     #endif
 }
 
@@ -2953,7 +3606,7 @@ u32 local_stack_item_index(Context* context, u8 size, Local local, bool allocate
                 } break;
                 default: assert(false);
             }
-            assert(stack_item->size == size);
+
             index = i;
             break;
         }
@@ -2979,7 +3632,7 @@ void reg_deallocate(Context* context, u8 reg) {
     Local local = context->regs[reg].local;
     u8 size = context->regs[reg].size;
     u32 stack_item_index = local_stack_item_index(context, size, local, true);
-    write_mov_reg_to_stack(context, size, reg, stack_item_index);
+    write_mov_reg_to_stack(context, size, stack_item_index, reg);
 }
 
 void reg_allocate_into(Context* context, u8 size, Local local, u8 reg) {
@@ -3076,120 +3729,161 @@ u8 reg_allocate(Context* context, u8 size, Local local) {
 }
 
 void op_write_machinecode(Context* context, Func* func, Op* op) {
+    u8 flush = REG_BAD;
+
     // Binary operators
-    if (op->kind & OP_KIND_BINARY_FLAG) {
-        u8 type_size = type_size_of(op->type);
+    switch (op->kind) {
+        case op_set:
+        case op_add:
+        case op_sub:
+        case op_mul:
+        case op_div:
+        {
+            u8 operand_size = primitive_size_of(op->primitive);
 
-        // Figure out special requirements
-        // These requirements might seem a bit funky, but they reflect the way x64
-        // instructions are set up.
-        bool left_must_be_eax = false;
-        bool clobbers_edx = false;
+            // Figure out special requirements
+            // These requirements might seem a bit funky, but they reflect the way x64
+            // instructions are set up.
+            bool left_must_be_eax = false;
+            bool clobbers_edx = false;
 
-        switch (op->kind) {
-            case op_set: break;
-            case op_add: break;
-            case op_sub: break;
+            switch (op->kind) {
+                case op_set: break;
+                case op_add: break;
+                case op_sub: break;
 
-            case op_mul: {
-                left_must_be_eax = true;
-                clobbers_edx = true;
-                assert(local_kind(op->binary.source) != local_literal);
-            } break;
+                case op_mul: {
+                    left_must_be_eax = true;
+                    clobbers_edx = true;
+                    assert(local_kind(op->binary.source) != local_literal);
+                } break;
 
-            case op_div: {
-                // Probably can be same as op_mul though, need to verify once we implement division properly
-                unimplemented();
-            } break;
+                case op_div: {
+                    // Probably can be same as op_mul though, need to verify once we implement division properly
+                    unimplemented();
+                } break;
 
-            default: assert(false);
-        }
-
-        // Allocate registers based on requirements
-        u8 left_reg, right_reg;
-        u64 right_literal;
-        bool use_right_literal;
-
-        if (left_must_be_eax) {
-            left_reg = reg_rax;
-            reg_allocate_into(context, type_size, op->binary.target, left_reg);
-        } else {
-            left_reg = reg_allocate(context, type_size, op->binary.target);
-        }
-
-        if (local_kind(op->binary.source) == local_literal) {
-            use_right_literal = true;
-            right_literal = func->literals[local_index(op->binary.source)];
-        } else {
-            use_right_literal = false;
-            right_reg = reg_allocate(context, type_size, op->binary.source);
-        }
-
-        if (clobbers_edx) {
-            // Note that we still can use edx as a right reg in the instruction generated
-            // below, because we only read from it and deallocating does not overwrite!
-            assert(left_reg != 2);
-            reg_deallocate(context, 2);
-        }
-
-        if (!use_right_literal) {
-            assert(left_reg != right_reg);
-        }
-
-        // Generate opcodes
-        switch (op->kind) {
-            case op_set: {
-                if (use_right_literal) {
-                    write_mov_lit_to_reg(context, type_size, right_literal, left_reg);
-                } else {
-                    write_mov_reg_to_reg(context, type_size, right_reg, left_reg);
-                }
-            } break;
-
-            case op_add: {
-                if (use_right_literal) {
-                    write_add_or_sub_lit_to_reg(context, type_size, true, right_literal, left_reg);
-                } else {
-                    write_add_or_sub_reg_to_reg(context, type_size, true, right_reg, left_reg);
-                }
-            } break;
-
-            case op_sub: {
-                if (use_right_literal) {
-                    write_add_or_sub_lit_to_reg(context, type_size, false, right_literal, left_reg);
-                } else {
-                    write_add_or_sub_reg_to_reg(context, type_size, false, right_reg, left_reg);
-                }
-            } break;
-
-            case op_mul: {
-                assert(left_reg == reg_rax);
-                assert(!use_right_literal);
-                write_unsigned_mul(context, type_size, right_reg);
-            } break;
-
-            case op_div: {
-                assert(left_reg == reg_rax);
-                assert(!use_right_literal);
-                unimplemented();
-            } break;
-
-            default: assert(false);
-        }
-
-    // Other operators
-    } else switch (op->kind) {
-        case op_reset_temporaries: {
-            for (u32 r = 0; r < REG_COUNT; r += 1) {
-                if (context->regs[r].used && local_kind(context->regs[r].local) == local_temporary) {
-                    context->regs[r] = (Reg) {0};
-                }
+                default: assert(false);
             }
+
+            // Allocate registers based on requirements
+            u8 left_reg, right_reg;
+            u64 right_literal;
+            bool use_right_literal;
+
+            if (left_must_be_eax) {
+                left_reg = reg_rax;
+                reg_allocate_into(context, operand_size, op->binary.target, left_reg);
+            } else {
+                left_reg = reg_allocate(context, operand_size, op->binary.target);
+            }
+
+            if (local_kind(op->binary.source) == local_literal) {
+                use_right_literal = true;
+                right_literal = func->literals[local_index(op->binary.source)];
+            } else {
+                use_right_literal = false;
+                right_reg = reg_allocate(context, operand_size, op->binary.source);
+            }
+
+            if (clobbers_edx) {
+                // Note that we still can use edx as a right reg in the instruction generated
+                // below, because we only read from it and deallocating does not overwrite!
+                assert(left_reg != 2);
+                reg_deallocate(context, 2);
+            }
+
+            if (!use_right_literal) {
+                assert(left_reg != right_reg);
+            }
+
+            // Generate opcodes
+            switch (op->kind) {
+                case op_set: {
+                    if (use_right_literal) {
+                        write_mov_lit_to_reg(context, operand_size, right_literal, left_reg);
+                    } else {
+                        write_mov_reg_to_reg(context, operand_size, right_reg, left_reg);
+                    }
+                } break;
+
+                case op_add: {
+                    if (use_right_literal) {
+                        write_add_or_sub_lit_to_reg(context, operand_size, true, right_literal, left_reg);
+                    } else {
+                        write_add_or_sub_reg_to_reg(context, operand_size, true, right_reg, left_reg);
+                    }
+                } break;
+
+                case op_sub: {
+                    if (use_right_literal) {
+                        write_add_or_sub_lit_to_reg(context, operand_size, false, right_literal, left_reg);
+                    } else {
+                        write_add_or_sub_reg_to_reg(context, operand_size, false, right_reg, left_reg);
+                    }
+                } break;
+
+                case op_mul: {
+                    assert(left_reg == reg_rax);
+                    assert(!use_right_literal);
+                    write_unsigned_mul(context, operand_size, right_reg);
+                } break;
+
+                case op_div: {
+                    assert(left_reg == reg_rax);
+                    assert(!use_right_literal);
+                    unimplemented();
+                } break;
+
+                default: assert(false);
+            }
+
+            flush = left_reg;
+        } break;
+
+        case op_read_pointer: {
+            assert(local_kind(op->binary.source) != local_literal);
+            assert(local_kind(op->binary.target) != local_literal);
+
+            u8 operand_size = primitive_size_of(op->primitive);
+            u8 value_reg = reg_allocate(context, operand_size, op->binary.target);
+            u8 address_reg = reg_allocate(context, operand_size, op->binary.source);
+            write_mov_mem_to_reg(context, operand_size, value_reg, address_reg);
+
+            flush = value_reg;
+        } break;
+
+        case op_write_pointer: {
+            assert(local_kind(op->binary.source) != local_literal);
+            assert(local_kind(op->binary.target) != local_literal);
+
+            u8 operand_size = primitive_size_of(op->primitive);
+            u8 value_reg = reg_allocate(context, operand_size, op->binary.source);
+            u8 address_reg = reg_allocate(context, operand_size, op->binary.target);
+            write_mov_reg_to_mem(context, operand_size, value_reg, address_reg);
+        } break;
+
+        case op_address_of: {
+            u8 pointer_size = 8;
+            u8 target_reg = reg_allocate(context, pointer_size, op->binary.target);
+
+            Local source = op->binary.source;
+            assert(local_kind(source) == local_variable);
+            Primitive operand_primitive = context->type_buf[func->vars[local_index(source)].type_index];
+            u8 operand_size = primitive_size_of(operand_primitive);
+            u32 stack_item_index = local_stack_item_index(context, operand_size, source, false);
+
+            // Implies we are taking the address of a uninitialized variable
+            assert(stack_item_index != NO_STACK_SPACE_ALLOCATED);
+
+            write_lea_stack_to_reg(context, stack_item_index, target_reg);
+
+            flush = target_reg;
         } break;
 
         case op_call: {
             // TODO calling convention: Which registers do we need to deallocate
-           
+
             // TODO we can avoid deallocating and reallocating here, if we deallocate
             // after punching in parameters
             for (u32 r = 0; r < REG_COUNT; r += 1) {
@@ -3208,6 +3902,7 @@ void op_write_machinecode(Context* context, Func* func, Op* op) {
                         case 1: param_reg = reg_rdx; break;
                         case 2: unimplemented(); break; // r8
                         case 3: unimplemented(); break; // r9
+                        default: assert(false);
                     }
 
                     if (local_kind(param_local) == local_literal) {
@@ -3219,11 +3914,11 @@ void op_write_machinecode(Context* context, Func* func, Op* op) {
                     }
                 } else {
                     // TODO Parameters go on the stack
+                
+                    // TODO we need to reserve stack space for parameters, even if we only
+                    // pass parameters via registers.
                     unimplemented();
                 }
-
-                // TODO we need to reserve stack space for parameters, even if we only
-                // pass parameters via registers.
             }
 
             buf_push(context->bytecode, 0xe8);
@@ -3247,11 +3942,37 @@ void op_write_machinecode(Context* context, Func* func, Op* op) {
                 .used = true,
                 .alloc_time = context->time,
                 .local = op->call.target,
-                .size = type_size_of(op->type)
+                .size = primitive_size_of(op->primitive)
             };
+            flush = reg_rax;
         } break;
 
+        case op_cast: {
+            u8 new_size = primitive_size_of(op->primitive);
+            u8 old_size = primitive_size_of(op->cast.old_primitive);
+
+            if (new_size > old_size) {
+                u8 reg = reg_allocate(context, old_size, op->cast.local);
+                write_zero_extend(context, old_size, new_size, reg);
+                context->regs[reg].size = new_size;
+                flush = reg;
+            }
+        } break;
+
+        case op_reset_temporaries: {
+            for (u32 r = 0; r < REG_COUNT; r += 1) {
+                if (context->regs[r].used && local_kind(context->regs[r].local) == local_temporary) {
+                    context->regs[r] = (Reg) {0};
+                }
+            }
+        } break;
+
+
         default: assert(false);
+    }
+
+    if (flush != REG_BAD && local_kind(context->regs[flush].local) == local_variable) {
+        reg_deallocate(context, flush);
     }
 }
 
@@ -3286,15 +4007,23 @@ void build_machinecode(Context* context) {
             u32 var_index = p + 1; // + 1 because first var is output
             Local local = new_local(local_variable, var_index);
 
-            u8 size = type_size_of(func->params[p].type);
+            u8 operand_size = primitive_size_of(context->type_buf[func->params[p].type_index]);
 
             if (p < 4) {
+                u8 r;
                 switch (p) {
-                    case 0: context->regs[reg_rcx] = (Reg) { .used = true, .local = local, .size = size }; break;
-                    case 1: context->regs[reg_rdx] = (Reg) { .used = true, .local = local, .size = size }; break;
+                    case 0: r = reg_rcx; break;
+                    case 1: r = reg_rdx; break;
                     case 2: unimplemented(); break; // r8
                     case 3: unimplemented(); break; // r9
+                    default: assert(false);
                 }
+
+                context->regs[r] = (Reg) {
+                    .used = true,
+                    .local = local,
+                    .size = operand_size,
+                };
             } else {
                 // TODO Parameters go on stack!
                 // All parameters will have preallocated stack space, which we should probably use while we are at it.
@@ -3322,29 +4051,35 @@ void build_machinecode(Context* context) {
             op_write_machinecode(context, func, op);
         }
 
-        for (u32 i = 0; i < buf_length(context->stack_items); i += 1) {
-            u32 min = buf_length(context->stack_items) - 1;
-            u8 size = U8_MAX;
-            for (u32 j = i; j < buf_length(context->stack_items); j += 1) {
-                u8 s = context->stack_items[j].size;
-                if (s < size) {
-                    min = j;
-                    size = s;
-                }
-            }
-
-            Stack_Item temp = context->stack_items[i];
-            context->stack_items[i] = context->stack_items[min];
-            context->stack_items[min] = temp;
+        Local output_local = new_local(local_variable, 0);
+        Primitive output_primitive = context->type_buf[func->vars[0].type_index];
+        if (output_primitive == primitive_void) {
+            write_xor_reg(context, 8, reg_rax);
+        } else {
+            u8 operand_size = primitive_size_of(output_primitive);
+            reg_allocate_into(context, operand_size, output_local, reg_rax);
         }
 
-        u32 stack_offset = 0; // TODO stack space for function parameters!
 
+        // Stack fixups
+        buf_foreach (Stack_Item, stack_item, context->stack_items) { stack_item->offset = U32_MAX; }
+
+        u32 stack_offset = 0; // TODO stack space for function parameters!
         for (u32 i = 0; i < buf_length(context->stack_items); i += 1) {
-            Stack_Item* stack_item = &context->stack_items[i];
-            stack_offset = round_to_next(stack_offset, stack_item->size);
-            stack_item->offset = stack_offset;
-            stack_offset += stack_item->size;
+            Stack_Item* smallest = null;
+            u8 size = U8_MAX;
+            buf_foreach (Stack_Item, item, context->stack_items) {
+                if (item->offset != U32_MAX) continue;
+                if (item->size < size) {
+                    size = item->size;
+                    smallest = item;
+                }
+            }
+            assert(smallest != null);
+
+            stack_offset = round_to_next(stack_offset, smallest->size);
+            smallest->offset = stack_offset;
+            stack_offset += smallest->size;
         }
 
         u32 stack_size = ((stack_offset + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
@@ -3354,9 +4089,7 @@ void build_machinecode(Context* context) {
         // instructions completely when we do not use the stack at all!
         assert((stack_size & 0x7f) == stack_size);
 
-        for (u32 i = 0; i < buf_length(context->stack_fixups); i += 1) {
-            Stack_Fixup* f = &context->stack_fixups[i];
-
+        buf_foreach (Stack_Fixup, f, context->stack_fixups) {
             u8 old_value = context->bytecode[f->text_location];
             assert(old_value == 0x00);
 
@@ -3369,15 +4102,6 @@ void build_machinecode(Context* context) {
             assert((adjusted_offset & 0x7f) == adjusted_offset);
 
             context->bytecode[f->text_location] = (u8) adjusted_offset;
-        }
-
-        // TODO calling convention
-        // How do we pass return values?
-        // This needs to be the same as how we do return value reading in 'op_call' bytecode
-        if (func != main_func) {
-            Local output_var = new_local(local_variable, 0);
-            u8 output_size = (u8) type_size_of(func->vars[0].type);
-            reg_allocate_into(context, output_size, output_var, reg_rax);
         }
 
         // add rsp, stack frame size
@@ -3402,7 +4126,7 @@ void build_machinecode(Context* context) {
 
     // Move output into .data+0
     {
-        u8 output_reg = reg_allocate(context, 4, new_local(local_variable, 0));
+        u8 output_reg = reg_allocate(context, 1, new_local(local_variable, 0));
 
         buf_push(context->bytecode, 0x88);
         buf_push(context->bytecode, 0x05 | (output_reg << 3));
@@ -4164,7 +4888,7 @@ void print_crap(Context* context) {
         printf("    %u statements:\n", (u64) func->stmt_count);
         for (u32 s = 0; s < func->stmt_count; s += 1) {
             printf("      ");
-            stmt_print(context, func, func->stmts + s);
+            print_stmt(context, func, func->stmts + s);
             printf("\n");
         }
     }
@@ -4176,13 +4900,18 @@ void main() {
     Context context = {0};
     bool success;
 
-    success = build_ast(&context, "W:/small/asm2/code.txt");
-    if (!success) { return; } // We print errors from inside build_context/typecheck
-    success = typecheck(&context);
-    if (!success) { return; }
+    if (!build_ast(&context, "W:/asm2/code.txt")) {
+        return; // We print errors inside build_ast
+    }
+    if (!typecheck(&context)) {
+        return;
+    }
+
     print_crap(&context);
+
     build_intermediate(&context);
     eval_ops(&context);
+
     build_machinecode(&context);
     write_executable("out.exe", &context);
 
