@@ -13,7 +13,7 @@ WINAPI_PRE int WINAPI_POST WriteFile(
     void* buffer,
     unsigned __int32 bytes_to_write,
     unsigned __int32* bytes_written,
-    void* overlapped // We don't use this, let it be nil
+    void* overlapped // We don't use this, let it be null
 );
 
 int foo() {

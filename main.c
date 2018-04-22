@@ -12,7 +12,7 @@
 #define u64 unsigned __int64
 
 #define U32_MAX 0xffffffff
-#define U16_MAX 0xff
+#define U16_MAX 0xffff
 #define U8_MAX 0xff
 #define I16_MAX 32767
 #define I16_MIN -32768
@@ -86,6 +86,47 @@ void mem_clear(u8* ptr, u64 count) {
         ptr += 1;
         count -= 1;
     }
+}
+
+bool mem_cmp(u8* a, u8* b, u64 count) {
+    while (count >= 8) {
+        if (*((u64*) a) != *((u64*) b)) {
+            return false;
+        }
+
+        a += 8;
+        b += 8;
+        count -= 8;
+    }
+
+    while (count >= 1) {
+        if (*a != *b) {
+            return false;
+        }
+
+        a += 1;
+        b += 1;
+        count -= 1;
+    }
+
+    return true;
+}
+
+bool str_cmp(u8* a, u8* b) {
+    while (1) {
+        if (*a != *b) {
+            return false;
+        }
+
+        if (*a == 0 || *b == 0) {
+            break;
+        }
+
+        a += 1;
+        b += 1;
+    }
+    
+    return true;
 }
 
 void u32_fill(u32* ptr, u64 count, u32 value) {
@@ -882,6 +923,22 @@ typedef struct Func {
 
 
 
+typedef struct Import_Index {
+    u32 library;
+    u32 function;
+} Import_Index;
+
+typedef struct Library_Import {
+    u8* lib_name; // c-str
+    // TODO make this a hashtable
+    u8** function_names; // stretchy-buffer of cstrings
+
+    // We find these in 'parse_library'
+    u8* dll_name;
+    u32* function_hints;
+} Library_Import;
+
+
 typedef struct Fixup {
     // Fixups which rely on information about adresses in the final executable go here,
     // other kinds of fixups can have their own struct
@@ -894,11 +951,7 @@ typedef struct Fixup {
     } kind;
 
     union {
-        struct {
-            u32 function;
-            u32 dll;
-        } imported;
-
+        Import_Index import_index;
         u32 data_offset;
     };
 } Fixup;
@@ -920,17 +973,6 @@ typedef struct Call_Fixup {
     u32 func_index;
 } Call_Fixup;
 
-
-// Data needed to generate import table
-typedef struct Import_Function {
-    u8* name; // c-str
-    u16 hint;
-} Import_Function;
-
-typedef struct DynlibImport {
-    u8* name; // c-str
-    Import_Function* functions; // stretchy-buffer
-} DynlibImport;
 
 
 #define REG_COUNT 4 // eax, ecx, edx, ebx
@@ -983,7 +1025,8 @@ typedef struct Context {
     u8* bytecode;
     u8* bytecode_data;
     Fixup* fixups;
-    DynlibImport* dlls;
+
+    Library_Import* imports; // stretchy-buffer
 
     // Used during codegen
     Reg regs[REG_COUNT];
@@ -995,6 +1038,35 @@ typedef struct Context {
     u32 time; // incremented with each emitted instruction
 } Context;
 
+
+// NB This currently just assumes we are trying to import a function. In the future we might want to support importing
+// other items, though we probably want to find an example of that first, so we know what we are doing!
+Import_Index add_import(Context* context, u8* library_name, u8* item_name) {
+    Import_Index index = {0};
+
+    Library_Import* import = null;
+    for (u32 i = 0; i < buf_length(context->imports); i += 1) {
+        if (str_cmp(library_name, context->imports[i].lib_name)) {
+            index.library = i;
+            import = &context->imports[i];
+            break;
+        }
+    }
+    if (import == null) {
+        index.library = buf_length(context->imports);
+
+        Library_Import new = {0};
+        new.lib_name = library_name;
+        buf_push(context->imports, new);
+
+        import = buf_end(context->imports) - 1;
+    }
+
+    index.function = buf_length(import->function_names);
+    buf_push(import->function_names, item_name);
+
+    return index;
+}
 
 bool type_cmp(Context* context, u32 a, u32 b) {
     while (1) {
@@ -4124,6 +4196,17 @@ void build_machinecode(Context* context) {
         }
     }
 
+    // Call fixups
+    buf_foreach (Call_Fixup, fixup, context->call_fixups) {
+        i32* target = (i32*) (context->bytecode + fixup->text_location);
+        assert(*target == 0xefbeadde);
+
+        u32 jump_to = context->funcs[fixup->func_index].bytecode_start;
+        u32 jump_from = fixup->text_location + sizeof(i32);
+
+        *target = ((i32) jump_to) - ((i32) jump_from);
+    }
+
     // Move output into .data+0
     {
         u8 output_reg = reg_allocate(context, 1, new_local(local_variable, 0));
@@ -4142,23 +4225,10 @@ void build_machinecode(Context* context) {
         buf_push(context->fixups, fixup);
     }
 
-    // Call fixups
-    buf_foreach (Call_Fixup, fixup, context->call_fixups) {
-        i32* target = (i32*) (context->bytecode + fixup->text_location);
-        assert(*target == 0xefbeadde);
 
-        u32 jump_to = context->funcs[fixup->func_index].bytecode_start;
-        u32 jump_from = fixup->text_location + sizeof(i32);
-
-        *target = ((i32) jump_to) - ((i32) jump_from);
-    }
-
-    DynlibImport kernel32 = {0};
-    kernel32.name = "KERNEL32.DLL";
-    buf_push(kernel32.functions, ((Import_Function){"GetStdHandle", 0x2d5}));
-    buf_push(kernel32.functions, ((Import_Function){"WriteFile", 0x619}));
-    buf_push(kernel32.functions, ((Import_Function){"ExitProcess", 0x162}));
-    buf_push(context->dlls, kernel32);
+    Import_Index index_get_std_handle = add_import(context, "kernel32.lib", "GetStdHandle");
+    Import_Index index_write_file     = add_import(context, "kernel32.lib", "WriteFile");
+    Import_Index index_exit_process   = add_import(context, "kernel32.lib", "ExitProcess");
 
     str_push_str(&context->bytecode_data, "_i\n\0", 4);
 
@@ -4206,8 +4276,7 @@ void build_machinecode(Context* context) {
 
     fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
     fixup.kind = fixup_imported_function;
-    fixup.imported.dll = 0;
-    fixup.imported.function = 0;
+    fixup.import_index = index_get_std_handle;
     buf_push(context->fixups, fixup);
 
     // mov qword ptr [rsp+40h],rax  
@@ -4274,8 +4343,7 @@ void build_machinecode(Context* context) {
 
     fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
     fixup.kind = fixup_imported_function;
-    fixup.imported.dll = 0;
-    fixup.imported.function = 1;
+    fixup.import_index = index_write_file;
     buf_push(context->fixups, fixup);
 
     // ExitProcess()
@@ -4292,8 +4360,7 @@ void build_machinecode(Context* context) {
 
     fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
     fixup.kind = fixup_imported_function;
-    fixup.imported.dll = 0;
-    fixup.imported.function = 2;
+    fixup.import_index = index_exit_process;
     buf_push(context->fixups, fixup);
 
     // xor eax,eax  
@@ -4326,7 +4393,8 @@ typedef struct COFF_Header {
     u16 flags; // "characteristics"
 } COFF_Header;
 
-const u16 COFF_MACHINE_AMD64 = 0x8664;
+const u16 COFF_MACHINE_AMD64  = 0x8664;
+const u16 COFF_MACHINE_UNKOWN = 0x0000;
 
 const u16 COFF_FLAGS_EXECUTABLE_IMAGE    = 0x0002;
 const u16 COFF_FLAGS_LARGE_ADDRESS_AWARE = 0x0020;
@@ -4408,8 +4476,220 @@ const u32 SECTION_FLAGS_EXECUTE            = 0x20000000;
 const u32 SECTION_FLAGS_READ               = 0x40000000;
 const u32 SECTION_FLAGS_WRITE              = 0x80000000;
 
+typedef struct Archive_Member_Header {
+    u8 name[16];
+    u8 irrelevant[32];
+    u8 size[10]; // Size of member, excluding header, as an ascii string
+    u8 end[2];
+} Archive_Member_Header;
 
-void write_executable(u8* path, Context* context) {
+typedef struct Import_Header {
+    u16 s1; // IMAGE_FILE_MACHINE_UNKOWN
+    u16 s2; // 0xffff
+    u16 version;
+    u16 machine;
+    u32 time_date_stamp;
+    u32 size_of_data;
+    u16 ordinal;
+    u16 extra;
+} Import_Header;
+
+// NB only intended for use within read_archive_member_header
+bool parse_ascii_integer(u8* string, u32 length, u64* value) {
+    *value = 0;
+    for (u32 i = 0; i < length; i += 1) {
+        u8 c = string[i];
+        if (c >= '0' && c <= '9') {
+            *value *= 10;
+            *value += c - '0';
+        } else if (c == ' ') {
+            break;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool read_archive_member_header(
+    u8** cursor, u32* cursor_length,
+    u8** member, u32* member_length
+) {
+    if (*cursor_length < sizeof(Archive_Member_Header)) {
+        return false;
+    }
+
+    Archive_Member_Header* header = (void*) *cursor;
+
+    if (header->end[0] != 0x60 || header->end[1] != 0x0a) {
+        return false;
+    }
+
+    u64 member_size;
+    if (!parse_ascii_integer(header->size, 10, &member_size)) {
+        return false;
+    }
+    if (*cursor_length < sizeof(Archive_Member_Header) + member_size) {
+        return false;
+    }
+
+    if (member != null) {
+        *member = (*cursor + sizeof(Archive_Member_Header));
+        *member_length = member_size;
+    }
+
+    u32 total_size = sizeof(Archive_Member_Header) + member_size;
+    *cursor += total_size;
+    *cursor_length -= total_size;
+    return true;
+}
+
+bool parse_library(Context* context, Library_Import* import) {
+    // TODO how do we actually find libraries? Windows has some paths where it stuffs these. Otherwise we should look in
+    // the working directory, I guess.
+    u8* path;
+    if (str_cmp(import->lib_name, "kernel32.lib")) {
+        path = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64/kernel32.lib";
+    } else {
+        unimplemented();
+    }
+
+    u8* file;
+    u32 file_length;
+    if (!read_entire_file(path, &file, &file_length)) {
+        printf("Couldn't open \"%s\"\n", path);
+        return false;
+    }
+
+    if (file_length < 8 || !mem_cmp(file, "!<arch>\n", 8)) goto invalid;
+
+    u8* cursor = file + 8;
+    u32 cursor_length = file_length - 8;
+
+    u8* symbol_data;
+    u32 symbol_data_length;
+
+    if (
+        !read_archive_member_header(&cursor, &cursor_length, null, null) ||
+        !read_archive_member_header(&cursor, &cursor_length, &symbol_data, &symbol_data_length) ||
+        !read_archive_member_header(&cursor, &cursor_length, null, null)
+    ) goto invalid;
+
+    if (symbol_data_length < 4) goto invalid;
+    u32 archive_member_count = *((u32*) symbol_data);
+    symbol_data += 4;
+    symbol_data_length -= 4;
+
+    if (symbol_data_length < archive_member_count*4) goto invalid;
+    u32* archive_member_offsets = (u32*) symbol_data;
+    symbol_data += archive_member_count*4;
+    symbol_data_length -= archive_member_count*4;
+
+    if (symbol_data_length < 4) goto invalid;
+    u32 symbol_count = *((u32*) symbol_data);
+    symbol_data += 4;
+    symbol_data_length -= 4;
+
+    if (symbol_data_length < 2*symbol_count) goto invalid;
+    u16* symbol_indices = (u16*) symbol_data;
+    symbol_data += symbol_count*2;
+    symbol_data_length -= 2;
+
+    import->function_hints = (u32*) arena_alloc(&context->arena, buf_length(import->function_names) * sizeof(u32));
+    u32_fill(import->function_hints, buf_length(import->function_names), U32_MAX);
+
+    u8* other_dll_name = arena_alloc(&context->arena, 17); // NB used somewhere in an inner loop
+
+    u32 s = 0;
+    u32 i = 0;
+    while (i < symbol_data_length && s < symbol_count) {
+        u8* symbol_name_start = &symbol_data[i];
+        u32 start_i = i;
+        while (i < symbol_data_length && symbol_data[i] != 0) i += 1;
+        u32 symbol_name_length = i - start_i;
+        i += 1;
+
+        u16 index = symbol_indices[s];
+        s += 1;
+
+        if (index > archive_member_count) goto invalid;
+        u32 archive_member_offset = archive_member_offsets[index];
+
+        if (file_length - sizeof(Archive_Member_Header) - sizeof(Import_Header) < archive_member_offset) goto invalid;
+        Archive_Member_Header* member_header = (void*) (file + archive_member_offset);
+        Import_Header* import_header = (void*) (file + archive_member_offset + sizeof(Archive_Member_Header));
+        if (import_header->s1 != COFF_MACHINE_UNKOWN || import_header->s2 != 0xffff) continue;
+
+        if (import_header->machine != COFF_MACHINE_AMD64) continue;
+
+        u8 import_type = import_header->extra & 0x03;
+        u8 name_type   = (import_header->extra >> 2) & 0x07;
+
+        for (u32 j = 0; j < buf_length(import->function_names); j += 1) {
+            u32* hint = &import->function_hints[j];
+            if (*hint != U32_MAX) continue;
+            u8* specified_name = import->function_names[j];
+
+            bool match = true;
+            for (u32 k = 0; k < symbol_name_length; k += 1) {
+                if (symbol_name_start[k] != specified_name[k] || specified_name[k] == 0) {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match) {
+                *hint = import_header->ordinal;
+
+                // Figure out the dll name
+                if (import->dll_name == null) {
+                    u8* dll_name = arena_alloc(&context->arena, 17);
+                    mem_clear(dll_name, 17);
+
+                    for (u32 l = 0; l < 16; l += 1) {
+                        if (member_header->name[l] == '/' || member_header->name[l] == ' ') break;
+                        dll_name[l] = member_header->name[l];
+                    }
+
+                    import->dll_name = dll_name;
+                } else {
+                    mem_clear(other_dll_name, 17);
+                    for (u32 l = 0; l < 16; l += 1) {
+                        if (member_header->name[l] == '/' || member_header->name[l] == ' ') break;
+                        other_dll_name[l] = member_header->name[l];
+                    }
+
+                    if (!str_cmp(import->dll_name, other_dll_name)) {
+                        printf(
+                            "Couldn't load %s: It contains imports from multiple dlls: %s and %s\n",
+                            path, import->dll_name, other_dll_name
+                        );
+                        return false;
+                    }
+                }
+
+                break;
+            }
+        }
+    }
+
+    for (u32 i = 0; i < buf_length(import->function_names); i += 1) {
+        if (import->function_hints[i] == U32_MAX) {
+            printf("Could not find %s in \"%s\"\n", import->function_names[i], path);
+            return false;
+        }
+    }
+
+    free(file);
+    return true;
+
+    invalid:
+    free(file);
+    printf("Couldn't load \"%s\": Invalid archive\n", path);
+    return false;
+}
+
+bool write_executable(u8* path, Context* context) {
     enum { section_count = 4 }; // So we can use it as an array length
     u64 in_file_alignment = 0x200;
     u64 in_memory_alignment = 0x1000;
@@ -4419,7 +4699,7 @@ void write_executable(u8* path, Context* context) {
     u64 text_length = buf_length(context->bytecode);
     u64 data_length = buf_length(context->bytecode_data);
 
-    // NB pdata is completly messed up. It is supposed to be pointing to some
+    // TODO pdata is completly messed up. It is supposed to be pointing to some
     // unwind info, which we deleted by accident. We have to figure out how to
     // generate that info. We can't test that without first having some codegen
     // though...
@@ -4455,20 +4735,11 @@ void write_executable(u8* path, Context* context) {
 
         switch (fixup->kind) {
             case fixup_imported_function: {
-                u32 l = fixup->imported.dll;
-                u32 f = fixup->imported.function;
+                u32 l = fixup->import_index.library;
+                u32 f = fixup->import_index.function;
 
-                if (l > buf_length(context->dlls)) {
-                    panic(
-                        "Function fixup refers to invalid library %u. There are only %u dlls.\n",
-                        (u64) l, (u64) buf_length(context->dlls)
-                    );
-                } else if (f > buf_length(context->dlls[l].functions)) {
-                    panic(
-                        "Function fixup refers to invalid function %u in library %u. There are only %u functions.\n",
-                        (u64) f, (u64) l, (u64) buf_length(context->dlls[l].functions)
-                    );
-                }
+                assert(l < buf_length(context->imports));
+                assert(f < buf_length(context->imports[l].function_names));
             } break;
 
             case fixup_data: {
@@ -4490,28 +4761,33 @@ void write_executable(u8* path, Context* context) {
     } Import_Entry;
 
     u64 idata_import_offset = buf_length(idata);
-    str_push_zeroes(&idata, (buf_length(context->dlls) + 1) * sizeof(Import_Entry));
-    for (u64 i = 0; i < buf_length(context->dlls); i += 1) {
-        DynlibImport* library = &context->dlls[i];
+    str_push_zeroes(&idata, (buf_length(context->imports) + 1) * sizeof(Import_Entry));
+    for (u64 i = 0; i < buf_length(context->imports); i += 1) {
+        Library_Import* import = &context->imports[i];
+        if (!parse_library(context, import)) {
+            return false;
+        }
 
-        u64 table_size = sizeof(u64) * (1 + buf_length(library->functions));
+        assert(import->dll_name != null);
+
+        u64 table_size = sizeof(u64) * (1 + buf_length(import->function_names));
         u64 address_table_start = buf_length(idata);
         u64 lookup_table_start = address_table_start + table_size;
 
         str_push_zeroes(&idata, 2*table_size); // Make space for the address & lookup table
 
         u64 name_table_start = buf_length(idata);
-        str_push_cstr(&idata, library->name);
+        str_push_cstr(&idata, import->dll_name);
         buf_push(idata, 0);
 
-        for (u64 j = 0; j < buf_length(library->functions); j += 1) {
+        for (u64 j = 0; j < buf_length(import->function_names); j += 1) {
             u64 function_name_address = idata_memory_start + buf_length(idata);
             if ((function_name_address & 0x7fffffff) != function_name_address) {
                 panic("Import data will be invalid, because it has functions at to high rvas: %x!", function_name_address);
             }
 
-            u8* name = library->functions[j].name;
-            u16 hint = library->functions[j].hint;
+            u8* name = import->function_names[j];
+            u16 hint = import->function_hints[j];
 
             buf_push(idata, (u8) (hint & 0xff));
             buf_push(idata, (u8) ((hint >> 8) & 0xff));
@@ -4532,9 +4808,9 @@ void write_executable(u8* path, Context* context) {
         // Apply fixups for this library
         for (u64 k = 0; k < buf_length(context->fixups); k += 1) {
             Fixup* fixup = &context->fixups[k];
-            if (fixup->kind != fixup_imported_function || fixup->imported.dll != i) { continue; }
+            if (fixup->kind != fixup_imported_function || fixup->import_index.library != i) { continue; }
 
-            u32 function = fixup->imported.function;
+            u32 function = fixup->import_index.function;
             u64 function_address = idata_memory_start + address_table_start + sizeof(u64)*function;
 
             i32* text_value = (i32*) (context->bytecode + fixup->text_location);
@@ -4636,7 +4912,7 @@ void write_executable(u8* path, Context* context) {
 
     image.number_of_rva_and_sizes = 16;
     image.data_directories[1].virtual_address = idata_memory_start + idata_import_offset;
-    image.data_directories[1].size = (buf_length(context->dlls) + 1)*sizeof(Import_Entry);
+    image.data_directories[1].size = (buf_length(context->imports) + 1)*sizeof(Import_Entry);
     image.data_directories[3].virtual_address = pdata_memory_start;
     image.data_directories[3].size = pdata_length;
 
@@ -4695,6 +4971,8 @@ void write_executable(u8* path, Context* context) {
     assert(success);
 
     buf_free(idata);
+
+    return true;
 }
 
 void print_executable_info(u8* path) {
@@ -4716,7 +4994,6 @@ void print_executable_info(u8* path) {
         printf(", nice!\n");
     }
 
-    /*
     // Only used for printing, not a good idea..
     struct {
         u8 dos_header[60];
@@ -4832,7 +5109,6 @@ void print_executable_info(u8* path) {
         }
     }
     printf("\n\n\n");
-    */
 
     u32 coff_header_offset = *((u32*) (file + 0x3c));
     COFF_Header* coff_header = (void*) (file + coff_header_offset);
@@ -4913,7 +5189,9 @@ void main() {
     eval_ops(&context);
 
     build_machinecode(&context);
-    write_executable("out.exe", &context);
+    if (!write_executable("out.exe", &context)) {
+        return;
+    }
 
     printf("Running generated executable:\n");
     STARTUPINFO startup_info = {0};
@@ -4928,28 +5206,38 @@ void main() {
 }
 
 
-// win32 functions are __stdcall, but that is ignored in x64
-//
-// First four parameters go in registers, depending on type:
-//      rcx  xmm0
-//      rdx  xmm1
-//      r8   xmm2
-//      r9   xmm3
-// Larger types are passed as pointers to caller-allocated memory
-// Caller-allocated memory must be 16-byte alligned
-// Values are returned in rax or xmm0 if they fit
-//
-// Voltatile registers can be overwritten by the callee, invalidating their previous
-// values. Nonvolatile registers must remain constant across function calls.
-// Volatile         rax rcx rdx  r8  r9 r10 r11
-// Nonvoltatile     rbx rbp rdi rsi rsp r12 r13 r14 r15
-//
-// Caller must allocate stack space for all passed parameters, even though the first
-// four parameters always go in registers rather than on the stack. Space for at least
-// four parameters must be allocated!
-//
-// The stack grows downwards
-// rsp points to the bottom of the stack
-// rsp must be 16 byte aligned when 'call' is executed
-//
-// call pushes return rip (8 bytes)
+/*
+win32 functions are __stdcall, but that is ignored in x64
+
+First four parameters go in registers, depending on type:
+     rcx  xmm0
+     rdx  xmm1
+     r8   xmm2
+     r9   xmm3
+Larger types are passed as pointers to caller-allocated memory
+Caller-allocated memory must be 16-byte alligned
+Values are returned in rax or xmm0 if they fit
+
+Voltatile registers can be overwritten by the callee, invalidating their previous
+values. Nonvolatile registers must remain constant across function calls.
+Volatile         rax rcx rdx  r8  r9 r10 r11
+Nonvoltatile     rbx rbp rdi rsi rsp r12 r13 r14 r15
+
+Caller must allocate stack space for all passed parameters, even though the first
+four parameters always go in registers rather than on the stack. Space for at least
+four parameters must be allocated!
+
+The stack grows downwards
+rsp points to the bottom of the stack
+rsp must be 16 byte aligned when 'call' is executed
+
+call pushes return rip (8 bytes)
+*/
+
+
+/*
+
+kernel32.lib 
+C:\Program Files (x86)\Windows Kits\10\Lib\10.0.16299.0\um\x64
+
+*/
