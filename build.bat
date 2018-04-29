@@ -2,7 +2,7 @@
 
 if not exist build mkdir build
 
-cl /nologo /c^
+cl /nologo /c /WX^
     /GS- /Gs9999999^
     /Od^
     /Zi^
@@ -21,7 +21,7 @@ link /nologo^
  &&^
 build\tiny.exe
 
-cl /nologo /c^
+cl /nologo /c /WX^
     /GS- /Gs9999999^
     /Od^
     /Zi^

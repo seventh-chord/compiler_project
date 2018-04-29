@@ -1,6 +1,14 @@
 
-fn funky(p: 'u8) {
-    'p = 5;
+fn swanky() -> u8 {
+    var x: u8 = 14;
+    var array: [3]u8 = [3]u8 { 2, 1, 3 };
+    array = [3]u8 { 0, 0, array[1] + x };
+    output = array[2];
+}
+
+fn remove_fifteen(p: 'u8) {
+    var fifteen: u8 = swanky();
+    'p = 'p - fifteen;
 }
 
 fn bar(a: u8, b: u8) -> u8 {
@@ -12,7 +20,8 @@ fn bar(a: u8, b: u8) -> u8 {
 
 fn foo(a: u8) -> u8 {
     var five: u8 = 20;
-    funky(@five);
+    remove_fifteen(@five);
+
     output = a*five + (255 + 1);
 }
 
@@ -28,7 +37,18 @@ fn main() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
-#   Memory (Somewhere our text to print can go)
-#   Calling external functions (This probably isnt that bad)
-#   Parsing .lib files for external function info
+# "long" term
+#   calling external functions
 #   .pdata so we can crash properly, or whatever that is for
+#   conditionals
+#   global variables
+#   constants
+#   structs, unions, enums
+#   size_of, align_of, type_of
+#   bitwise operators (<< >> | & ~ ^)
+#   hex literals
+#   debug info
+#   growing the stack? stack guards?
+#   type inference
+#   constant evaluation / elimination
+#   peephole optimizer
