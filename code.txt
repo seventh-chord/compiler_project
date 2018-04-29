@@ -1,9 +1,38 @@
 
+fn four() -> u8 {
+    var big_boy: [4][4]u64 = [4][4]u64 {
+        [4]u64 { 0, 0, 0, 0 },
+        [4]u64 { 0, 0, 0, 0 },
+        [4]u64 { 0, 0, 2, 0 },
+        [4]u64 { 0, 0, 0, 0 },
+    };
+
+    var empty: [4]u64 = [4]u64 { 0, 0, 0, 0 };
+
+    var small_boy: '[4]u64 = @empty;
+    'small_boy = big_boy[2];
+
+    var nice: u64 = big_boy[2][2];
+    output = u8(nice) + u8(empty[2]);
+}
+
 fn swanky() -> u8 {
     var x: u8 = 14;
     var array: [3]u8 = [3]u8 { 2, 1, 3 };
-    array = [3]u8 { 0, 0, array[1] + x };
-    output = array[2];
+    array = [3]u8 {
+        0, 0,
+        array[1] + x
+    };
+    output = third(@array);
+}
+
+fn third(array: '[3]u8) -> u8 {
+    var barray: [3]u8 = 'array;
+    output = barray[2];
+}
+
+fn scary_third(array: 'u8) -> u8 {
+    output = '(array + 2);
 }
 
 fn remove_fifteen(p: 'u8) {
@@ -26,7 +55,8 @@ fn foo(a: u8) -> u8 {
 }
 
 fn main() -> u8 {
-    var x: u8 = bar(1, 0) + foo(4*3 - 3*(1 + 2));
+    var four: u8 = four();
+    var x: u8 = bar(1, 0) + foo(four*3 - 3*(1 + 2));
 
     x = 2*(20 + 10) - x*2;
 
@@ -44,6 +74,7 @@ fn main() -> u8 {
 #   global variables
 #   constants
 #   structs, unions, enums
+#   parsing '&foo[1]' properly (it parses as '(&foo)[1]' at the moment)
 #   size_of, align_of, type_of
 #   bitwise operators (<< >> | & ~ ^)
 #   hex literals

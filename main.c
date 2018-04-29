@@ -785,13 +785,6 @@ u64 size_mask(u8 size) {
 }
 
 
-enum Binary_Op {
-    binary_add,
-    binary_sub,
-    binary_mul,
-    binary_div,
-};
-
 #define EXPR_FLAG_UNRESOLVED 0x01
 #define EXPR_FLAG_ASSIGNABLE 0x02
 
@@ -811,7 +804,6 @@ typedef struct Expr Expr;
 struct Expr {
     u8 kind;
     u8 flags;
-    u32 type_index;
 
     union {
         union { u32 index; u32 unresolved_name; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
@@ -822,7 +814,17 @@ struct Expr {
             u32 count;
         } compound_literal;
 
-        struct { u8 op; Expr* left; Expr* right; } binary;
+        struct {
+            enum {
+                binary_add,
+                binary_sub,
+                binary_mul,
+                binary_div,
+            } op;
+
+            Expr* left;
+            Expr* right;
+        } binary;
 
         struct {
             union { u32 unresolved_name; u32 func_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
@@ -840,6 +842,7 @@ struct Expr {
         } subscript;
     };
 
+    u32 type_index;
     File_Pos pos;
 };
 
@@ -1132,6 +1135,15 @@ bool type_cmp(Context* context, u32 a, u32 b) {
         if (!a_ptr && !b_ptr) {
             break;
         } else if (a_ptr && b_ptr) {
+            // NB this is a bit of a hack to make '[N]Foo == 'Foo
+            Primitive a_primitive = context->type_buf[a];
+            Primitive b_primitive = context->type_buf[b];
+            if (a_primitive == primitive_array && b_primitive != primitive_array) {
+                a += sizeof(u64) + 1;
+            }
+            if (b_primitive == primitive_array && a_primitive != primitive_array) {
+                b += sizeof(u64) + 1;
+            }
             continue;
         } else {
             return false;
@@ -1169,11 +1181,18 @@ u32 type_duplicate(Context* context, u32 type_index) {
     u32 i = type_index;
     while (1) {
         Primitive p = context->type_buf[i];
-        i += 1;
-
         buf_push(context->type_buf, p);
 
-        if (p != primitive_pointer) {
+        i += 1;
+
+        if (p == primitive_pointer) {
+
+        } else if (p == primitive_array) {
+            for (u32 j = 0; j < sizeof(u64); j += 1) {
+                buf_push(context->type_buf, context->type_buf[i + j]);
+            }
+            i += sizeof(u64);
+        } else {
             break;
         }
     }
@@ -1540,6 +1559,8 @@ u32 parse_type(Context* context, Token* t, u32 length) {
 
                     done = true;
                 } else {
+                    u8* name = string_table_access(context->string_table, t[i].identifier_string_table_index);
+                    printf("Not a valid type: %s (Line %u)\n", name, (u64) t[i].pos.line);
                     return U32_MAX;
                 }
             } break;
@@ -1681,7 +1702,15 @@ bool parse_comma_separated_expr_list(
     u32 e = 0;
     while (i < length) {
         u32 start = i;
-        while (i < length && t[i].kind != token_comma) { i += 1; }
+        while (i < length) {
+            if (t[i].kind == token_comma) {
+                break;
+            }
+            if (t[i].kind == token_bracket && (t[i].bracket.kind & BRACKET_OPEN)) {
+                i += t[i].bracket.offset_to_matching;
+            }
+            i += 1;
+        }
         u32 end = i;
         i += 1; // Skip the comma
 
@@ -2122,7 +2151,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
         switch (body[stmt_start].kind) {
             case token_keyword_var: {
                 if (stmt_length < 2 || body[stmt_start + 1].kind != token_identifier) {
-                    printf("Expecetd identifier after 'var', but found ");
+                    printf("Expected identifier after 'var', but found ");
                     print_token(context->string_table, &body[stmt_start + 1]);
                     printf(" (Line %u)\n", (u64) body[stmt_start + 1].pos.line);
                     body_valid = false;
@@ -2550,8 +2579,6 @@ bool build_ast(Context* context, u8* path) {
         default: assert(false);
     }
 
-
-
     free(file);
 
     if (!valid) {
@@ -2566,6 +2593,10 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
             Primitive solidify_to_primitive = context->type_buf[solidify_to];
+            if (solidify_to_primitive == primitive_pointer) {
+                solidify_to_primitive = primitive_u64;
+            }
+
             bool can_solidify = solidify_to_primitive >= primitive_u8 && solidify_to_primitive <= primitive_i64;
 
             if (can_solidify) {
@@ -2681,17 +2712,47 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                 }
             }
 
-            if (!type_cmp(context, expr->binary.left->type_index, expr->binary.right->type_index)) {
+            expr->type_index = primitive_invalid;
+
+            Primitive left_primitive = context->type_buf[expr->binary.left->type_index];
+            Primitive right_primitive = context->type_buf[expr->binary.right->type_index];
+
+            bool matching_integers =
+                left_primitive == right_primitive &&
+                left_primitive >= primitive_u8 && left_primitive <= primitive_i64;
+
+            if (matching_integers) {
+                expr->type_index = expr->binary.left->type_index;
+            } else switch (expr->binary.op) {
+                case binary_add: {
+                    if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                        expr->type_index = expr->binary.left->type_index;
+                    }
+
+                    if (left_primitive == primitive_u64 && right_primitive == primitive_pointer) {
+                        expr->type_index = expr->binary.right->type_index;
+                    }
+                } break;
+
+                case binary_sub: {
+                    if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                        expr->type_index = expr->binary.left->type_index;
+                    }
+                } break;
+
+                case binary_mul: {} break;
+                case binary_div: {} break;
+
+                default: assert(false);
+            }
+
+            if (expr->type_index == primitive_invalid) {
                 printf("Types don't match: ");
                 print_type(context, expr->binary.left->type_index);
                 printf(" vs ");
                 print_type(context, expr->binary.right->type_index);
                 printf(" (Line %u)\n", (u64) expr->pos.line);
-
-                expr->type_index = primitive_invalid;
                 return false;
-            } else {
-                expr->type_index = expr->binary.left->type_index;
             }
         } break;
 
@@ -2798,6 +2859,9 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
             if (context->type_buf[array_type_index] == primitive_array) {
                 expr->type_index = array_type_index + sizeof(u64) + 1;
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            } else if (context->type_buf[array_type_index] == primitive_pointer && context->type_buf[array_type_index + 1] == primitive_array) {
+                expr->type_index = array_type_index + sizeof(u64) + 2;
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             } else {
                 printf("Can't index a ");
                 print_type(context, array_type_index);
@@ -2805,11 +2869,11 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                 bad = true;
             }
 
-            u32 index_type = expr->subscript.index->type_index;
-            if (context->type_buf[index_type] != primitive_u64) {
+            u32 index_type_index = expr->subscript.index->type_index;
+            if (context->type_buf[index_type_index] != primitive_u64) {
                 // TODO should we allow other integer types and insert automatic promotions as neccesary here??
                 printf("Can only use u64 as an array index, not ");
-                print_type(context, index_type);
+                print_type(context, index_type_index);
                 printf(" (Line %u)\n", (u64) expr->subscript.index->pos.line);
                 bad = true;
             }
@@ -3012,7 +3076,7 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
             intermediate_deallocate_temporary(context, offset_source);
             intermediate_deallocate_temporary(context, offset_target);
         } else {
-            unimplemented();
+            assert(false);
         }
 
     } else {
@@ -3189,26 +3253,34 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             } else {
                 Local right_local = intermediate_allocate_temporary(context, POINTER_SIZE);
                 right_local.as_reference = false;
-
                 linearize_expr(context, expr->dereference_from, right_local, false);
-
                 right_local.as_reference = true;
 
-                if (primitive_is_compound(primitive)) unimplemented(); // TODO intermediate_write_compound_set
-                Op op = {0};
-                op.kind = op_set;
-                op.primitive = primitive_pointer;
-                op.binary.source = right_local;
-                op.binary.target = assign_to;
-                buf_push(context->tmp_ops, op);
+                if (primitive_is_compound(context->type_buf[expr->type_index])) {
+                    assert(assign_to.as_reference);
+                }
+
+                intermediate_write_compound_set(context, right_local, assign_to, expr->type_index);
 
                 intermediate_deallocate_temporary(context, right_local);
             }
         } break;
 
         case expr_subscript: {
-            assert(context->type_buf[expr->subscript.array->type_index] == primitive_array);
-            u32 child_type_index = expr->subscript.array->type_index + 1 + sizeof(u64);
+            u32 subscript_type_index = expr->subscript.array->type_index;
+            u32 child_type_index;
+            bool is_pointer;
+
+            if (context->type_buf[subscript_type_index] == primitive_pointer) {
+                assert(context->type_buf[subscript_type_index + 1] == primitive_array);
+                child_type_index = subscript_type_index + 2 + sizeof(u64);
+                is_pointer = true;
+            } else {
+                assert(context->type_buf[subscript_type_index] == primitive_array);
+                child_type_index = subscript_type_index + 1 + sizeof(u64);
+                is_pointer = false;
+            }
+
             u64 stride = type_size_of(context, child_type_index);
 
             Local base_pointer;
@@ -3217,7 +3289,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             } else {
                 base_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
             }
-            linearize_expr(context, expr->subscript.array, base_pointer, true);
+            linearize_expr(context, expr->subscript.array, base_pointer, !is_pointer);
 
             u64 index_size = primitive_size_of(primitive_u64);
             Local offset = intermediate_allocate_temporary(context, index_size);
@@ -3238,16 +3310,12 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             buf_push(context->tmp_ops, op);
 
             if (!get_address) {
-                if (primitive_is_compound(primitive)) unimplemented(); // TODO intermediate_write_compound_set
+                if (primitive_is_compound(primitive)) {
+                    assert(assign_to.as_reference);
+                }
 
                 base_pointer.as_reference = true;
-
-                op.kind = op_set;
-                op.primitive = context->type_buf[child_type_index];
-                op.binary.source = base_pointer;
-                op.binary.target = assign_to;
-                buf_push(context->tmp_ops, op);
-
+                intermediate_write_compound_set(context, base_pointer, assign_to, child_type_index);
                 intermediate_deallocate_temporary(context, base_pointer);
             }
 
@@ -3265,20 +3333,38 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
         case expr_subscript:
         case expr_dereference:
         {
-            Local left_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
-            Local right_local = intermediate_allocate_temporary(context, type_size_of(context, right->type_index));
+            bool use_pointer_to_right = primitive_is_compound(context->type_buf[left->type_index]);
 
+            Local right_data_local = intermediate_allocate_temporary(context, type_size_of(context, right->type_index));
+            Local pointer_to_right_data_local, right_local;
+            if (use_pointer_to_right) {
+                pointer_to_right_data_local = intermediate_allocate_temporary(context, POINTER_SIZE);
+
+                Op op = {0};
+                op.kind = op_address_of;
+                op.binary.source = right_data_local;
+                op.binary.target = pointer_to_right_data_local;
+                buf_push(context->tmp_ops, op);
+
+                pointer_to_right_data_local.as_reference = true;
+                right_local = pointer_to_right_data_local;
+            } else {
+                right_local = right_data_local;
+            }
+
+            Local left_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
             linearize_expr(context, left, left_local, true);
             left_local.as_reference = true;
 
             linearize_expr(context, right, right_local, false);
 
-            // TODO address_of on right_local if we have a compound type
-
             intermediate_write_compound_set(context, right_local, left_local, left->type_index);
 
             intermediate_deallocate_temporary(context, left_local);
-            intermediate_deallocate_temporary(context, right_local);
+            intermediate_deallocate_temporary(context, right_data_local);
+            if (use_pointer_to_right) {
+                intermediate_deallocate_temporary(context, pointer_to_right_data_local);
+            }
         } break;
 
         case expr_variable: {
