@@ -25,25 +25,36 @@
 
 Handle stdout;
 Handle process_heap;
+i64 perf_frequency;
+
+void printf(u8* string, ...);
+void printf_flush();
+
+#define assert(x)        ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, (u64) __LINE__), printf_flush(), ExitProcess(-1), null))
+#define panic(x, ...)    (printf("Panic at %s:%u: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), ExitThread(-1))
+#define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, (u64) __LINE__), printf_flush(), ExitProcess(-1), null)
 
 void main();
 void program_entry() {
     stdout = GetStdHandle(STD_OUTPUT_HANDLE);
     process_heap = GetProcessHeap();
+    QueryPerformanceFrequency(&perf_frequency);
     main();
+    printf_flush();
     ExitProcess(0);
 }
-
-void printf(u8* string, ...);
-#define assert(x)        ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, (u64) __LINE__), ExitProcess(-1), null))
-#define panic(x, ...)    (printf("Panic at %s:%u: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), ExitThread(-1))
-#define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, (u64) __LINE__), ExitProcess(-1), null)
 
 u64 round_to_next(u64 value, u64 step) {
     value += step - 1;
     value /= step;
     value *= step;
     return value;
+}
+
+i64 perf_time() {
+    i64 result = 0;
+    QueryPerformanceCounter(&result);
+    return result;
 }
 
 // Memory
@@ -422,91 +433,97 @@ u8* printf_buf; // Heh, this is gnarly af.
 
 void printf_integer(u64 value, u8 base);
 
+void printf_flush() {
+    print(printf_buf, buf_length(printf_buf));
+    buf_clear(printf_buf);
+}
+
 void printf(u8* string, ...) {
-    buf_free(printf_buf);
+    bool flush = false;
 
     va_list args = {0};
     va_start(args, string);
 
     for (u8* t = string; *t != '\0'; t += 1) {
         if (*t != '%') {
+            if (*t == '\n') {
+                flush = true;
+            }
             buf_push(printf_buf, *t);
         } else {
             u8 type = *(t + 1);
 
             switch (type) {
-
-            case 'i': {
-                i64 value = va_arg(args, i64);
-                if (value < 0) {
-                    buf_push(printf_buf, '-');
-                    value = -value;
-                }
-                printf_integer(value, 10);
-            } break;
-
-            case 'u': {
-                u64 value = va_arg(args, u64);
-                printf_integer(value, 10);
-            } break;
-
-            case 'c': {
-                u8 value = va_arg(args, u8);
-
-                if (value >= 0x20) {
-                    buf_push(printf_buf, value);
-                } else {
-                    buf_push(printf_buf, '\\');
-
-                    switch (value) {
-
-                    case '\n': buf_push(printf_buf, 'n'); break;
-                    case '\r': buf_push(printf_buf, 'r'); break;
-                    case '\t': buf_push(printf_buf, 't'); break;
-
-                    default: {
-                        buf_push(printf_buf, 'x');
-
-                        u8 hi = (value & 0xf0) >> 4;
-                        if (hi > 9)  buf_push(printf_buf, 'a' + hi);
-                        else         buf_push(printf_buf, '0' + hi);
-                        u8 lo = (value & 0x0f);
-                        if (lo > 9)  buf_push(printf_buf, 'a' + lo);
-                        else         buf_push(printf_buf, '0' + lo);
-                    } break;
-
+                case 'i': {
+                    i64 value = va_arg(args, i64);
+                    if (value < 0) {
+                        buf_push(printf_buf, '-');
+                        value = -value;
                     }
-                }
+                    printf_integer(value, 10);
+                } break;
 
-            } break;
+                case 'u': {
+                    u64 value = va_arg(args, u64);
+                    printf_integer(value, 10);
+                } break;
 
-            case 'x': {
-                buf_push(printf_buf, '0');
-                buf_push(printf_buf, 'x');
-                u64 value = va_arg(args, u64);
-                printf_integer(value, 16);
-            } break;
+                case 'c': {
+                    u8 value = va_arg(args, u8);
 
-            case 's': {
-                u8* other_string = va_arg(args, u8*);
-                str_push_cstr(&printf_buf, other_string);
-            } break;
+                    if (value >= 0x20) {
+                        buf_push(printf_buf, value);
+                    } else {
+                        buf_push(printf_buf, '\\');
 
-            case 'z': {
-                u64 length = va_arg(args, u64);
-                u8* other_string = va_arg(args, u8*);
-                str_push_str(&printf_buf, other_string, length);
-            } break;
+                        switch (value) {
 
-            case '%': {
-                buf_push(printf_buf, '%');
-            } break;
+                        case '\n': buf_push(printf_buf, 'n'); break;
+                        case '\r': buf_push(printf_buf, 'r'); break;
+                        case '\t': buf_push(printf_buf, 't'); break;
 
-            default: {
-                buf_push(printf_buf, type);
-                buf_push(printf_buf, '?');
-            } break;
+                        default: {
+                            buf_push(printf_buf, 'x');
 
+                            u8 hi = (value & 0xf0) >> 4;
+                            if (hi > 9)  buf_push(printf_buf, 'a' + hi);
+                            else         buf_push(printf_buf, '0' + hi);
+                            u8 lo = (value & 0x0f);
+                            if (lo > 9)  buf_push(printf_buf, 'a' + lo);
+                            else         buf_push(printf_buf, '0' + lo);
+                        } break;
+
+                        }
+                    }
+
+                } break;
+
+                case 'x': {
+                    buf_push(printf_buf, '0');
+                    buf_push(printf_buf, 'x');
+                    u64 value = va_arg(args, u64);
+                    printf_integer(value, 16);
+                } break;
+
+                case 's': {
+                    u8* other_string = va_arg(args, u8*);
+                    str_push_cstr(&printf_buf, other_string);
+                } break;
+
+                case 'z': {
+                    u64 length = va_arg(args, u64);
+                    u8* other_string = va_arg(args, u8*);
+                    str_push_str(&printf_buf, other_string, length);
+                } break;
+
+                case '%': {
+                    buf_push(printf_buf, '%');
+                } break;
+
+                default: {
+                    buf_push(printf_buf, type);
+                    buf_push(printf_buf, '?');
+                } break;
             }
 
             t += 1;
@@ -515,7 +532,9 @@ void printf(u8* string, ...) {
 
     va_end(args);
 
-    print(printf_buf, buf_length(printf_buf));
+    if (buf_length(printf_buf) > 10000 || flush) {
+        printf_flush();
+    }
 }
 
 void printf_integer(u64 value, u8 base) {
@@ -5709,6 +5728,8 @@ void print_crap(Context* context) {
 void main() {
     //print_executable_info("build/tiny.exe");
 
+    i64 start_time = perf_time();
+
     Context context = {0};
     bool success;
 
@@ -5741,6 +5762,9 @@ void main() {
     }
     WaitForSingleObject(process_info.process, 0xffffffff);
     #endif
+
+    i64 end_time = perf_time();
+    printf("Ran in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
 }
 
 

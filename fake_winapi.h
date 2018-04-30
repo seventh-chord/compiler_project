@@ -1,7 +1,7 @@
 
 // NB (Morten, 26.03.18) Im not sure if we need these, stuff works just fine without them it seems...
 #define WINAPI_PRE  __declspec(dllimport)
-#define WINAPI_POST //__stdcall // __stdcall is ignored on x64, but needed on x86
+#define WINAPI_POST //__stdcall // Is ignored on x64, but needed on x86
 
 typedef void* Handle;
 
@@ -113,3 +113,11 @@ struct PROCESSINFO {
 };
 
 WINAPI_PRE u32 WINAPI_POST WaitForSingleObject(Handle handle, u32 milliseconds);
+
+
+
+// NB these functions in reality take a LARGE_INTEGER*, but LARGE_INTEGER is a union of a single
+// 64 bit int and two 32 bit ints, to make the function work on windows. That means we can just use
+// a single 64 bit int.
+WINAPI_PRE bool WINAPI_POST QueryPerformanceCounter(i64* counter);
+WINAPI_PRE bool WINAPI_POST QueryPerformanceFrequency(i64* frequency);
