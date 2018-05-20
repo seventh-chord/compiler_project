@@ -21,6 +21,9 @@ REM     build\tiny.obj kernel32.lib^
 REM  &&^
 REM build\tiny.exe
 
+set DEBUG_VAR="NODEBUG"
+if "%1"=="debug" set DEBUG_VAR="DEBUG"
+
 cl /nologo /c /WX^
     /GS- /Gs9999999^
     /Od^
@@ -28,6 +31,7 @@ cl /nologo /c /WX^
     /Fd"build\main.pdb"^
     /Fo"build\main.obj"^
     /TC^
+    /D%DEBUG_VAR%^
     "main.c"^
  &&^
 link /nologo^

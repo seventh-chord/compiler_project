@@ -11,17 +11,22 @@
 #define i64 __int64
 #define u64 unsigned __int64
 
-#define U32_MAX 0xffffffff
-#define U16_MAX 0xffff
 #define U8_MAX 0xff
+#define U16_MAX 0xffff
+#define U32_MAX 0xffffffff
+
+#define I8_MAX 127
+#define I8_MIN -128
 #define I16_MAX 32767
 #define I16_MIN -32768
+#define I32_MAX 2147483647
+#define I32_MIN -2147483648
 
 #define max(a, b)  ((a) > (b)? (a) : (b))
 #define min(a, b)  ((a) > (b)? (b) : (a))
 
 #include <stdarg.h>
-#include "fake_winapi.h" // our substitute for windows.h
+#include "winapi.h" // our substitute for windows.h
 
 Handle stdout;
 Handle process_heap;
@@ -30,9 +35,18 @@ i64 perf_frequency;
 void printf(u8* string, ...);
 void printf_flush();
 
-#define assert(x)        ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, (u64) __LINE__), printf_flush(), ExitProcess(-1), null))
-#define panic(x, ...)    (printf("Panic at %s:%u: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), ExitThread(-1))
-#define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, (u64) __LINE__), printf_flush(), ExitProcess(-1), null)
+
+
+#ifdef DEBUG
+#define trap_or_exit()   (DebugBreak(), ExitProcess(-1))
+#else
+#define trap_or_exit()   (ExitProcess(-1))
+#endif
+
+#define assert(x)        ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null))
+#define panic(x, ...)    (printf("Panic at %s:%u: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
+#define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
+
 
 void main();
 void program_entry() {
@@ -225,6 +239,17 @@ void str_push_zeroes(u8** buf, u64 length) {
     u64* buf_length = &_buf_header(*buf)->length;
     mem_clear(*buf + *buf_length, length);
     *buf_length += length;
+}
+
+void str_push_integer(u8** buf, u8 bytes, u64 value) {
+    assert(bytes <= 8);
+    _buf_fit(*buf, bytes);
+    u64* buf_length = &_buf_header(*buf)->length;
+    for (u8 i = 0; i < bytes; i += 1) {
+        *(*buf + *buf_length + i) = value & 0xff;
+        value = value >> 8;
+    }
+    *buf_length += bytes;
 }
 
 // NB only works on u8* buffers!
@@ -434,7 +459,13 @@ u8* printf_buf; // Heh, this is gnarly af.
 void printf_integer(u64 value, u8 base);
 
 void printf_flush() {
+    #ifdef DEBUG
+    buf_push(printf_buf, '\0');
+    OutputDebugStringA(printf_buf);
+    #else
     print(printf_buf, buf_length(printf_buf));
+    #endif
+
     buf_clear(printf_buf);
 }
 
@@ -892,6 +923,11 @@ typedef struct Local {
     u64 value;
 } Local;
 
+bool local_cmp(Local* a, Local* b) {
+    return a->kind == b->kind && a->as_reference == b->as_reference && a->value == b->value;
+}
+
+
 typedef enum Op_Kind {
     op_end_of_function = 0,
     op_reset_temporary,
@@ -964,28 +1000,43 @@ typedef struct Tmp {
 } Tmp;
 
 
+typedef struct Mem_Item {
+    u64 size;
+    u32 offset;
+} Mem_Item;
+
+typedef struct Mem_Layout {
+    u64 total_bytes;
+
+    // NB pointers point to same number of members as vars/tmps in the coresponding 'Func'
+    Mem_Item* vars;
+    Mem_Item* tmps;
+} Mem_Layout;
+
+
 typedef struct Func {
     u32 name;
 
     // All pointers are to arena alocations!
 
-    // first var is output, second n are params, then normal local variables
+    // first var is output, the next N are params, the rest are local variables
     Var* vars;
-    u32 var_count; // var_count = output + params + locals, length of vars
-    bool* in_scope_map; // used localy inside functions
-
-    Var* params; // pointer into 'vars'
+    u32 var_count; // var_count = output + params + locals
+    bool* in_scope_map; // internal
     u32 param_count;
     u32 return_type_index;
+
+    Tmp* tmps;
+    u32 tmp_count;
+
+    Mem_Layout mem_layout; // used for eval_ops
+    Mem_Layout stack_layout; // for machinecode generations
 
     Stmt* stmts;
     u32 stmt_count;
 
     Op* ops;
     u32 op_count;
-
-    Tmp* tmps;
-    u32 tmp_count;
 
     u32 bytecode_start;
 } Func;
@@ -1025,18 +1076,6 @@ typedef struct Fixup {
     };
 } Fixup;
 
-typedef struct Stack_Fixup {
-    u64 text_location;
-    u32 stack_item_index;
-} Stack_Fixup;
-
-typedef struct Stack_Item {
-    Local local;
-    u8 size;
-
-    u32 offset; // only set once we sort items after writing all instructions for a function
-} Stack_Item;
-
 typedef struct Call_Fixup {
     u64 text_location;
     u32 func_index;
@@ -1044,27 +1083,25 @@ typedef struct Call_Fixup {
 
 
 
-#define REG_COUNT 4 // eax, ecx, edx, ebx
-#define REG_BAD U8_MAX
-
-enum Reg_Names {
-    reg_rax = 0,
-    reg_rcx = 1,
-    reg_rdx = 2,
-    reg_rbx = 3,
-};
-u8* reg_names[REG_COUNT] = { "eax", "ecx", "edx", "ebx" };
-
-typedef struct Reg {
-    bool used;
-    u32 alloc_time;
-    Local local;
-    u8 size;
+typedef enum Reg {
+    reg_rax, reg_rcx, reg_rdx, reg_rbx,
+    reg_rsp, reg_rbp, reg_rsi, reg_rdi,
+    reg_r8,  reg_r9,  reg_r10, reg_r11,
+    reg_r12, reg_r13, reg_r14, reg_r15,
+    REG_COUNT,
+    reg_invalid = U8_MAX,
 } Reg;
 
+u8* reg_names[REG_COUNT] = {
+    "rax", "rcx", "rdx", "rbx",
+    "rsp", "rbp", "rsi", "rdi",
+    "r8",  "r9",  "r10", "r11",
+    "r12", "r13", "r14", "r15"
+};
 
 #define PRINT_GENERATED_INSTRUCTIONS
-#define NO_STACK_SPACE_ALLOCATED U32_MAX
+
+
 
 // NB regarding memory allocation.
 // For short-lived objects, we allocate in the 'stack' arena, which we push/pop.
@@ -1096,15 +1133,7 @@ typedef struct Context {
     Fixup* fixups;
 
     Library_Import* imports; // stretchy-buffer
-
-    // Used during codegen
-    Reg regs[REG_COUNT];
-
-    Stack_Fixup* stack_fixups; // stretchy-buffer
-    Stack_Item* stack_items; // stretchy-buffer
     Call_Fixup* call_fixups; // stretchy-buffer
-
-    u32 time; // incremented with each emitted instruction
 } Context;
 
 
@@ -2302,8 +2331,6 @@ bool parse_function(Context* context, Token* t, u32* length) {
     func->vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
     mem_copy((u8*) context->tmp_vars, (u8*) func->vars, buf_bytes(context->tmp_vars));
 
-    func->params = &func->vars[1];
-
     func->in_scope_map = (bool*) arena_alloc(&context->arena, sizeof(bool) * func->var_count);
 
     return body_valid;
@@ -2801,7 +2828,7 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
             }
 
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
-                u32 expected_type_index = callee->params[p].type_index;
+                u32 expected_type_index = callee->vars[p + 1].type_index;
 
                 if (!typecheck_expr(context, func, expr->call.params[p], expected_type_index)) {
                     return false;
@@ -3508,44 +3535,31 @@ void build_intermediate(Context* context) {
 }
 
 
-typedef struct Eval_Mem_Item {
-    u64 size;
-    u64 start;
-} Eval_Mem_Item;
-
-typedef struct Eval_Mem_Layout {
-    u64 total_size;
-    Eval_Mem_Item* vars;
-    Eval_Mem_Item* tmps;
-} Eval_Mem_Layout;
-
 typedef struct Eval_Stack_Frame Eval_Stack_Frame;
 struct Eval_Stack_Frame {
     Func* func;
     Op* current_op;
     Eval_Stack_Frame* parent;
     Local call_result_into;
-
-    Eval_Mem_Layout* mem_layout;
     u8* local_data;
 };
 
-u8* eval_get_local(Eval_Stack_Frame* frame, Local* local, bool allow_literal) {
-    Eval_Mem_Item* item;
-    switch (local->kind) {
-        case local_variable:  item = &frame->mem_layout->vars[local->value]; break;
-        case local_temporary: item = &frame->mem_layout->tmps[local->value]; break;
+u8* eval_get_local(Eval_Stack_Frame* frame, Local local, bool allow_literal) {
+    Mem_Item* item;
+    switch (local.kind) {
+        case local_variable:  item = &frame->func->mem_layout.vars[local.value]; break;
+        case local_temporary: item = &frame->func->mem_layout.tmps[local.value]; break;
         case local_literal: {
             assert(allow_literal);
-            assert(!local->as_reference);
-            return (u8*) &local->value;
+            assert(!local.as_reference);
+            return (u8*) &local.value;
         } break;
         default: assert(false);
     }
 
-    u8* pointer = frame->local_data + item->start;
-    if (local->as_reference) {
-        assert(item->size >= primitive_size_of(primitive_pointer));
+    u8* pointer = frame->local_data + item->offset;
+    if (local.as_reference) {
+        assert(item->size == POINTER_SIZE);
         pointer = (void*) *((u64*) pointer);
     }
 
@@ -3556,34 +3570,32 @@ void eval_ops(Context* context) {
     arena_stack_push(&context->stack);
 
 
-    Eval_Mem_Layout* mem_layouts = (void*) arena_alloc(&context->stack, sizeof(Eval_Mem_Layout) * buf_length(context->funcs));
+    buf_foreach (Func, func, context->funcs) {
+        assert(func->mem_layout.vars == null && func->mem_layout.tmps == null);
 
-    for (u32 i = 0; i < buf_length(context->funcs); i += 1) {
-        Func* func = &context->funcs[i];
-        Eval_Mem_Layout* layout = &mem_layouts[i];
+        u8* mem_item_data = arena_alloc(&context->arena, sizeof(Mem_Item) * (func->var_count + func->tmp_count));
+        func->mem_layout.vars = (Mem_Item*) mem_item_data;
+        func->mem_layout.tmps = func->mem_layout.vars + func->var_count;
 
-        u8* mem_item_data = arena_alloc(&context->stack, sizeof(Eval_Mem_Item) * (func->tmp_count + func->var_count));
-        layout->vars = (void*) (mem_item_data);
-        layout->tmps = (void*) (mem_item_data + sizeof(Eval_Mem_Item)*func->var_count);
-
-        u64 offset = 0;
+        u32 offset = 0;
 
         for (u32 v = 0; v < func->var_count; v += 1) {
             u64 size = type_size_of(context, func->vars[v].type_index);
-            layout->vars[v].size = size;
-            layout->vars[v].start = offset;
+            func->mem_layout.vars[v].size = size;
+            func->mem_layout.vars[v].offset = offset;
             offset = round_to_next(offset + size, 8);
         }
 
         for (u32 t = 0; t < func->tmp_count; t += 1) {
             u64 size = func->tmps[t].size;
-            layout->tmps[t].size = size;
-            layout->tmps[t].start = offset;
+            func->mem_layout.tmps[t].size = size;
+            func->mem_layout.tmps[t].offset = offset;
             offset = round_to_next(offset + size, 8);
         }
 
-        layout->total_size = offset;
+        func->mem_layout.total_bytes = offset;
     }
+
 
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
     assert(main_func_index != STRING_TABLE_NO_MATCH);
@@ -3591,9 +3603,8 @@ void eval_ops(Context* context) {
 
     Eval_Stack_Frame* frame = arena_insert(&context->stack, ((Eval_Stack_Frame) {0}));
     frame->func = main_func;
-    frame->mem_layout = &mem_layouts[main_func_index];
-    frame->local_data = arena_alloc(&context->stack, frame->mem_layout->total_size);
-    mem_clear(frame->local_data, frame->mem_layout->total_size);
+    frame->local_data = arena_alloc(&context->stack, frame->func->mem_layout.total_bytes);
+    mem_clear(frame->local_data, frame->func->mem_layout.total_bytes);
 
     u64 instructions_executed = 0;
 
@@ -3609,12 +3620,6 @@ void eval_ops(Context* context) {
             Op* op = frame->current_op;
             frame->current_op += 1;
 
-            #if 0 // We use this as a makeshift way of trapping the debugger on a specific instruction
-            if (instructions_executed == 124) {
-                printf("Ding\n");
-            }
-            #endif
-
             #if 0
             printf("(%u) ", (u64) instructions_executed);
             print_op(context, frame->func, op);
@@ -3624,13 +3629,13 @@ void eval_ops(Context* context) {
 
             switch (op->kind) {
                 case op_reset_temporary: {
-                    Eval_Mem_Item* item = &frame->mem_layout->tmps[op->temporary];
-                    mem_clear(frame->local_data + item->start, item->size);
+                    Mem_Item* item = &frame->func->mem_layout.tmps[op->temporary];
+                    mem_clear(frame->local_data + item->offset, item->size);
                 } break;
 
                 case op_set: {
-                    u8* target_pointer = eval_get_local(frame, &op->binary.target, false);
-                    u8* source_pointer = eval_get_local(frame, &op->binary.source, true);
+                    u8* target_pointer = eval_get_local(frame, op->binary.target, false);
+                    u8* source_pointer = eval_get_local(frame, op->binary.source, true);
                     u8 operand_size = primitive_size_of(op->primitive);
                     mem_copy(source_pointer, target_pointer, operand_size);
                 } break;
@@ -3640,8 +3645,8 @@ void eval_ops(Context* context) {
                 case op_mul:
                 case op_div:
                 {
-                    u8* target_pointer = eval_get_local(frame, &op->binary.target, false);
-                    u8* source_pointer = eval_get_local(frame, &op->binary.source, true);
+                    u8* target_pointer = eval_get_local(frame, op->binary.target, false);
+                    u8* source_pointer = eval_get_local(frame, op->binary.source, true);
 
                     u8 operand_size = primitive_size_of(op->primitive);
                     u64 mask = size_mask(operand_size);
@@ -3687,8 +3692,8 @@ void eval_ops(Context* context) {
                 } break;
 
                 case op_address_of: {
-                    u8* target_pointer = eval_get_local(frame, &op->binary.target, false);
-                    u8* source_pointer = eval_get_local(frame, &op->binary.source, false);
+                    u8* target_pointer = eval_get_local(frame, op->binary.target, false);
+                    u8* source_pointer = eval_get_local(frame, op->binary.source, false);
                     if (op->binary.source.as_reference) assert(false);
                     *((u64*) target_pointer) = (u64) source_pointer;
                 } break;
@@ -3699,10 +3704,8 @@ void eval_ops(Context* context) {
                     next_frame->func = callee;
                     next_frame->parent = frame;
                     next_frame->call_result_into = op->call.target;
-
-                    next_frame->mem_layout = &mem_layouts[op->call.func_index];
-                    next_frame->local_data = arena_alloc(&context->stack, next_frame->mem_layout->total_size);
-                    mem_clear(next_frame->local_data, next_frame->mem_layout->total_size);
+                    next_frame->local_data = arena_alloc(&context->stack, next_frame->func->mem_layout.total_bytes);
+                    mem_clear(next_frame->local_data, next_frame->func->mem_layout.total_bytes);
 
                     for (u32 p = 0; p < callee->param_count; p += 1) {
                         Local param = op->call.params[p].local;
@@ -3710,8 +3713,8 @@ void eval_ops(Context* context) {
 
                         Local into_variable = { local_variable, false, p + 1 };
 
-                        u8* our = eval_get_local(frame, &param, false);
-                        u8* their = eval_get_local(next_frame, &into_variable, false);
+                        u8* our = eval_get_local(frame, param, false);
+                        u8* their = eval_get_local(next_frame, into_variable, false);
                         mem_copy(our, their, param_size);
                     }
 
@@ -3721,7 +3724,7 @@ void eval_ops(Context* context) {
 
                 case op_cast: {
                     Local local = op->cast.local;
-                    u64* value = (u64*) eval_get_local(frame, &op->cast.local, false);
+                    u64* value = (u64*) eval_get_local(frame, op->cast.local, false);
 
                     switch (op->primitive) {
                         case primitive_invalid:
@@ -3762,8 +3765,8 @@ void eval_ops(Context* context) {
                 Local output_local = { local_variable, false, 0 };
                 Local target_local = frame->call_result_into;
 
-                u64* output_pointer = (u64*) eval_get_local(frame, &output_local, false);
-                u64* target_pointer = (u64*) eval_get_local(frame->parent, &target_local, false);
+                u64* output_pointer = (u64*) eval_get_local(frame, output_local, false);
+                u64* target_pointer = (u64*) eval_get_local(frame->parent, target_local, false);
                 *target_pointer = *output_pointer;
 
                 frame = frame->parent;
@@ -3779,7 +3782,7 @@ void eval_ops(Context* context) {
         printf("  fn %s:\n", name);
 
         for (u32 i = 0; i < frame->func->var_count; i += 1) {
-            u64 offset = frame->mem_layout->vars[i].start;
+            u32 offset = frame->func->mem_layout.vars[i].offset;
             u64 value = *((u64*) (frame->local_data + offset));
 
             Var* var = &frame->func->vars[i];
@@ -3792,813 +3795,347 @@ void eval_ops(Context* context) {
     arena_stack_pop(&context->stack);
 }
 
-#if 0
-void write_lit(Context* context, u8 size, u64 lit) {
-    switch (size) {
-        default: assert(false);
 
-        #define CASE_N(n)\
-        case n:\
-            buf_push(context->bytecode, lit & 0xff);\
-            lit = lit >> 8; // fallthrough!
+enum {
+    REX_BASE = 0x40,
+    REX_W = 0x08,
+    REX_R = 0x04,
+    REX_X = 0x02,
+    REX_B = 0x01,
+};
 
-        CASE_N(8)
-        CASE_N(7)
-        CASE_N(6)
-        CASE_N(5)
-        CASE_N(4)
-        CASE_N(3)
-        CASE_N(2)
-        CASE_N(1)
+enum {
+    MODRM_REG_OFFSET = 3,
+    MODRM_REG_MASK = 0x38,
+    MODRM_RM_OFFSET = 0,
+    MODRM_RM_MASK = 0x7,
+    MODRM_MOD_OFFSET = 6,
+    MODRM_MOD_MASK = 0xc0,
+};
 
-        #undef CASE_N
-    }
+typedef enum Arithmetic {
+    ARITHMETIC_XOR,
+    ARITHMETIC_COUNT,
+} Arithmetic;
+
+u8 ARITHMETIC_OPCODES_BYTE[ARITHMETIC_COUNT] = {
+    [ARITHMETIC_XOR] = 0x32,
+};
+u8 ARITHMETIC_OPCODES_INT[ARITHMETIC_COUNT] = {
+    [ARITHMETIC_XOR] = 0x33,
+};
+u8* ARITHMETIC_OP_NAMES[ARITHMETIC_COUNT] = {
+    [ARITHMETIC_XOR] = "xor",
+};
+
+void instruction_int3(u8** b) {
+    buf_push(*b, 0xcc);
 }
 
-void write_xor_reg(Context* context, u8 size, u8 reg) {
-    switch (size) {
+void instruction_nop(u8** b) {
+    buf_push(*b, 0x90);
+}
+
+//#define missing_instruction(x) instruction_nop(x)
+#define missing_instruction(x) unimplemented()
+
+void instruction_arithmetic_reg_reg(u8** b, Arithmetic arithmetic, Reg a_reg, Reg b_reg, u8 bytes) {
+    bool use_small_op = false;
+    u8 rex = REX_BASE;
+    u8 modrm = 0xc0;
+
+    modrm |= (a_reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (a_reg > 8) rex |= REX_R;
+    assert(a_reg < 16);
+
+    modrm |= (b_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
+    if (b_reg > 8) rex |= REX_B;
+    assert(b_reg < 16);
+
+    switch (bytes) {
         case 1: {
-            buf_push(context->bytecode, 0x32);
+            use_small_op = true;
         } break;
         case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x33);
+            buf_push(*b, 0x66);
         } break;
         case 4: {
-            buf_push(context->bytecode, 0x33);
         } break;
         case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x33);
+            rex |= REX_W;
         } break;
         default: assert(false);
     }
 
-    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("xor%u %s, %s\n", (u64) (size*8), reg_names[reg], reg_names[reg]);
-    #endif
-}
-
-void write_mov_reg_to_reg(Context* context, u8 size, u8 from_reg, u8 to_reg) {
-    assert(to_reg < 8 && from_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0x88);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x89);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0x89);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x89);
-        } break;
-        default: assert(false);
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
     }
 
-    buf_push(context->bytecode, 0xc0 | (from_reg << 3) | to_reg);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u %s, %s\n", (u64) (size*8), reg_names[to_reg], reg_names[from_reg]);
-    #endif
-}
-
-void write_mov_lit_to_reg(Context* context, u8 size, u64 lit, u8 to_reg) {
-    assert(to_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0xb0 | to_reg);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0xb8 | to_reg);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0xb8 | to_reg);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0xb8 | to_reg);
-        } break;
-        default: assert(false);
-    }
-
-    write_lit(context, size, lit);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u %s, %u\n", (u64) (size*8), reg_names[to_reg], size_mask(size) & lit);
-    #endif
-}
-
-void write_zero_extend(Context* context, u8 from_size, u8 to_size, u8 reg) {
-    // From the intel manual, 3.4.1.1 (./reference/intel_introduction.pdf):
-    // • 64-bit operands generate a 64-bit result in the destination
-    //   general-purpose register.
-    // • 32-bit operands generate a 32-bit result, zero-extended to a 64-bit
-    //   result in the destination general-purpose register.
-    // • 8-bit and 16-bit operands generate an 8-bit or 16-bit result. The
-    //   upper 56 bits or 48 bits (respectively) of the destination
-    //   general-purpose register are not modified by the operation. If the
-    //   result of an 8-bit or 16-bit operation is intended for 64-bit address
-    //   calculation, explicitly sign-extend the register to the full 64-bits.
-
-    bool invalid = false;
-
-    switch (from_size) {
-        case 1: {
-            switch (to_size) {
-                case 1: invalid = true; break;
-
-                case 2: {
-                    buf_push(context->bytecode, 0x66);
-                    buf_push(context->bytecode, 0x0f);
-                    buf_push(context->bytecode, 0xb6);
-                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
-                } break;
-
-                case 4: {
-                    buf_push(context->bytecode, 0x0f);
-                    buf_push(context->bytecode, 0xb6);
-                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
-                } break;
-
-                case 8: {
-                    buf_push(context->bytecode, 0x48);
-                    buf_push(context->bytecode, 0x0f);
-                    buf_push(context->bytecode, 0xb6);
-                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
-                } break;
-
-                default: assert(false);
-            }
-        } break;
-
-        case 2: {
-            switch (to_size) {
-                case 1: invalid = true; break;
-                case 2: invalid = true; break;
-
-                case 4: {
-                    buf_push(context->bytecode, 0x0f);
-                    buf_push(context->bytecode, 0xb7);
-                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
-                } break;
-
-                case 8: {
-                    buf_push(context->bytecode, 0x48);
-                    buf_push(context->bytecode, 0x0f);
-                    buf_push(context->bytecode, 0xb7);
-                    buf_push(context->bytecode, 0xc0 | (reg << 3) | reg);
-                } break;
-
-                default: assert(false);
-            }
-        } break;
-
-        case 4: {
-            // This should be a nop probably, read the notes from the manual above just to verify, then remove the 'unimplemented' if appropriate
-            unimplemented();
-        } break;
-
-        case 8: invalid = true; break;
-
-        default: assert(false);
-    }
-
-    if (invalid) {
-        panic("Can't movzx from %u bytes to %u bytes\n", from_size, to_size);
-    }
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("movzx %s, %s (%u to %u)\n", reg_names[reg], reg_names[reg], (u64) (from_size*8), (u64) (to_size*8));
-    #endif
-}
-
-void write_mov_reg_to_stack(Context* context, u8 size, u32 stack_item_index, u8 from_reg) {
-    assert(from_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0x88);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x89);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0x89);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x89);
-        } break;
-        default: assert(false);
-    }
-
-    buf_push(context->bytecode, 0x44 | (from_reg << 3)); // 0x44 is x+imm8, 0x84 is x+imm32
-    buf_push(context->bytecode, 0x24); // x is rsp
-
-    buf_push(context->bytecode, 0x00);
-
-    Stack_Fixup stack_fixup = {0};
-    stack_fixup.text_location = buf_length(context->bytecode) - sizeof(u8);
-    stack_fixup.stack_item_index = stack_item_index;
-    buf_push(context->stack_fixups, stack_fixup);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u [stack %u], %s\n", (u64) (size*8), (u64) stack_item_index, reg_names[from_reg]);
-    #endif
-}
-
-void write_mov_stack_to_reg(Context* context, u8 size, u32 stack_item_index, u8 to_reg) {
-    assert(to_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0x8a);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x8b);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0x8b);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x8b);
-        } break;
-        default: assert(false);
-    }
-
-    buf_push(context->bytecode, 0x44 | (to_reg << 3)); // 0x44 is x+imm8, 0x84 is x+imm32
-    buf_push(context->bytecode, 0x24); // x is rsp
-
-    buf_push(context->bytecode, 0x00);
-    Stack_Fixup stack_fixup = {0};
-    stack_fixup.text_location = buf_length(context->bytecode) - sizeof(u8);
-    stack_fixup.stack_item_index = stack_item_index;
-    buf_push(context->stack_fixups, stack_fixup);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u %s, [stack %u]\n", (u64) (size*8), reg_names[to_reg], (u64) stack_item_index);
-    #endif
-}
-
-void write_lea_stack_to_reg(Context* context, u32 stack_item_index, u8 to_reg) {
-    assert(to_reg < 8); // otherwise we need to encode registers using rex.{r, x, b}
-
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x8d);
-    buf_push(context->bytecode, 0x44 | (to_reg << 3)); // 0x44 is x+imm8, 0x84 is x+imm32
-    buf_push(context->bytecode, 0x24); // x is rsp
-
-    buf_push(context->bytecode, 0x00);
-    Stack_Fixup stack_fixup = {0};
-    stack_fixup.text_location = buf_length(context->bytecode) - sizeof(u8);
-    stack_fixup.stack_item_index = stack_item_index;
-    buf_push(context->stack_fixups, stack_fixup);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("lea %s, [stack %u]\n", reg_names[to_reg], (u64) stack_item_index);
-    #endif
-}
-
-void write_mov_reg_to_mem(Context* context, u8 size, u8 value_reg, u8 address_reg) {
-    assert(value_reg < 8 && address_reg < 4); // otherwise we need to encode registers using rex.{r, x, b}
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0x88);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x89);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0x89);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x89);
-        } break;
-        default: assert(false);
-    }
-
-    buf_push(context->bytecode, (value_reg << 3) | (address_reg));
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u [%s], %s\n", (u64) (size*8), reg_names[address_reg], reg_names[value_reg]);
-    #endif
-}
-
-void write_mov_mem_to_reg(Context* context, u8 size, u8 value_reg, u8 address_reg) {
-    assert(value_reg < 8 && address_reg < 4); // otherwise we need to encode registers using rex.{r, x, b}
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0x8a);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x8b);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0x8b);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x8b);
-        } break;
-        default: assert(false);
-    }
-
-    buf_push(context->bytecode, (value_reg << 3) | (address_reg));
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u %s, [%s]\n", (u64) (size*8), reg_names[value_reg], reg_names[address_reg]);
-    #endif
-}
-
-void write_add_or_sub_lit_to_reg(Context* context, u8 size, bool add, u64 lit, u8 to_reg) {
-    assert(to_reg < 8);
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0x80);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0x81);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0x81);
-        } break;
-        case 8: {
-            panic("Can't add/sub a 64-bit literal on x64!\n");
-        } break;
-        default: assert(false);
-    }
-    buf_push(context->bytecode, (add? 0xc0 : 0xe8) | to_reg);
-    write_lit(context, size, lit);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u %s, %u\n", add? "add" : "sub", (u64) (size*8), reg_names[to_reg], size_mask(size) & lit);
-    #endif
-}
-
-void write_add_or_sub_reg_to_reg(Context* context, u8 size, bool add, u8 from_reg, u8 to_reg) {
-    assert(from_reg < 8 && to_reg < 8);
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, add? 0x00 : 0x28);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, add? 0x01 : 0x29);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, add? 0x01 : 0x29);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, add? 0x01 : 0x29);
-        } break;
-        default: assert(false);
-    }
-
-    buf_push(context->bytecode, 0xc0 | (from_reg << 3) | to_reg);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u %s, %s\n", add? "add" : "sub", (u64) (size*8), reg_names[to_reg], reg_names[from_reg]);
-    #endif
-}
-
-void write_unsigned_mul(Context* context, u8 size, u8 by_reg) {
-    // remainder goes in rdx, multiplies rax by the value in the given register
-
-    assert(by_reg < 8);
-    assert(!context->regs[reg_rdx].used);
-
-    switch (size) {
-        case 1: {
-            buf_push(context->bytecode, 0xf6);
-        } break;
-        case 2: {
-            buf_push(context->bytecode, 0x66);
-            buf_push(context->bytecode, 0xf7);
-        } break;
-        case 4: {
-            buf_push(context->bytecode, 0xf7);
-        } break;
-        case 8: {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0xf7);
-        } break;
-        default: assert(false);
-    }
-    buf_push(context->bytecode, 0xe0 | by_reg);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mul%u %s\n", (u64) (size*8), reg_names[by_reg]);
-    #endif
-}
-
-
-u32 local_stack_item_index(Context* context, u8 size, Local local, bool allocate) {
-    Local_Kind kind = local_kind(local);
-    assert(kind != local_literal);
-
-    u32 index = NO_STACK_SPACE_ALLOCATED;
-
-    for (u32 i = 0; i < buf_length(context->stack_items); i += 1) {
-        Stack_Item* stack_item = &context->stack_items[i];
-        if (stack_item->local == local) {
-            switch (kind) {
-                case local_temporary: {
-                    stack_item->size = max(stack_item->size, size);
-                } break;
-                case local_variable: {
-                    assert(stack_item->size == size);
-                } break;
-                default: assert(false);
-            }
-
-            index = i;
-            break;
-        }
-    }
-
-    if (index == NO_STACK_SPACE_ALLOCATED && allocate) {
-        index = buf_length(context->stack_items);
-        buf_push(context->stack_items, ((Stack_Item) { .local = local, .size = size }));
-    }
-
-    return index;
-}
-
-void reg_deallocate(Context* context, u8 reg) {
-    // TODO check if we need to deallocate the register at all, or if we can get away
-    // with just overwriting it!
-    // To do this, we need info about the last use of a certain variable/temporary.
-    // To do this, we can just read ahead in the current ops list. Might not be terribly fast though...
-
-    if (!context->regs[reg].used) return;
-    context->regs[reg].used = false;
-
-    Local local = context->regs[reg].local;
-    u8 size = context->regs[reg].size;
-    u32 stack_item_index = local_stack_item_index(context, size, local, true);
-    write_mov_reg_to_stack(context, size, stack_item_index, reg);
-}
-
-void reg_allocate_into(Context* context, u8 size, Local local, u8 reg) {
-    if (context->regs[reg].used && context->regs[reg].local == local) {
-        return;
-    }
-
-    reg_deallocate(context, reg);
-
-    u8 old_reg = REG_BAD;
-    for (u32 r = 0; r < REG_COUNT; r += 1) {
-        if (context->regs[r].used && context->regs[r].local == local) {
-            old_reg = r;
-            break;
-        }
-    }
-
-    if (old_reg == REG_BAD) {
-        u32 stack_item_index = local_stack_item_index(context, size, local, false);
-        if (stack_item_index == NO_STACK_SPACE_ALLOCATED) {
-            unimplemented(); // Is this case even legal? Doesn't it imply we are using an uninitialized variable
-        } else {
-            write_mov_stack_to_reg(context, size, stack_item_index, reg);
-        }
+    if (use_small_op) {
+        buf_push(*b, ARITHMETIC_OPCODES_BYTE[arithmetic]);
     } else {
-        write_mov_reg_to_reg(context, size, old_reg, reg);
-        context->regs[old_reg].used = false;
+        buf_push(*b, ARITHMETIC_OPCODES_INT[arithmetic]);
     }
 
-    context->regs[reg].used = true;
-    context->regs[reg].alloc_time = context->time;
-    context->regs[reg].local = local;
-    context->regs[reg].size = size;
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("%s%u %s %s\n", ARITHMETIC_OP_NAMES[arithmetic], (u64) bytes*8, reg_names[a_reg], reg_names[b_reg]);
+    #endif
 }
 
-u8 reg_allocate(Context* context, u8 size, Local local) {
-    bool deallocate = true;
-    bool reallocate = true;
-
-    u8 reg = REG_BAD;
-    u32 oldest_time = context->time;
-    for (u32 rp = REG_COUNT; rp > 0; rp -= 1) {
-        u32 r = rp - 1;
-
-        // Reallocate a old register
-        if (context->regs[r].alloc_time < oldest_time) {
-            oldest_time = context->regs[r].alloc_time;
-            reg = r;
-
-            reallocate = true;
-            deallocate = true;
-        }
-
-        // Or better, use a unused register
-        if (!context->regs[r].used) {
-            oldest_time = 0; // makes sure we don't try to reallocate in the 'if' above
-            reg = r;
-
-            reallocate = true;
-            deallocate = false;
-        }
-
-        // Or even better, use a register we allready allocated for this
-        if (context->regs[r].used && context->regs[r].local == local) {
-            reg = r;
-
-            reallocate = false;
-            deallocate = false;
-
-            break;
-        }
+Mem_Item* get_stack_item(Func* func, Local local) {
+    Mem_Item* item;
+    switch (local.kind) {
+        case local_variable:  item = &func->stack_layout.vars[local.value]; break;
+        case local_temporary: item = &func->stack_layout.tmps[local.value]; break;
+        case local_literal: assert(false);
+        default: assert(false);
     }
-    assert(reg != REG_BAD);
-
-    // Deallocate old contents of register if needed
-    if (deallocate) {
-        reg_deallocate(context, reg);
-    }
-
-    // Reallocate regsiter
-    if (reallocate) {
-        context->regs[reg].used = true;
-        context->regs[reg].alloc_time = context->time;
-        context->regs[reg].local = local;
-        context->regs[reg].size = size;
-
-        u32 stack_item_index = local_stack_item_index(context, size, local, false);
-        if (stack_item_index != NO_STACK_SPACE_ALLOCATED) {
-            write_mov_stack_to_reg(context, size, stack_item_index, reg);
-        }
-    }
-
-    return reg;
+    return item;
 }
 
-void op_write_machinecode(Context* context, Func* func, Op* op) {
-    u8 flush = REG_BAD;
+void instruction_lea_stack_to_reg(u8** b, Func* func, Local local, Reg reg) {
+    Mem_Item* item = get_stack_item(func, local);
+    u32 offset = item->offset;
 
-    // Binary operators
+    u8 rex = REX_BASE | REX_W;
+    u8 modrm = 0;
+
+    modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (reg > 8) rex |= REX_R;
+    assert(reg < 16);
+
+    modrm |= 0x04; // Use SIB with a 32-bit displacement
+    if (offset <= I8_MAX) {
+        modrm |= 0x40;
+    } else {
+        modrm |= 0x80;
+    }
+
+    buf_push(*b, rex);
+    buf_push(*b, 0x8d);
+    buf_push(*b, modrm);
+    buf_push(*b, 0x24); // SIB which results in 'rsp + offset'
+    str_push_integer(b, (offset <= I8_MAX)? sizeof(i8) : sizeof(i32), offset);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("lea %s, [rsp + %u]\n", reg_names[reg], (u64) offset);
+    #endif
+}
+
+typedef enum Mov_Mode {
+    mov_to,
+    mov_from,
+} Mov_Mode;
+
+void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_reg, u8 bytes) {
+    u8 rex = REX_BASE | REX_W;
+    u8 opcode;
+
+    if (mode == mov_to) {
+        opcode = 0x89;
+    } else {
+        opcode = 0x8b;
+    }
+
+    switch (bytes) {
+        case 1: {
+            opcode -= 1;
+        } break;
+        case 2: {
+            buf_push(*b, 0x66);
+        } break;
+        case 4: {
+        } break;
+        case 8: {
+            rex |= REX_W;
+        } break;
+        default: assert(false);
+    }
+
+    u8 modrm = 0x00;
+
+    modrm |= (value_reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (value_reg > 8) rex |= REX_R;
+    assert(value_reg < 16);
+
+    modrm |= (pointer_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
+    if (pointer_reg > 8) rex |= REX_R;
+    assert(pointer_reg < 16);
+
+    if (pointer_reg == reg_rsp || pointer_reg == reg_rbp || pointer_reg == reg_r12 || pointer_reg == reg_r13) {
+        panic("Can't encode mov to value pointed to by rsp/rbp direction, as these byte sequences are used to indicate the use of a SIB byte.");
+        // TODO there is a talbe in the intel manual (p. 71) which explains these exceptions. Also see reference/notes.md on modrm/sib, which
+        // covers this briefly.
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, opcode);
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (mode == mov_to) {
+        printf("mov%u [%s], %s\n", (u64) bytes*8, reg_names[pointer_reg], reg_names[value_reg]);
+    } else {
+        printf("mov%u %s, [%s]\n", (u64) bytes*8, reg_names[value_reg], reg_names[pointer_reg]);
+    }
+    #endif
+}
+
+void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, Reg reg, Local local, u8 bytes) {
+    Mem_Item* item = get_stack_item(func, local);
+    u32 offset = item->offset;
+
+    u8 rex = REX_BASE | REX_W;
+    u8 modrm = 0;
+    u8 opcode;
+
+    if (mode == mov_to) {
+        opcode = 0x89;
+    } else {
+        opcode = 0x8b;
+    }
+
+    switch (bytes) {
+        case 1: {
+            opcode -= 1;
+        } break;
+        case 2: {
+            buf_push(*b, 0x66);
+        } break;
+        case 4: {
+        } break;
+        case 8: {
+            rex |= REX_W;
+        } break;
+        default: assert(false);
+    }
+
+    modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (reg > 8) rex |= REX_R;
+    assert(reg < 16);
+
+    modrm |= 0x04; // Use SIB with a 32-bit displacement
+    if (offset <= I8_MAX) {
+        modrm |= 0x40;
+    } else {
+        modrm |= 0x80;
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, opcode);
+    buf_push(*b, modrm);
+    buf_push(*b, 0x24); // SIB which results in 'rsp + offset'
+    str_push_integer(b, (offset <= I8_MAX)? sizeof(i8) : sizeof(i32), offset);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (mode == mov_to) {
+        printf("mov%u [rsp + %x], %s\n", (u64) bytes*8, (u64) offset, reg_names[reg]);
+    } else {
+        printf("mov%u %s, [rsp + %x]\n", (u64) bytes*8, reg_names[reg], (u64) offset);
+    }
+    #endif
+}
+
+void instruction_mov_imm_to_reg(u8** b, u64 value, Reg reg, u8 bytes) {
+    u8 rex = REX_BASE;
+    u8 opcode;
+
+    switch (bytes) {
+        case 1: {
+            opcode = 0xb0;
+        } break;
+        case 2: {
+            buf_push(*b, 0x66);
+            opcode = 0xb8;
+        } break;
+        case 4: {
+            opcode = 0xb8;
+        } break;
+        case 8: {
+            opcode = 0xb8;
+            rex |= REX_W;
+        } break;
+        default: assert(false);
+    }
+
+    opcode |= reg & 0x07;
+    if (reg > 8) rex |= REX_B;
+    assert(reg < 16);
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+
+    buf_push(*b, opcode);
+
+    str_push_integer(b, bytes, value);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov%u %s, %u\n", (u64) bytes*8, reg_names[reg], value);
+    #endif
+}
+
+
+void machinecode_for_op(Context* context, Func* func, Op* op) {
+    u8 primitive_size = primitive_size_of(op->primitive);
+
     switch (op->kind) {
-        case op_set:
+        case op_set: {
+            if (op->binary.source.kind == local_literal) {
+                assert(!op->binary.source.as_reference);
+                instruction_mov_imm_to_reg(&context->bytecode, op->binary.source.value, reg_rax, primitive_size);
+            } else if (op->binary.source.as_reference) {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.source, POINTER_SIZE);
+                instruction_mov_pointer(&context->bytecode, mov_from, reg_rax, reg_rax, primitive_size);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.source, primitive_size);
+            }
+
+            if (op->binary.target.as_reference) {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+            }
+        } break;
+
+        case op_address_of: {
+            if (op->binary.source.as_reference) unimplemented(); // TODO
+            if (op->binary.target.as_reference) unimplemented(); // TODO
+
+            instruction_lea_stack_to_reg(&context->bytecode, func, op->binary.source, reg_rax);
+            instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, POINTER_SIZE);
+        } break;
+
         case op_add:
         case op_sub:
         case op_mul:
         case op_div:
         {
-            u8 operand_size = primitive_size_of(op->primitive);
+            if (op->binary.source.as_reference) unimplemented(); // TODO
+            if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            // Figure out special requirements
-            // These requirements might seem a bit funky, but they reflect the way x64
-            // instructions are set up.
-            bool left_must_be_eax = false;
-            bool clobbers_edx = false;
-
-            switch (op->kind) {
-                case op_set: break;
-                case op_add: break;
-                case op_sub: break;
-
-                case op_mul: {
-                    left_must_be_eax = true;
-                    clobbers_edx = true;
-                    assert(local_kind(op->binary.source) != local_literal);
-                } break;
-
-                case op_div: {
-                    // Probably can be same as op_mul though, need to verify once we implement division properly
-                    unimplemented();
-                } break;
-
-                default: assert(false);
-            }
-
-            // Allocate registers based on requirements
-            u8 left_reg, right_reg;
-            u64 right_literal;
-            bool use_right_literal;
-
-            if (left_must_be_eax) {
-                left_reg = reg_rax;
-                reg_allocate_into(context, operand_size, op->binary.target, left_reg);
-            } else {
-                left_reg = reg_allocate(context, operand_size, op->binary.target);
-            }
-
-            if (local_kind(op->binary.source) == local_literal) {
-                use_right_literal = true;
-                right_literal = func->literals[local_index(op->binary.source)];
-            } else {
-                use_right_literal = false;
-                right_reg = reg_allocate(context, operand_size, op->binary.source);
-            }
-
-            if (clobbers_edx) {
-                // Note that we still can use edx as a right reg in the instruction generated
-                // below, because we only read from it and deallocating does not overwrite!
-                assert(left_reg != 2);
-                reg_deallocate(context, 2);
-            }
-
-            if (!use_right_literal) {
-                assert(left_reg != right_reg);
-            }
-
-            // Generate opcodes
-            switch (op->kind) {
-                case op_set: {
-                    if (use_right_literal) {
-                        write_mov_lit_to_reg(context, operand_size, right_literal, left_reg);
-                    } else {
-                        write_mov_reg_to_reg(context, operand_size, right_reg, left_reg);
-                    }
-                } break;
-
-                case op_add: {
-                    if (use_right_literal) {
-                        write_add_or_sub_lit_to_reg(context, operand_size, true, right_literal, left_reg);
-                    } else {
-                        write_add_or_sub_reg_to_reg(context, operand_size, true, right_reg, left_reg);
-                    }
-                } break;
-
-                case op_sub: {
-                    if (use_right_literal) {
-                        write_add_or_sub_lit_to_reg(context, operand_size, false, right_literal, left_reg);
-                    } else {
-                        write_add_or_sub_reg_to_reg(context, operand_size, false, right_reg, left_reg);
-                    }
-                } break;
-
-                case op_mul: {
-                    assert(left_reg == reg_rax);
-                    assert(!use_right_literal);
-                    write_unsigned_mul(context, operand_size, right_reg);
-                } break;
-
-                case op_div: {
-                    assert(left_reg == reg_rax);
-                    assert(!use_right_literal);
-                    unimplemented();
-                } break;
-
-                default: assert(false);
-            }
-
-            flush = left_reg;
-        } break;
-
-        case op_read_pointer: {
-            assert(local_kind(op->binary.source) != local_literal);
-            assert(local_kind(op->binary.target) != local_literal);
-
-            u8 operand_size = primitive_size_of(op->primitive);
-            u8 value_reg = reg_allocate(context, operand_size, op->binary.target);
-            u8 address_reg = reg_allocate(context, operand_size, op->binary.source);
-            write_mov_mem_to_reg(context, operand_size, value_reg, address_reg);
-
-            flush = value_reg;
-        } break;
-
-        case op_write_pointer: {
-            assert(local_kind(op->binary.source) != local_literal);
-            assert(local_kind(op->binary.target) != local_literal);
-
-            u8 operand_size = primitive_size_of(op->primitive);
-            u8 value_reg = reg_allocate(context, operand_size, op->binary.source);
-            u8 address_reg = reg_allocate(context, operand_size, op->binary.target);
-            write_mov_reg_to_mem(context, operand_size, value_reg, address_reg);
-        } break;
-
-        case op_address_of: {
-            u8 pointer_size = 8;
-            u8 target_reg = reg_allocate(context, pointer_size, op->binary.target);
-
-            Local source = op->binary.source;
-            assert(local_kind(source) == local_variable);
-            Primitive operand_primitive = context->type_buf[func->vars[local_index(source)].type_index];
-            u8 operand_size = primitive_size_of(operand_primitive);
-            u32 stack_item_index = local_stack_item_index(context, operand_size, source, false);
-
-            // Implies we are taking the address of a uninitialized variable
-            assert(stack_item_index != NO_STACK_SPACE_ALLOCATED);
-
-            write_lea_stack_to_reg(context, stack_item_index, target_reg);
-
-            flush = target_reg;
+            missing_instruction(&context->bytecode);
         } break;
 
         case op_call: {
-            // TODO calling convention: Which registers do we need to deallocate
-
-            // TODO we can avoid deallocating and reallocating here, if we deallocate
-            // after punching in parameters
-            for (u32 r = 0; r < REG_COUNT; r += 1) {
-                reg_deallocate(context, r);
-            }
-
-            Func* callee = &context->funcs[op->call.func_index];
-            for (u32 p = 0; p < callee->param_count; p += 1) {
-                Local param_local = op->call.params[p].local;
-                u8 param_size = op->call.params[p].size;
-
-                if (p < 4) {
-                    u8 param_reg;
-                    switch (p) {
-                        case 0: param_reg = reg_rcx; break;
-                        case 1: param_reg = reg_rdx; break;
-                        case 2: unimplemented(); break; // r8
-                        case 3: unimplemented(); break; // r9
-                        default: assert(false);
-                    }
-
-                    if (local_kind(param_local) == local_literal) {
-                        u64 literal = func->literals[local_index(param_local)];
-                        write_mov_lit_to_reg(context, param_size, literal, param_reg);
-                    } else {
-                        reg_allocate_into(context, param_size, param_local, param_reg);
-                        context->regs[param_reg].used = false;
-                    }
-                } else {
-                    // TODO Parameters go on the stack
-                
-                    // TODO we need to reserve stack space for parameters, even if we only
-                    // pass parameters via registers.
-                    unimplemented();
-                }
-            }
-
-            buf_push(context->bytecode, 0xe8);
-            buf_push(context->bytecode, 0xde);
-            buf_push(context->bytecode, 0xad);
-            buf_push(context->bytecode, 0xbe);
-            buf_push(context->bytecode, 0xef);
-
-            Call_Fixup fixup = {0};
-            fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-            fixup.func_index = op->call.func_index;
-            buf_push(context->call_fixups, fixup);
-
-            #ifdef PRINT_GENERATED_INSTRUCTIONS
-            u8* name = string_table_access(context->string_table, context->funcs[op->call.func_index].name);
-            printf("call %s\n", name);
-            #endif
-
-            assert(!context->regs[reg_rax].used);
-            context->regs[reg_rax] = (Reg) {
-                .used = true,
-                .alloc_time = context->time,
-                .local = op->call.target,
-                .size = primitive_size_of(op->primitive)
-            };
-            flush = reg_rax;
+            missing_instruction(&context->bytecode);
         } break;
 
         case op_cast: {
-            u8 new_size = primitive_size_of(op->primitive);
-            u8 old_size = primitive_size_of(op->cast.old_primitive);
-
-            if (new_size > old_size) {
-                u8 reg = reg_allocate(context, old_size, op->cast.local);
-                write_zero_extend(context, old_size, new_size, reg);
-                context->regs[reg].size = new_size;
-                flush = reg;
-            }
+            missing_instruction(&context->bytecode);
         } break;
 
-        case op_reset_temporary: {
-            for (u32 r = 0; r < REG_COUNT; r += 1) {
-                Local local = context->regs[r].local;
-                if (context->regs[r].used && local.kind == local_temporary && local.value == op->temporary) {
-                    context->regs[r] = (Reg) {0};
-                }
-            }
-        } break;
+        case op_reset_temporary: break;
 
-
+        case op_end_of_function: assert(false);
         default: assert(false);
-    }
-
-    if (flush != REG_BAD && local_kind(context->regs[flush].local) == local_variable) {
-        reg_deallocate(context, flush);
     }
 }
 
@@ -4613,10 +4150,6 @@ void build_machinecode(Context* context) {
 
 
     buf_foreach (Func, func, context->funcs) {
-        buf_clear(context->stack_fixups);
-        buf_clear(context->stack_items);
-        mem_clear((u8*) context->regs, sizeof(Reg) * REG_COUNT);
-
         func->bytecode_start = buf_length(context->bytecode);
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
@@ -4624,130 +4157,156 @@ void build_machinecode(Context* context) {
         printf("; --- fn %s ---\n", name);
         #endif
 
-        // TODO calling convention
-        // We need preserve non-volatile registers if we change them
-        // That code must go here
-        // For now we don't need to because we clobber all registers when calling anything
 
+        // Lay out stack
+        assert(func->stack_layout.vars == null && func->stack_layout.tmps == null);
+
+        u8* mem_item_data = arena_alloc(&context->arena, sizeof(Mem_Item) * (func->var_count + func->tmp_count));
+        func->stack_layout.vars = (Mem_Item*) mem_item_data;
+        func->stack_layout.tmps = func->stack_layout.vars + func->var_count;
+
+        u32 offset = 0;
+
+        for (u32 v = 0; v < func->var_count; v += 1) {
+            u64 size = type_size_of(context, func->vars[v].type_index);
+            offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
+
+            if (v > 0 && v <= func->param_count) {
+                // Parameter, defer until later
+                if (size > POINTER_SIZE) unimplemented(); // TODO parameter by-reference??
+                continue;
+            }
+
+            func->stack_layout.vars[v].size = size;
+            func->stack_layout.vars[v].offset = offset;
+
+            offset += size;
+        }
+
+        for (u32 t = 0; t < func->tmp_count; t += 1) {
+            u64 size = func->tmps[t].size;
+            offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
+
+            func->stack_layout.tmps[t].size = size;
+            func->stack_layout.tmps[t].offset = offset;
+
+            offset += size;
+        }
+
+        // TODO calling convention -- What about extra space at the end of the stack for paramaters of functions we call?
+        offset = ((offset + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
+        func->stack_layout.total_bytes = offset;
+
+        for (u32 v = 1; v <= func->param_count; v += 1) {
+            u64 size = type_size_of(context, func->vars[v].type_index);
+            assert(size <= POINTER_SIZE);
+
+            func->stack_layout.vars[v].size = POINTER_SIZE;
+            func->stack_layout.vars[v].offset = func->stack_layout.total_bytes + 8*v;
+        }
+
+        #if 0
+        printf("%x total size\n", func->stack_layout.total_bytes);
+        for (u32 v = 0; v < func->var_count; v += 1) {
+            Mem_Item* item = &func->stack_layout.vars[v];
+            Var* var = &func->vars[v];
+            printf("  %s\t%x, %x\n", string_table_access(context->string_table, var->name), (u32) item->offset, (u64) item->size);
+        }
+        for (u32 t = 0; t < func->tmp_count; t += 1) {
+            Mem_Item* item = &func->stack_layout.tmps[t];
+            printf("  $%u    %x, %x\n", (u64) t, (u32) item->offset, (u64) item->size);
+        }
+        #endif
+
+        if (func->stack_layout.total_bytes < I8_MAX) {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x83);
+            buf_push(context->bytecode, 0xec);
+            str_push_integer(&context->bytecode, sizeof(i8), (u8) func->stack_layout.total_bytes);
+        } else {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x81);
+            buf_push(context->bytecode, 0xec);
+            str_push_integer(&context->bytecode, sizeof(i32), func->stack_layout.total_bytes);
+        }
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("sub rsp, %x\n", func->stack_layout.total_bytes);
+        #endif
+        
+        // TODO calling convention -- Preserve non-volatile registers! Also, we need to allocate stack space for that!
+
+        // Copy parameters onto stack
         for (u32 p = 0; p < func->param_count; p += 1) {
-            u32 var_index = p + 1; // + 1 because first var is output
-            Local local = new_local(local_variable, var_index);
+            Local local = { local_variable, false, p + 1 };
 
-            u8 operand_size = primitive_size_of(context->type_buf[func->params[p].type_index]);
+            u8 operand_size = primitive_size_of(context->type_buf[func->vars[p + 1].type_index]);
 
             if (p < 4) {
-                u8 r;
+                // Parameter is passed in register. Once we try to optimize, we just want to leave it there...
+                u8 reg;
                 switch (p) {
-                    case 0: r = reg_rcx; break;
-                    case 1: r = reg_rdx; break;
-                    case 2: unimplemented(); break; // r8
-                    case 3: unimplemented(); break; // r9
+                    case 0: reg = reg_rcx; break;
+                    case 1: reg = reg_rdx; break;
+                    case 2: reg = reg_r8; break;
+                    case 3: reg = reg_r9; break;
                     default: assert(false);
                 }
-
-                context->regs[r] = (Reg) {
-                    .used = true,
-                    .local = local,
-                    .size = operand_size,
-                };
-            } else {
-                // TODO Parameters go on stack!
-                // All parameters will have preallocated stack space, which we should probably use while we are at it.
-                // This means punching negative values into 'func->stack_offsets', because the preallocated space is
-                // on the other side of rsp from the rest of our stack space.
-                unimplemented();
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg, local, 8);
             }
         }
 
-        // TODO don't generate sub rsp if we don't use the stack
-        // sub rsp, stack frame size
-        buf_push(context->bytecode, 0x48);
-        buf_push(context->bytecode, 0x83);
-        buf_push(context->bytecode, 0xec);
-        buf_push(context->bytecode, 0x00);
-        u64 stack_frame_size_text_location = buf_length(context->bytecode) - sizeof(u8);
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("sub rsp, stack_frame_size\n");
-        #endif
-
-
+        // Write out operations
         for (u32 i = 0; i < func->op_count; i += 1) {
             Op* op = &func->ops[i];
-            context->time += 1;
-            op_write_machinecode(context, func, op);
+            machinecode_for_op(context, func, op);
         }
 
-        Local output_local = new_local(local_variable, 0);
+        // Pass output
+        Local output_local = { local_variable, false, 0 };
         Primitive output_primitive = context->type_buf[func->vars[0].type_index];
+
         if (output_primitive == primitive_void) {
-            write_xor_reg(context, 8, reg_rax);
+            instruction_arithmetic_reg_reg(&context->bytecode, ARITHMETIC_XOR, reg_rax, reg_rax, POINTER_SIZE);
+        } else if (primitive_is_compound(output_primitive)) {
+            if (output_primitive == primitive_array) {
+                unimplemented(); // TODO by-reference semantics
+            } else {
+                assert(false);
+            }
         } else {
             u8 operand_size = primitive_size_of(output_primitive);
-            reg_allocate_into(context, operand_size, output_local, reg_rax);
+            Local output_local = { local_variable, false, 0 };
+            instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, output_local, operand_size);
         }
 
-
-        // Stack fixups
-        buf_foreach (Stack_Item, stack_item, context->stack_items) { stack_item->offset = U32_MAX; }
-
-        u32 stack_offset = 0; // TODO stack space for function parameters!
-        for (u32 i = 0; i < buf_length(context->stack_items); i += 1) {
-            Stack_Item* smallest = null;
-            u8 size = U8_MAX;
-            buf_foreach (Stack_Item, item, context->stack_items) {
-                if (item->offset != U32_MAX) continue;
-                if (item->size < size) {
-                    size = item->size;
-                    smallest = item;
-                }
-            }
-            assert(smallest != null);
-
-            stack_offset = round_to_next(stack_offset, smallest->size);
-            smallest->offset = stack_offset;
-            stack_offset += smallest->size;
+        // Reset stack
+        if (func->stack_layout.total_bytes < I8_MAX) {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x83);
+            buf_push(context->bytecode, 0xc4);
+            buf_push(context->bytecode, func->stack_layout.total_bytes);
+        } else {
+            buf_push(context->bytecode, 0x48);
+            buf_push(context->bytecode, 0x81);
+            buf_push(context->bytecode, 0xc4);
+            str_push_integer(&context->bytecode, sizeof(i32), func->stack_layout.total_bytes);
         }
-
-        u32 stack_size = ((stack_offset + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
-        // If this assertion trips, we have to encode stack size as a imm32 in the add/sub
-        // instructions setting up the stack frame.
-        // While we are at it, me might want to figure out a way of removing the add/sub
-        // instructions completely when we do not use the stack at all!
-        assert((stack_size & 0x7f) == stack_size);
-
-        buf_foreach (Stack_Fixup, f, context->stack_fixups) {
-            u8 old_value = context->bytecode[f->text_location];
-            assert(old_value == 0x00);
-
-            Stack_Item* stack_item = &context->stack_items[f->stack_item_index];
-            u32 adjusted_offset = stack_item->offset;
-
-            // Eventually, this assertion will trip. We then need to encode disp32 instead of always encoding disp8
-            // The assert checks for signed values, not sure if that is needed...
-            // We also have to fix write_mov_stack_to_reg so the functions still match.
-            assert((adjusted_offset & 0x7f) == adjusted_offset);
-
-            context->bytecode[f->text_location] = (u8) adjusted_offset;
-        }
-
-        // add rsp, stack frame size
-        buf_push(context->bytecode, 0x48);
-        buf_push(context->bytecode, 0x83);
-        buf_push(context->bytecode, 0xc4);
-        buf_push(context->bytecode, stack_size);
-        context->bytecode[stack_frame_size_text_location] = stack_size; // fixes up initial 'sub rsp, ...'
-
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("add rsp, stack_frame_size (stack_frame_size is %u)\n", (u64) stack_size);
+        printf("add rsp, %x\n", (u64) func->stack_layout.total_bytes);
         #endif
 
-        // TODO this 'if' is only for testing purposes!!
-        if (func != main_func) {
-            buf_push(context->bytecode, 0xc3);
-            #ifdef PRINT_GENERATED_INSTRUCTIONS
-            printf("ret\n");
-            #endif
-        }
+
+        // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
+        // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
+        // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
+        if (func == main_func) continue; // Don't return out of main, so we can inject fake stuff manually after it
+
+
+        // Return to caller
+        buf_push(context->bytecode, 0xc3);
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("ret\n");
+        #endif
     }
 
     // Call fixups
@@ -4763,7 +4322,8 @@ void build_machinecode(Context* context) {
 
     // Move output into .data+0
     {
-        u8 output_reg = reg_allocate(context, 1, new_local(local_variable, 0));
+        Local output_local = { local_variable, false, 0 };
+        u8 output_reg = reg_rax;
 
         buf_push(context->bytecode, 0x88);
         buf_push(context->bytecode, 0x05 | (output_reg << 3));
@@ -5529,6 +5089,8 @@ bool write_executable(u8* path, Context* context) {
     return true;
 }
 
+
+
 void print_executable_info(u8* path) {
     // NB this is only testing code!!!!!!!!!!!!!!!!!!!!!!
     // No overflow checking here!
@@ -5693,9 +5255,8 @@ void print_executable_info(u8* path) {
 
     free(file);
 }
-#endif
 
-void print_crap(Context* context) {
+void print_verbose_info(Context* context) {
     printf("%u functions:\n", (u64) buf_length(context->funcs));
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
         Func* func = context->funcs + f;
@@ -5725,6 +5286,7 @@ void print_crap(Context* context) {
     }
 }
 
+
 void main() {
     //print_executable_info("build/tiny.exe");
 
@@ -5740,12 +5302,11 @@ void main() {
         return;
     }
 
-    print_crap(&context);
+    print_verbose_info(&context);
 
     build_intermediate(&context);
     eval_ops(&context);
 
-    #if 0
     build_machinecode(&context);
     if (!write_executable("out.exe", &context)) {
         return;
@@ -5761,45 +5322,7 @@ void main() {
         return;
     }
     WaitForSingleObject(process_info.process, 0xffffffff);
-    #endif
 
     i64 end_time = perf_time();
     printf("Ran in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
 }
-
-
-/*
-win32 functions are __stdcall, but that is ignored in x64
-
-First four parameters go in registers, depending on type:
-     rcx  xmm0
-     rdx  xmm1
-     r8   xmm2
-     r9   xmm3
-Larger types are passed as pointers to caller-allocated memory
-Caller-allocated memory must be 16-byte alligned
-Values are returned in rax or xmm0 if they fit
-
-Voltatile registers can be overwritten by the callee, invalidating their previous
-values. Nonvolatile registers must remain constant across function calls.
-Volatile         rax rcx rdx  r8  r9 r10 r11
-Nonvoltatile     rbx rbp rdi rsi rsp r12 r13 r14 r15
-
-Caller must allocate stack space for all passed parameters, even though the first
-four parameters always go in registers rather than on the stack. Space for at least
-four parameters must be allocated!
-
-The stack grows downwards
-rsp points to the bottom of the stack
-rsp must be 16 byte aligned when 'call' is executed
-
-call pushes return rip (8 bytes)
-*/
-
-
-/*
-
-kernel32.lib 
-C:\Program Files (x86)\Windows Kits\10\Lib\10.0.16299.0\um\x64
-
-*/
