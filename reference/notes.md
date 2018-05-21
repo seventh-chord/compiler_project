@@ -90,11 +90,6 @@ The stack grows towards lower addresses.
 Relative offsets are sign-extended and added to 'rip'.
 
 # Calling convention
-?????????
-Alignment
-Paramter passing
-Volatility
-
 (Somewhat sketchy old notes, probably revise these...)
 win32 functions are __stdcall, but that is ignored in x64
 
@@ -118,9 +113,8 @@ four parameters must be allocated!
 
 The stack grows downwards
 rsp points to the bottom of the stack
-rsp must be 16 byte aligned when 'call' is executed
-
-call pushes return rip (8 bytes)
+rsp must be 16 byte aligned after 'call' is executed
+'call' pushes return rip (8 bytes)
 
 # General purpose instructions
 Not comprehensive!!

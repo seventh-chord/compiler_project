@@ -538,6 +538,7 @@ void printf(u8* string, ...) {
 
                 case 's': {
                     u8* other_string = va_arg(args, u8*);
+                    assert(other_string != null);
                     str_push_cstr(&printf_buf, other_string);
                 } break;
 
@@ -1099,7 +1100,7 @@ u8* reg_names[REG_COUNT] = {
     "r12", "r13", "r14", "r15"
 };
 
-#define PRINT_GENERATED_INSTRUCTIONS
+//#define PRINT_GENERATED_INSTRUCTIONS
 
 
 
@@ -3814,18 +3815,26 @@ enum {
 };
 
 typedef enum Arithmetic {
-    ARITHMETIC_XOR,
+    arithmetic_xor,
+    arithmetic_add,
+    arithmetic_sub,
     ARITHMETIC_COUNT,
 } Arithmetic;
 
 u8 ARITHMETIC_OPCODES_BYTE[ARITHMETIC_COUNT] = {
-    [ARITHMETIC_XOR] = 0x32,
+    [arithmetic_xor] = 0x32,
+    [arithmetic_add] = 0x02,
+    [arithmetic_sub] = 0x2a,
 };
 u8 ARITHMETIC_OPCODES_INT[ARITHMETIC_COUNT] = {
-    [ARITHMETIC_XOR] = 0x33,
+    [arithmetic_xor] = 0x33,
+    [arithmetic_add] = 0x03,
+    [arithmetic_sub] = 0x2b,
 };
 u8* ARITHMETIC_OP_NAMES[ARITHMETIC_COUNT] = {
-    [ARITHMETIC_XOR] = "xor",
+    [arithmetic_xor] = "xor",
+    [arithmetic_add] = "add",
+    [arithmetic_sub] = "sub",
 };
 
 void instruction_int3(u8** b) {
@@ -3881,6 +3890,42 @@ void instruction_arithmetic_reg_reg(u8** b, Arithmetic arithmetic, Reg a_reg, Re
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("%s%u %s %s\n", ARITHMETIC_OP_NAMES[arithmetic], (u64) bytes*8, reg_names[a_reg], reg_names[b_reg]);
+    #endif
+}
+
+// Multiplies/divides reg_rax by reg, storing the result in reg_rax.
+// Higher order bits (for mul) or remainder (for div) are stored in reg_rdx or the second byte of reg_rax (for 8-bit mul)
+void instruction_mul_or_div_reg(u8** b, bool mul, Reg reg, u8 bytes) {
+    u8 rex = REX_BASE;
+    u8 opcode = 0xf7;
+
+    u8 modrm;
+    if (mul) {
+        modrm = 0xe0;
+    } else {
+        modrm = 0xf0;
+    }
+
+    modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+    if (reg > 8) rex |= REX_B;
+    assert(reg < 16);
+
+    switch (bytes) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(*b, 0x66); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, opcode);
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("%s%u rax, %s\n", mul? "mul" : "div", (u64) bytes*8, reg_names[reg]);
     #endif
 }
 
@@ -3966,7 +4011,7 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_r
 
     if (pointer_reg == reg_rsp || pointer_reg == reg_rbp || pointer_reg == reg_r12 || pointer_reg == reg_r13) {
         panic("Can't encode mov to value pointed to by rsp/rbp direction, as these byte sequences are used to indicate the use of a SIB byte.");
-        // TODO there is a talbe in the intel manual (p. 71) which explains these exceptions. Also see reference/notes.md on modrm/sib, which
+        // TODO there is a table in the intel manual (p. 71) which explains these exceptions. Also see reference/notes.md on modrm/sib, which
         // covers this briefly.
     }
 
@@ -4081,21 +4126,31 @@ void instruction_mov_imm_to_reg(u8** b, u64 value, Reg reg, u8 bytes) {
     #endif
 }
 
+void instruction_load_local(u8** b, Func* func, Reg reg, Local local, u8 bytes) {
+    if (local.kind == local_literal) {
+        assert(!local.as_reference);
+        instruction_mov_imm_to_reg(b, local.value, reg, bytes);
+    } else if (local.as_reference) {
+        instruction_mov_stack(b, func, mov_from, reg, local, POINTER_SIZE);
+        instruction_mov_pointer(b, mov_from, reg, reg, bytes);
+    } else {
+        instruction_mov_stack(b, func, mov_from, reg, local, bytes);
+    }
+}
+
 
 void machinecode_for_op(Context* context, Func* func, Op* op) {
     u8 primitive_size = primitive_size_of(op->primitive);
 
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("  > ");
+    print_op(context, func, op);
+    printf("\n");
+    #endif
+
     switch (op->kind) {
         case op_set: {
-            if (op->binary.source.kind == local_literal) {
-                assert(!op->binary.source.as_reference);
-                instruction_mov_imm_to_reg(&context->bytecode, op->binary.source.value, reg_rax, primitive_size);
-            } else if (op->binary.source.as_reference) {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.source, POINTER_SIZE);
-                instruction_mov_pointer(&context->bytecode, mov_from, reg_rax, reg_rax, primitive_size);
-            } else {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.source, primitive_size);
-            }
+            instruction_load_local(&context->bytecode, func, reg_rax, op->binary.source, primitive_size);
 
             if (op->binary.target.as_reference) {
                 instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
@@ -4106,6 +4161,8 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
         } break;
 
         case op_address_of: {
+            // TODO neither of these cases currently ever happens, due to how we generate the intermediate bytecode. Once we start
+            // optimizing, this might change though...
             if (op->binary.source.as_reference) unimplemented(); // TODO
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
@@ -4115,21 +4172,105 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
 
         case op_add:
         case op_sub:
+        {
+            int kind;
+            switch (op->kind) {
+                case op_add: kind = arithmetic_add; break;
+                case op_sub: kind = arithmetic_sub; break;
+                default: assert(false);
+            }
+
+            if (op->binary.target.as_reference) {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_pointer(&context->bytecode, mov_from, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
+            }
+
+            instruction_load_local(&context->bytecode, func, reg_rdx, op->binary.source, primitive_size);
+
+            instruction_arithmetic_reg_reg(&context->bytecode, kind, reg_rax, reg_rdx, primitive_size);
+
+            if (op->binary.target.as_reference) {
+                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+            }
+        } break;
+
         case op_mul:
         case op_div:
         {
-            if (op->binary.source.as_reference) unimplemented(); // TODO
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            missing_instruction(&context->bytecode);
+            instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
+            instruction_load_local(&context->bytecode, func, reg_rcx, op->binary.source, primitive_size);
+
+            bool mul = op->kind == op_mul;
+            instruction_mul_or_div_reg(&context->bytecode, mul, reg_rcx, primitive_size);
+
+            instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
         } break;
 
         case op_call: {
-            missing_instruction(&context->bytecode);
+            Func* callee = &context->funcs[op->call.func_index];
+
+            for (u32 p = 0; p < callee->param_count; p += 1) {
+                Local local = op->call.params[p].local;
+                u8 size = op->call.params[p].size;
+
+                u8 reg;
+                switch (p) {
+                    case 0: reg = reg_rcx; break;
+                    case 1: reg = reg_rdx; break;
+                    case 2: reg = reg_r8; break;
+                    case 3: reg = reg_r9; break;
+                    default: unimplemented(); // TODO additional parameters go on the stack. We also need more space in that case.
+                }
+
+                if (local.kind == local_literal) {
+                    unimplemented(); // TODO
+                } else if (local.as_reference) {
+                    unimplemented(); // TODO
+                } else {
+                    instruction_mov_stack(&context->bytecode, func, mov_from, reg, local, size);
+                }
+            }
+
+            // Actually call the function
+            buf_push(context->bytecode, 0xe8);
+            buf_push(context->bytecode, 0xde);
+            buf_push(context->bytecode, 0xad);
+            buf_push(context->bytecode, 0xbe);
+            buf_push(context->bytecode, 0xef);
+
+            Call_Fixup fixup = {0};
+            fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
+            fixup.func_index = op->call.func_index;
+            buf_push(context->call_fixups, fixup);
+
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            u8* name = string_table_access(context->string_table, callee->name);
+            printf("call %s\n", name);
+            #endif
+
+            if (op->primitive != primitive_void) {
+                if (op->call.target.as_reference) unimplemented(); // TODO
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->call.target, primitive_size);
+            }
         } break;
 
         case op_cast: {
-            missing_instruction(&context->bytecode);
+            // TODO zero-extend for signed types!
+
+            u8 new_size = primitive_size;
+            u8 old_size = primitive_size_of(op->cast.old_primitive);
+
+            if (new_size > old_size) {
+                if (op->cast.local.as_reference) unimplemented(); // TODO
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->cast.local, old_size);
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->cast.local, new_size);
+            }
         } break;
 
         case op_reset_temporary: break;
@@ -4157,7 +4298,6 @@ void build_machinecode(Context* context) {
         printf("; --- fn %s ---\n", name);
         #endif
 
-
         // Lay out stack
         assert(func->stack_layout.vars == null && func->stack_layout.tmps == null);
 
@@ -4167,9 +4307,24 @@ void build_machinecode(Context* context) {
 
         u32 offset = 0;
 
+        // Shadow space for calling other functions
+        u32 max_params = U32_MAX;
+        for (u32 i = 0; i < func->op_count; i += 1) {
+            Op* op = &func->ops[i];
+            if (op->kind == op_call) {
+                Func* callee = &context->funcs[op->call.func_index];
+
+                if (max_params == U32_MAX) max_params = 0;
+                max_params = max(max_params, callee->param_count);
+            }
+        }
+        if (max_params != U32_MAX) {
+            offset += max(max_params, 4)*POINTER_SIZE;
+        }
+
+        // Variables
         for (u32 v = 0; v < func->var_count; v += 1) {
             u64 size = type_size_of(context, func->vars[v].type_index);
-            offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
 
             if (v > 0 && v <= func->param_count) {
                 // Parameter, defer until later
@@ -4177,12 +4332,15 @@ void build_machinecode(Context* context) {
                 continue;
             }
 
-            func->stack_layout.vars[v].size = size;
-            func->stack_layout.vars[v].offset = offset;
-
-            offset += size;
+            if (size > 0) {
+                offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
+                func->stack_layout.vars[v].size = size;
+                func->stack_layout.vars[v].offset = offset;
+                offset += size;
+            }
         }
 
+        // Temporaries
         for (u32 t = 0; t < func->tmp_count; t += 1) {
             u64 size = func->tmps[t].size;
             offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
@@ -4193,10 +4351,10 @@ void build_machinecode(Context* context) {
             offset += size;
         }
 
-        // TODO calling convention -- What about extra space at the end of the stack for paramaters of functions we call?
         offset = ((offset + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
         func->stack_layout.total_bytes = offset;
 
+        // Parameters
         for (u32 v = 1; v <= func->param_count; v += 1) {
             u64 size = type_size_of(context, func->vars[v].type_index);
             assert(size <= POINTER_SIZE);
@@ -4239,10 +4397,10 @@ void build_machinecode(Context* context) {
         for (u32 p = 0; p < func->param_count; p += 1) {
             Local local = { local_variable, false, p + 1 };
 
-            u8 operand_size = primitive_size_of(context->type_buf[func->vars[p + 1].type_index]);
+            u64 operand_size = type_size_of(context, func->vars[p + 1].type_index);
+            assert(operand_size <= 8);
 
             if (p < 4) {
-                // Parameter is passed in register. Once we try to optimize, we just want to leave it there...
                 u8 reg;
                 switch (p) {
                     case 0: reg = reg_rcx; break;
@@ -4251,7 +4409,7 @@ void build_machinecode(Context* context) {
                     case 3: reg = reg_r9; break;
                     default: assert(false);
                 }
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg, local, 8);
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg, local, (u8) operand_size);
             }
         }
 
@@ -4266,7 +4424,7 @@ void build_machinecode(Context* context) {
         Primitive output_primitive = context->type_buf[func->vars[0].type_index];
 
         if (output_primitive == primitive_void) {
-            instruction_arithmetic_reg_reg(&context->bytecode, ARITHMETIC_XOR, reg_rax, reg_rax, POINTER_SIZE);
+            instruction_arithmetic_reg_reg(&context->bytecode, arithmetic_xor, reg_rax, reg_rax, POINTER_SIZE);
         } else if (primitive_is_compound(output_primitive)) {
             if (output_primitive == primitive_array) {
                 unimplemented(); // TODO by-reference semantics
