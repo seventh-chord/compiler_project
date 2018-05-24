@@ -4151,11 +4151,11 @@ void instruction_arithmetic_reg_reg(u8** b, Arithmetic arithmetic, Reg a_reg, Re
     u8 modrm = 0xc0;
 
     modrm |= (a_reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (a_reg > 8) rex |= REX_R;
+    if (a_reg >= reg_r8) rex |= REX_R;
     assert(a_reg < 16);
 
     modrm |= (b_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
-    if (b_reg > 8) rex |= REX_B;
+    if (b_reg >= reg_r8) rex |= REX_B;
     assert(b_reg < 16);
 
     switch (bytes) {
@@ -4204,7 +4204,7 @@ void instruction_mul_or_div_reg(u8** b, bool mul, Reg reg, u8 bytes) {
     }
 
     modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
-    if (reg > 8) rex |= REX_B;
+    if (reg >= reg_r8) rex |= REX_B;
     assert(reg < 16);
 
     switch (bytes) {
@@ -4245,7 +4245,7 @@ void instruction_lea_stack_to_reg(u8** b, Func* func, Local local, Reg reg) {
     u8 modrm = 0;
 
     modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (reg > 8) rex |= REX_R;
+    if (reg >= reg_r8) rex |= REX_R;
     assert(reg < 16);
 
     modrm |= 0x04; // Use SIB with a 32-bit displacement
@@ -4299,11 +4299,11 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_r
     u8 modrm = 0x00;
 
     modrm |= (value_reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (value_reg > 8) rex |= REX_R;
+    if (value_reg >= reg_r8) rex |= REX_R;
     assert(value_reg < 16);
 
     modrm |= (pointer_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
-    if (pointer_reg > 8) rex |= REX_R;
+    if (pointer_reg >= reg_r8) rex |= REX_R;
     assert(pointer_reg < 16);
 
     if (pointer_reg == reg_rsp || pointer_reg == reg_rbp || pointer_reg == reg_r12 || pointer_reg == reg_r13) {
@@ -4355,7 +4355,7 @@ void instruction_mov_stack_manual(u8** b, Mov_Mode mode, Reg reg, u32 offset, u8
     }
 
     modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (reg > 8) rex |= REX_R;
+    if (reg >= reg_r8) rex |= REX_R;
     assert(reg < 16);
 
     modrm |= 0x04; // Use SIB with a 32-bit displacement
@@ -4411,7 +4411,7 @@ void instruction_mov_imm_to_reg(u8** b, u64 value, Reg reg, u8 bytes) {
     }
 
     opcode |= reg & 0x07;
-    if (reg > 8) rex |= REX_B;
+    if (reg >= reg_r8) rex |= REX_B;
     assert(reg < 16);
 
     if (rex != REX_BASE) {
@@ -4538,7 +4538,7 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
                 }
 
                 if (p >= 4) {
-                    u32 offset = POINTER_SIZE * (p + 1);
+                    u32 offset = POINTER_SIZE * p;
                     instruction_mov_stack_manual(&context->bytecode, mov_to, reg, offset, size);
                 }
             }
@@ -4817,6 +4817,11 @@ void build_machinecode(Context* context) {
     }
 
     arena_stack_pop(&context->stack);
+
+    // TODO stuff doesn't work if we don't have any data.
+    // Why not?
+    // How will we use the data section later on??
+    str_push_str(&context->bytecode_data, "_i\n\0", 4);
 }
 
 typedef struct COFF_Header {

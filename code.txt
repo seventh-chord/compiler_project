@@ -6,7 +6,7 @@ extern "kernel32.lib" {
 }
 
 fn main() -> u8 {
-    var text: [3]u8 = [3]u8 { 72, 105, 0 };
+    var text: [3]u8 = [3]u8 { 72, 105, 10 };
     var written: u32 = 0;
     var handle: u64 = GetStdHandle(4294967285);
     WriteFile(handle, @text, 3, @written, null);
