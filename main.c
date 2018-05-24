@@ -683,6 +683,7 @@ typedef struct Token {
 
         token_identifier,
         token_literal,
+        token_string,
 
         token_operator,
         token_bracket,
@@ -694,6 +695,7 @@ typedef struct Token {
         token_tick,
         token_at,
 
+        token_keyword_extern,
         token_keyword_var,
         token_keyword_fn,
     } kind;
@@ -701,6 +703,10 @@ typedef struct Token {
     union {
         u32 identifier_string_table_index;
         u64 literal_value;
+        struct {
+            u8* bytes; // null-terminated
+            u64 length;
+        } string;
         u8 operator_symbol;
         struct {
             u8 kind;
@@ -878,9 +884,13 @@ struct Expr {
         } binary;
 
         struct {
-            union { u32 unresolved_name; u32 func_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
-            Expr** params; // Pointer to an array of pointers to expressions! (*[*Expr] as opposed to **[Expr])
+            union {
+                u32 unresolved_name;
+                u32 func_index;
+            }; // discriminated by EXPR_FLAG_UNRESOLVED
+
             u32 param_count;
+            Expr** params; // Pointer to an array of pointers to expressions! (*[*Expr] as opposed to **[Expr])
         } call;
 
         Expr* cast_from;
@@ -1015,50 +1025,23 @@ typedef struct Mem_Layout {
 } Mem_Layout;
 
 
-typedef struct Func {
-    u32 name;
-
-    // All pointers are to arena alocations!
-
-    // first var is output, the next N are params, the rest are local variables
-    Var* vars;
-    u32 var_count; // var_count = output + params + locals
-    bool* in_scope_map; // internal
-    u32 param_count;
-    u32 return_type_index;
-
-    Tmp* tmps;
-    u32 tmp_count;
-
-    Mem_Layout mem_layout; // used for eval_ops
-    Mem_Layout stack_layout; // for machinecode generations
-
-    Stmt* stmts;
-    u32 stmt_count;
-
-    Op* ops;
-    u32 op_count;
-
-    u32 bytecode_start;
-} Func;
-
-
 
 typedef struct Import_Index {
+    // names are string table indices
     u32 library;
     u32 function;
 } Import_Index;
 
 typedef struct Library_Import {
-    u8* lib_name; // c-str
-    // TODO make this a hashtable
-    u8** function_names; // stretchy-buffer of cstrings
+    // names are string table indices
+    u32 lib_name; // c-str
+    // TODO make this a hashtable (?)
+    u32* function_names; // stretchy-buffer
 
     // We find these in 'parse_library'
     u8* dll_name;
     u32* function_hints;
 } Library_Import;
-
 
 typedef struct Fixup {
     // Fixups which rely on information about adresses in the final executable go here,
@@ -1082,6 +1065,55 @@ typedef struct Call_Fixup {
     u32 func_index;
 } Call_Fixup;
 
+
+
+typedef struct Func {
+    u32 name;
+
+    enum {
+        func_kind_normal, // use '.body'
+        func_kind_imported, // use '.import_info'
+    } kind;
+
+    struct {
+        bool has_output;
+        u32 output_type_index;
+
+        struct {
+            u32 type_index;
+            u32 var_index;
+        } *params;
+        u32 param_count;
+    } signature;
+
+    union {
+        struct {
+            Import_Index index;
+        } import_info;
+
+        struct {
+            Var* vars;
+            u32 var_count;
+            u32 output_var_index;
+
+            bool* in_scope_map; // internal
+
+            Tmp* tmps;
+            u32 tmp_count;
+
+            Mem_Layout mem_layout; // used for eval_ops
+            Mem_Layout stack_layout; // for machinecode generations
+
+            Stmt* stmts;
+            u32 stmt_count;
+
+            Op* ops;
+            u32 op_count;
+
+            u32 bytecode_start;
+        } body;
+    };
+} Func;
 
 
 typedef enum Reg {
@@ -1140,12 +1172,12 @@ typedef struct Context {
 
 // NB This currently just assumes we are trying to import a function. In the future we might want to support importing
 // other items, though we probably want to find an example of that first, so we know what we are doing!
-Import_Index add_import(Context* context, u8* library_name, u8* item_name) {
+Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
     Import_Index index = {0};
 
     Library_Import* import = null;
     for (u32 i = 0; i < buf_length(context->imports); i += 1) {
-        if (str_cmp(library_name, context->imports[i].lib_name)) {
+        if (library_name == context->imports[i].lib_name) {
             index.library = i;
             import = &context->imports[i];
             break;
@@ -1161,9 +1193,16 @@ Import_Index add_import(Context* context, u8* library_name, u8* item_name) {
         import = buf_end(context->imports) - 1;
     }
 
-    index.function = buf_length(import->function_names);
-    buf_push(import->function_names, item_name);
+    for (u32 i = 0; i < buf_length(import->function_names); i += 1) {
+        u32 other_function_name = import->function_names[i];
+        if (other_function_name == function_name) {
+            index.function = i;
+            return index;
+        }
+    }
 
+    index.function = buf_length(import->function_names);
+    buf_push(import->function_names, function_name);
     return index;
 }
 
@@ -1307,6 +1346,9 @@ void print_token(u8* string_table, Token* t) {
         case token_literal: {
             printf("%u", t->literal_value);
         } break;
+        case token_string: {
+            printf("\"%z\"", t->string.length, t->string.bytes);
+        } break;
 
         case token_operator: {
             u8 operator = t->operator_symbol;
@@ -1337,6 +1379,9 @@ void print_token(u8* string_table, Token* t) {
             printf("@");
         } break;
 
+        case token_keyword_extern: {
+            printf("keyword extern");
+        } break;
         case token_keyword_var: {
             printf("keyword var");
         } break;
@@ -1355,7 +1400,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 u8* name = string_table_access(context->string_table, expr->variable.unresolved_name);
                 printf("<unresolved %s>", name);
             } else {
-                Var* var = &func->vars[expr->variable.index];
+                Var* var = &func->body.vars[expr->variable.index];
                 u8* name = string_table_access(context->string_table, var->name);
                 printf("%s", name);
             }
@@ -1450,7 +1495,7 @@ void print_stmt(Context* context, Func* func, Stmt* stmt) {
         } break;
 
         case stmt_declaration: {
-            Var* var = &func->vars[stmt->declaration.var_index];
+            Var* var = &func->body.vars[stmt->declaration.var_index];
             u8* name = string_table_access(context->string_table, var->name);
             printf("var %s;", name);
         } break;
@@ -1469,7 +1514,7 @@ void print_local(Context* context, Func* func, Local local) {
 
     switch (local.kind) {
         case local_variable: {
-            Var* var = &func->vars[local.value];
+            Var* var = &func->body.vars[local.value];
             u8* name = string_table_access(context->string_table, var->name);
             printf("%s%s", pointer_star, name);
         } break;
@@ -1529,10 +1574,10 @@ void print_op(Context* context, Func* func, Op* op) {
             printf("(%s) set ", primitive_name(op->primitive));
             print_local(context, func, op->call.target);
 
-            if (callee->param_count > 0) {
+            if (callee->signature.param_count > 0) {
                 printf(", (call %s with ", name);
 
-                for (u32 p = 0; p < callee->param_count; p += 1) {
+                for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                     if (p != 0) printf(", ");
                     print_local(context, func, op->call.params[p].local);
                     printf(" (u%u)", (u64) (op->call.params[p].size*8));
@@ -1556,8 +1601,8 @@ void print_op(Context* context, Func* func, Op* op) {
 
 
 u32 find_var(Func* func, u32 name) {
-    for (u32 i = 0; i < func->var_count; i += 1) {
-        if (func->vars[i].name == name) {
+    for (u32 i = 0; i < func->body.var_count; i += 1) {
+        if (func->body.vars[i].name == name) {
             return i;
         }
     }
@@ -1647,6 +1692,7 @@ u32 parse_type(Context* context, Token* t, u32 length) {
             } break;
 
             case token_literal:
+            case token_string:
             case token_operator:
             case token_arrow:
             case token_semicolon:
@@ -1655,6 +1701,7 @@ u32 parse_type(Context* context, Token* t, u32 length) {
             case token_at:
             case token_keyword_var:
             case token_keyword_fn:
+            case token_keyword_extern:
             {
                 printf("Unexpected token in type: ");
                 print_token(context->string_table, &t[i]);
@@ -1670,8 +1717,31 @@ u32 parse_type(Context* context, Token* t, u32 length) {
 }
 
 bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u32 length) {
+    assert(func->signature.params == null);
+    assert(func->signature.param_count == 0);
+
+    if (length == 0) {
+        return true;
+    }
+
+    // Count parameters
+    func->signature.param_count = 1;
+    for (u32 i = 0; i < length; i += 1) {
+        if (t[i].kind == token_comma && i + 1 < length) {
+            func->signature.param_count += 1;
+        }
+        if (t[i].kind == token_bracket && (t[i].bracket.kind & BRACKET_OPEN)) {
+            i += t[i].bracket.offset_to_matching;
+        }
+    }
+
+    u64 signature_param_bytes = func->signature.param_count * sizeof(*func->signature.params);
+    func->signature.params = (void*) arena_alloc(&context->arena, signature_param_bytes);
+    mem_clear((u8*) func->signature.params, signature_param_bytes);
+
+    // Parse parameters
     u32 i = 0;
-    while (i < length) {
+    for (u32 n = 0; n < func->signature.param_count; n += 1) {
         u32 start = i;
         while (i < length && t[i].kind != token_comma) { i += 1; }
         u32 end = i;
@@ -1707,12 +1777,14 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
             return false;
         }
 
+        func->signature.params[n].var_index = buf_length(context->tmp_vars);
+        func->signature.params[n].type_index = type_index;
+
         Var var = {0};
         var.name = name_index;
         var.declaration_pos = t->pos;
         var.type_index = type_index;
         buf_push(context->tmp_vars, var);
-        func->param_count += 1;
     }
 
     return true;
@@ -2020,6 +2092,7 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
                 return expr;
             } break;
 
+            case token_string:
             case token_operator:
             case token_semicolon:
             case token_arrow:
@@ -2028,6 +2101,7 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
             case token_colon:
             case token_keyword_var:
             case token_keyword_fn:
+            case token_keyword_extern:
             {
                 printf("Expected literal or variable, but got ");
                 print_token(context->string_table, t);
@@ -2072,13 +2146,15 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
 }
 
 // This parsing function returns length via a pointer, rather than taking it as a parameter
-bool parse_function(Context* context, Token* t, u32* length) {
+Func* parse_function(Context* context, Token* t, u32* length) {
     assert(t->kind == token_keyword_fn);
+    bool valid = true;
 
     Token* start = t;
     File_Pos declaration_pos = t->pos;
 
     // Estimate size of function, so we still print reasonable errors on bad function declarations
+    // NB This assumes functions with bodies at the moment, maybe that is bad?
     *length = 1;
     for (Token* u = t + 1; !(u->kind == token_end_of_stream || u->kind == token_keyword_fn); u += 1) {
         *length += 1;
@@ -2091,7 +2167,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
 
-        return false;
+        return null;
     }
     u32 name_index = t->identifier_string_table_index;
 
@@ -2099,22 +2175,18 @@ bool parse_function(Context* context, Token* t, u32* length) {
         if (func->name == name_index) {
             u8* name = string_table_access(context->string_table, name_index);
             printf("Second definition of function %s on line %u\n", name, (u64) declaration_pos.line);
+            valid = false;
         }
     }
 
 
-    // NB we use these will these while parsing, and then copy them into the arena
+    // NB we use these while parsing, and then copy them into the memory arena
     buf_clear(context->tmp_vars); 
     buf_clear(context->tmp_stmts);
 
-
     buf_push(context->funcs, ((Func) {0}));
-    Func* func = context->funcs + buf_length(context->funcs) - 1;
+    Func* func = buf_end(context->funcs) - 1;
     func->name = name_index;
-
-    Var output_var = {0};
-    output_var.name = string_table_canonicalize(&context->string_table, "output", 6);
-    buf_push(context->tmp_vars, output_var);
 
     // Parameter list
     t += 1;
@@ -2123,7 +2195,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
         printf("Expected a open parenthesis '(' to after 'fn %s', but got ", name);
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
-        return false;
+        return null;
     }
 
     Token* parameter_start = t + 1;
@@ -2131,7 +2203,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
     t = t + t->bracket.offset_to_matching;
     if (!parse_parameter_declaration_list(context, func, parameter_start, parameter_length)) {
         // We already printed an error in parse_parameter_declaration_list
-        return false;
+        return null;
     }
 
     // Return type
@@ -2139,7 +2211,7 @@ bool parse_function(Context* context, Token* t, u32* length) {
 
     Token* return_type_start = t;
     while (t->kind != token_end_of_stream) {
-        if (t->kind == token_bracket && t->bracket.kind == BRACKET_CURLY_OPEN) {
+        if (t->kind == token_semicolon || (t->kind == token_bracket && t->bracket.kind == BRACKET_CURLY_OPEN)) {
             break;
         } else {
             t += 1;
@@ -2151,22 +2223,243 @@ bool parse_function(Context* context, Token* t, u32* length) {
         return_type_start += 1;
         return_type_length -= 1;
 
-        u32 return_type_index = parse_type(context, return_type_start, return_type_length);
-        if (return_type_index == U32_MAX) {
-            return false;
+        u32 output_type_index = parse_type(context, return_type_start, return_type_length);
+        if (output_type_index == U32_MAX) {
+            return null;
         }
 
-        func->return_type_index = return_type_index;
+        func->signature.has_output = true;
+        func->signature.output_type_index = output_type_index;
+        func->body.output_var_index = buf_length(context->tmp_vars);
+
+        Var output_var = {0};
+        output_var.name = string_table_canonicalize(&context->string_table, "output", 6);
+        output_var.type_index = output_type_index;
+        buf_push(context->tmp_vars, output_var);
     } else {
-        func->return_type_index = primitive_void;
+        func->signature.has_output = false;
+        func->signature.output_type_index = primitive_void;
+        func->body.output_var_index = U32_MAX;
     }
 
-    context->tmp_vars[0].type_index = func->return_type_index;
+    // Functions without a body
+    if (t->kind == token_semicolon) {
+        func->kind = func_kind_imported;
 
     // Body
+    } else {
+        func->kind = func_kind_normal;
+
+        if (t->kind != token_bracket || t->bracket.kind != BRACKET_CURLY_OPEN) {
+            u8* name = string_table_access(context->string_table, name_index);
+            printf("Expected an open curly brace '{' after 'fn %s ...', but found ", name);
+            print_token(context->string_table, t);
+            printf(" (Line %u)\n", (u64) t->pos.line);
+            return null;
+        }
+
+        Token* body = t + 1;
+        u32 body_length = t->bracket.offset_to_matching - 1;
+        t = t + t->bracket.offset_to_matching;
+
+        *length = (u32) (t - start) + 1;
+
+        for (u32 i = 0; i < body_length; i += 1) {
+            u32 stmt_start = i;
+            u32 equals_position = U32_MAX;
+            while (i < body_length && body[i].kind != token_semicolon) {
+                if (body[i].kind == token_operator && body[i].operator_symbol == '=') {
+                    equals_position = i - stmt_start;
+                }
+                i += 1;
+            }
+            u32 stmt_length = i - stmt_start;
+            if (stmt_length == 0) { continue; }
+
+            if (i == body_length) {
+                printf("No semicolon at end of statement starting on line %u\n", (u64) body[stmt_start].pos.line);
+                valid = false;
+            }
+
+            switch (body[stmt_start].kind) {
+                case token_keyword_var: {
+                    if (stmt_length < 2 || body[stmt_start + 1].kind != token_identifier) {
+                        printf("Expected identifier after 'var', but found ");
+                        print_token(context->string_table, &body[stmt_start + 1]);
+                        printf(" (Line %u)\n", (u64) body[stmt_start + 1].pos.line);
+                        valid = false;
+                        break;
+                    }
+
+                    u32 name_index = body[stmt_start + 1].identifier_string_table_index;
+
+                    bool redeclaration = false;
+                    buf_foreach(Var, v, context->tmp_vars) {
+                        if (v->name == name_index) {
+                            u8* name = string_table_access(context->string_table, name_index);
+                            printf(
+                                "Redeclaration of variable %s on line %u. First delcaration on line %u\n",
+                                name, (u64) body[stmt_start + 1].pos.line, (u64) v->declaration_pos.line
+                            );
+                            redeclaration = true;
+                            valid = false;
+                        }
+                    }
+                    if (redeclaration) break;
+
+                    u32 var_index = buf_length(context->tmp_vars);
+                    buf_push(context->tmp_vars, ((Var) {0}));
+                    Var* var = &context->tmp_vars[var_index];
+                    var->name = name_index;
+
+                    if (stmt_length > 2 && body[stmt_start + 2].kind != token_colon) {
+                        u8* name = string_table_access(context->string_table, name_index);
+                        printf("Expected 'var %s: type', but got ", name);
+                        print_token(context->string_table, &body[stmt_start + 2]);
+                        printf(" (Line %u)\n", body[stmt_start].pos.line);
+                        valid = false;
+                        break;
+                    }
+
+                    u32 type_length = min(equals_position, stmt_length) - 3;
+                    var->type_index = parse_type(context, &body[stmt_start + 3], type_length);
+
+                    if (var->type_index == U32_MAX) {
+                        valid = false;
+                        break;
+                    }
+
+                    Stmt stmt = {0};
+                    stmt.kind = stmt_declaration;
+                    stmt.declaration.var_index = var_index;
+                    stmt.pos = body[stmt_start].pos;
+                    buf_push(context->tmp_stmts, stmt);
+
+                    if (equals_position != U32_MAX) {
+                        Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
+                        if (right == null) {
+                            valid = false;
+                            break;
+                        }
+
+                        Expr* left = arena_insert(&context->arena, ((Expr) {0}));
+                        left->kind = expr_variable;
+                        left->variable.index = var_index;
+                        left->type_index = var->type_index;
+                        left->pos = body[stmt_start].pos;
+
+                        Stmt stmt = {0};
+                        stmt.kind = stmt_assignment;
+                        stmt.assignment.left = left;
+                        stmt.assignment.right = right;
+                        stmt.pos = body[stmt_start].pos;
+                        buf_push(context->tmp_stmts, stmt);
+                    }
+                } break;
+
+                case token_identifier:
+                case token_literal:
+                case token_string:
+                case token_operator:
+                case token_bracket:
+                case token_comma:
+                case token_colon:
+                case token_arrow:
+                case token_tick:
+                case token_at:
+                {
+                    Stmt stmt = {0};
+                    stmt.pos = body[stmt_start].pos;
+
+                    if (equals_position == U32_MAX) {
+                        Expr* expr = parse_expr(context, &body[stmt_start], stmt_length);
+
+                        if (expr == null) {
+                            valid = false;
+                            break;
+                        }
+
+                        stmt.kind = stmt_expr;
+                        stmt.expr = expr;
+                    } else {
+                        Expr* left = parse_expr(context, &body[stmt_start], equals_position);
+                        Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
+
+                        if (left == null || right == null) {
+                            valid = false;
+                            break;
+                        }
+
+                        stmt.kind = stmt_assignment;
+                        stmt.assignment.left = left;
+                        stmt.assignment.right = right;
+                    }
+
+                    buf_push(context->tmp_stmts, stmt);
+                } break;
+
+                case token_keyword_fn: {
+                    printf("Can't declare a function inside another function (Line %u)\n", (u64) body[i].pos.line);
+                    valid = false;
+                } break;
+
+                case token_keyword_extern: {
+                    printf("Can't declare an extern block inside a function (Line %u)\n", (u64) body[i].pos.line);
+                    valid = false;
+                } break;
+
+                case token_semicolon: assert(false);
+                default: assert(false);
+            }
+        }
+    }
+
+    // Copy data out of temporary buffers into permanent arena storage
+    func->body.stmt_count = buf_length(context->tmp_stmts);
+    func->body.stmts = (Stmt*) arena_alloc(&context->arena, buf_bytes(context->tmp_stmts));
+    mem_copy((u8*) context->tmp_stmts, (u8*) func->body.stmts, buf_bytes(context->tmp_stmts));
+
+    func->body.var_count = buf_length(context->tmp_vars);
+    func->body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
+    mem_copy((u8*) context->tmp_vars, (u8*) func->body.vars, buf_bytes(context->tmp_vars));
+
+    func->body.in_scope_map = (bool*) arena_alloc(&context->arena, sizeof(bool) * func->body.var_count);
+
+    if (!valid) {
+        return null;
+    } else {
+        return func;
+    }
+}
+
+bool parse_extern(Context* context, Token* t, u32* length) {
+    assert(t->kind == token_keyword_extern);
+
+    Token* start = t;
+    File_Pos declaration_pos = t->pos;
+
+    // Estimate size of block, so we still print reasonable errors on bad function declarations
+    *length = 1;
+    for (Token* u = t + 1; !(u->kind == token_end_of_stream || u->kind == token_keyword_fn); u += 1) {
+        *length += 1;
+    }
+
+    // Library name
+    t += 1;
+    if (t->kind != token_string) {
+        printf("Expected library name, but got ");
+        print_token(context->string_table, t);
+        printf(" (Line %u)\n", (u64) t->pos.line);
+
+        return false;
+    }
+    u8* library_name = t->string.bytes;
+    u32 library_name_index = string_table_canonicalize(&context->string_table, t->string.bytes, t->string.length);
+
+    // Body
+    t += 1;
     if (t->kind != token_bracket || t->bracket.kind != BRACKET_CURLY_OPEN) {
-        u8* name = string_table_access(context->string_table, name_index);
-        printf("Expected an open curly brace '{' after 'fn %s ...', but found ", name);
+        printf("Expected an open curly brace '{' after 'extern \"%s\" ...', but found ", library_name);
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
@@ -2178,163 +2471,44 @@ bool parse_function(Context* context, Token* t, u32* length) {
 
     *length = (u32) (t - start) + 1;
 
-    bool body_valid = true;
+    bool valid = true;
 
     for (u32 i = 0; i < body_length; i += 1) {
-        u32 stmt_start = i;
-        u32 equals_position = U32_MAX;
-        while (i < body_length && body[i].kind != token_semicolon) {
-            if (body[i].kind == token_operator && body[i].operator_symbol == '=') {
-                equals_position = i - stmt_start;
-            }
-            i += 1;
-        }
-        u32 stmt_length = i - stmt_start;
-        if (stmt_length == 0) { continue; }
-
-        if (i == body_length) {
-            printf("No semicolon at end of statement starting on line %u\n", (u64) body[stmt_start].pos.line);
-            body_valid = false;
-        }
-
-        switch (body[stmt_start].kind) {
-            case token_keyword_var: {
-                if (stmt_length < 2 || body[stmt_start + 1].kind != token_identifier) {
-                    printf("Expected identifier after 'var', but found ");
-                    print_token(context->string_table, &body[stmt_start + 1]);
-                    printf(" (Line %u)\n", (u64) body[stmt_start + 1].pos.line);
-                    body_valid = false;
-                    break;
-                }
-
-                u32 name_index = body[stmt_start + 1].identifier_string_table_index;
-
-                bool redeclaration = false;
-                buf_foreach(Var, v, context->tmp_vars) {
-                    if (v->name == name_index) {
-                        u8* name = string_table_access(context->string_table, name_index);
-                        printf(
-                            "Redeclaration of variable %s on line %u. First delcaration on line %u\n",
-                            name, (u64) body[stmt_start + 1].pos.line, (u64) v->declaration_pos.line
-                        );
-                        redeclaration = true;
-                        body_valid = false;
-                    }
-                }
-                if (redeclaration) break;
-
-                u32 var_index = buf_length(context->tmp_vars);
-                buf_push(context->tmp_vars, ((Var) {0}));
-                Var* var = &context->tmp_vars[var_index];
-                var->name = name_index;
-
-                if (stmt_length > 2 && body[stmt_start + 2].kind != token_colon) {
-                    u8* name = string_table_access(context->string_table, name_index);
-                    printf("Expected 'var %s: type', but got ", name);
-                    print_token(context->string_table, &body[stmt_start + 2]);
-                    printf(" (Line %u)\n", body[stmt_start].pos.line);
-                    body_valid = false;
-                    break;
-                }
-
-                u32 type_length = min(equals_position, stmt_length) - 3;
-                var->type_index = parse_type(context, &body[stmt_start + 3], type_length);
-
-                if (var->type_index == U32_MAX) {
-                    body_valid = false;
-                    break;
-                }
-
-                Stmt stmt = {0};
-                stmt.kind = stmt_declaration;
-                stmt.declaration.var_index = var_index;
-                stmt.pos = body[stmt_start].pos;
-                buf_push(context->tmp_stmts, stmt);
-
-                if (equals_position != U32_MAX) {
-                    Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
-                    if (right == null) {
-                        body_valid = false;
-                        break;
-                    }
-
-                    Expr* left = arena_insert(&context->arena, ((Expr) {0}));
-                    left->kind = expr_variable;
-                    left->variable.index = var_index;
-                    left->type_index = var->type_index;
-                    left->pos = body[stmt_start].pos;
-
-                    Stmt stmt = {0};
-                    stmt.kind = stmt_assignment;
-                    stmt.assignment.left = left;
-                    stmt.assignment.right = right;
-                    stmt.pos = body[stmt_start].pos;
-                    buf_push(context->tmp_stmts, stmt);
-                }
-            } break;
-
-            case token_identifier:
-            case token_literal:
-            case token_operator:
-            case token_bracket:
-            case token_comma:
-            case token_colon:
-            case token_arrow:
-            case token_tick:
-            case token_at:
-            {
-                Stmt stmt = {0};
-                stmt.pos = body[stmt_start].pos;
-
-                if (equals_position == U32_MAX) {
-                    Expr* expr = parse_expr(context, &body[stmt_start], stmt_length);
-
-                    if (expr == null) {
-                        body_valid = false;
-                        break;
-                    }
-
-                    stmt.kind = stmt_expr;
-                    stmt.expr = expr;
-                } else {
-                    Expr* left = parse_expr(context, &body[stmt_start], equals_position);
-                    Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
-
-                    if (left == null || right == null) {
-                        body_valid = false;
-                        break;
-                    }
-
-                    stmt.kind = stmt_assignment;
-                    stmt.assignment.left = left;
-                    stmt.assignment.right = right;
-                }
-
-                buf_push(context->tmp_stmts, stmt);
-            } break;
-
+        switch (body[i].kind) {
             case token_keyword_fn: {
-                printf("Can't declare a function inside another function (Line %u)\n", (u64) body[i].pos.line);
-                body_valid = false;
+                u32 length;
+                Func* func = parse_function(context, &body[i], &length);
+
+                if (func == null) {
+                    valid = false;
+                } else if (func->kind != func_kind_imported) {
+                    u8* name = string_table_access(context->string_table, func->name);
+                    printf(
+                        "Function %s has a body, but functions inside 'extern' blocks can't have bodies (Line %u)\n",
+                        name, (u64) body[i].pos.line
+                    );
+                    valid = false;
+                } else {
+                    Import_Index import_index = add_import(context, library_name_index, func->name);
+                    func->import_info.index = import_index;
+                }
+
+                i += length - 1;
             } break;
 
-            case token_semicolon: assert(false);
-            default: assert(false);
+            default: {
+                printf("Found invalid token at top level inside 'extern' block: ");
+                print_token(context->string_table, &body[i]);
+                printf(" (Line %u)\n", (u64) body[i].pos.line);
+
+                i += 1;
+                while (i < body_length && body[i].kind != token_semicolon) { i += 1; }
+            } break;
         }
+        // TODO parse function templates
     }
 
-    // Copy data out of temporary buffers into permanent arena storage
-    func->stmt_count = buf_length(context->tmp_stmts);
-    func->stmts = (Stmt*) arena_alloc(&context->arena, buf_bytes(context->tmp_stmts));
-    mem_copy((u8*) context->tmp_stmts, (u8*) func->stmts, buf_bytes(context->tmp_stmts));
-
-    func->var_count = buf_length(context->tmp_vars);
-    func->vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
-    mem_copy((u8*) context->tmp_vars, (u8*) func->vars, buf_bytes(context->tmp_vars));
-
-    func->in_scope_map = (bool*) arena_alloc(&context->arena, sizeof(bool) * func->var_count);
-
-    return body_valid;
+    return valid;
 }
 
 bool build_ast(Context* context, u8* path) {
@@ -2347,8 +2521,9 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    u32 keyword_var = string_table_canonicalize(&context->string_table, "var", 3);
-    u32 keyword_fn  = string_table_canonicalize(&context->string_table, "fn", 2);
+    u32 keyword_extern = string_table_canonicalize(&context->string_table, "extern", 6);
+    u32 keyword_var    = string_table_canonicalize(&context->string_table, "var", 3);
+    u32 keyword_fn     = string_table_canonicalize(&context->string_table, "fn", 2);
     init_primitive_names(context->primitive_names, &context->string_table);
 
     for (u32 t = 0; t < PRIMITIVE_COUNT; t += 1) {
@@ -2408,6 +2583,8 @@ bool build_ast(Context* context, u8* path) {
                 buf_push(tokens, ((Token) { token_keyword_var, .pos = file_pos }));
             } else if (string_table_index == keyword_fn) {
                 buf_push(tokens, ((Token) { token_keyword_fn,  .pos = file_pos }));
+            } else if (string_table_index == keyword_extern) {
+                buf_push(tokens, ((Token) { token_keyword_extern,  .pos = file_pos }));
             } else {
                 buf_push(tokens, ((Token) { token_identifier, .identifier_string_table_index = string_table_index, .pos = file_pos }));
             }
@@ -2526,6 +2703,42 @@ bool build_ast(Context* context, u8* path) {
             }));
         } break;
 
+        case '"': {
+            i += 1;
+
+            u32 start_index = i;
+            u8* start = &file[i];
+
+            bool valid = true;
+            for (; i < file_length; i += 1) {
+                if (file[i] == '\n' || file[i] == '\r') {
+                    valid = false;
+                    printf("Strings can not span multiple lines (Line %u)\n", (u64) file_pos.line);
+                    break;
+                }
+
+                if (file[i] == '"') {
+                    break;
+                }
+            }
+
+            u32 length = i - start_index;
+            i += 1;
+
+            u8* arena_pointer = null;
+            if (length > 0) {
+                arena_pointer = arena_alloc(&context->arena, length + 1);
+                arena_pointer[length] = 0;
+                mem_copy(start, arena_pointer, length);
+            }
+
+            buf_push(tokens, ((Token) {
+                token_string,
+                .string.bytes = arena_pointer,
+                .string.length = length,
+            }));
+        } break;
+
         case '#': {
             for (; i < file_length; i += 1) if (file[i] == '\n' || file[i] == '\r') break;
         } break;
@@ -2586,44 +2799,52 @@ bool build_ast(Context* context, u8* path) {
         return false;
     }
 
-    /*
+    #if 0
     printf("%u tokens:\n", (u64) buf_length(tokens));
     for (Token* t = tokens; t->kind != token_end_of_stream; t += 1) {
         printf("  ");
         print_token(string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
     }
-    */
+    #endif
 
     // Parse
     Token* t = tokens;
     while (t->kind != token_end_of_stream) switch (t->kind) {
         case token_keyword_fn: {
             u32 length = 0;
-            valid &= parse_function(context, t, &length);
+            Func* func = parse_function(context, t, &length);
+
+            if (func == null) {
+                valid = false;
+            } else if (func->kind != func_kind_normal) {
+                u8* name = string_table_access(context->string_table, func->name);
+                printf(
+                    "Function %s does not have a body. Functions without bodies can only be inside 'extern' blocks (Line %u)\n",
+                    name, (u64) t->pos.line
+                );
+                valid = false;
+            }
+
             t += length;
         } break;
 
-        case token_identifier:
-        case token_literal:
-        case token_operator:
-        case token_bracket:
-        case token_semicolon:
-        case token_comma:
-        case token_colon:
-        case token_keyword_var:
-        case token_tick:
-        case token_at:
-        {
+        case token_keyword_extern: {
+            u32 length = 0;
+            valid &= parse_extern(context, t, &length);
+            t += length;
+        } break;
+
+        default: {
+            valid = false;
+
             printf("Found invalid token at global scope: ");
             print_token(context->string_table, t);
             printf(" (Line %u)\n", (u64) t->pos.line);
 
             t += 1;
-            while (t->kind != token_semicolon && t->kind != token_end_of_stream) { t += 1; }
+            while (t->kind != token_keyword_fn && t->kind != token_keyword_extern && t->kind != token_end_of_stream) { t += 1; }
         } break;
-
-        default: assert(false);
     }
 
     free(file);
@@ -2721,8 +2942,8 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                     return false;
                 }
 
-                if (func->in_scope_map[var_index] == false) {
-                    Var* var = &func->vars[var_index];
+                if (func->body.in_scope_map[var_index] == false) {
+                    Var* var = &func->body.vars[var_index];
                     u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
                     printf(
                         "Can't use variable %s on line %u before its declaration on line %u\n",
@@ -2735,7 +2956,7 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            expr->type_index = func->vars[expr->variable.index].type_index;
+            expr->type_index = func->body.vars[expr->variable.index].type_index;
 
             expr->flags |= EXPR_FLAG_ASSIGNABLE;
         } break;
@@ -2817,19 +3038,20 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
             }
 
             Func* callee = &context->funcs[expr->call.func_index];
-            expr->type_index = callee->return_type_index;
+            expr->type_index = callee->signature.output_type_index;
 
-            if (expr->call.param_count != callee->param_count) {
+            if (expr->call.param_count != callee->signature.param_count) {
                 u8* name = string_table_access(context->string_table, callee->name);
                 printf(
                     "Function '%s' takes %u parameters, but %u were given (Line %u)\n",
-                    name, (u64) callee->param_count, (u64) expr->call.param_count, (u64) expr->pos.line
+                    name, (u64) callee->signature.param_count, (u64) expr->call.param_count, (u64) expr->pos.line
                 );
                 return false;
             }
 
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
-                u32 expected_type_index = callee->vars[p + 1].type_index;
+                u32 var_index = callee->signature.params[p].var_index;
+                u32 expected_type_index = callee->signature.params[p].type_index;
 
                 if (!typecheck_expr(context, func, expr->call.params[p], expected_type_index)) {
                     return false;
@@ -2940,16 +3162,19 @@ bool typecheck(Context* context) {
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
         Func* func = context->funcs + f;
 
-        mem_clear((u8*) func->in_scope_map, sizeof(bool) * func->var_count);
+        mem_clear((u8*) func->body.in_scope_map, sizeof(bool) * func->body.var_count);
 
         // output and parameters are allways in scope
-        func->in_scope_map[0] = true;
-        for (u32 i = 0; i < func->param_count; i += 1) {
-            func->in_scope_map[i + 1] = true;
+        if (func->signature.has_output) {
+            func->body.in_scope_map[func->body.output_var_index] = true;
+        }
+        for (u32 i = 0; i < func->signature.param_count; i += 1) {
+            u32 var_index = func->signature.params[i].var_index;
+            func->body.in_scope_map[var_index] = true;
         }
 
-        for (u32 i = 0; i < func->stmt_count; i += 1) {
-            Stmt* stmt = func->stmts + i;
+        for (u32 i = 0; i < func->body.stmt_count; i += 1) {
+            Stmt* stmt = func->body.stmts + i;
             switch (stmt->kind) {
                 case stmt_assignment: {
                     if (!typecheck_expr(context, func, stmt->assignment.left, primitive_invalid)) {
@@ -2991,8 +3216,8 @@ bool typecheck(Context* context) {
                 } break;
 
                 case stmt_declaration: {
-                    assert(!func->in_scope_map[stmt->declaration.var_index]);
-                    func->in_scope_map[stmt->declaration.var_index] = true;
+                    assert(!func->body.in_scope_map[stmt->declaration.var_index]);
+                    func->body.in_scope_map[stmt->declaration.var_index] = true;
                 } break;
 
                 default: assert(false);
@@ -3486,8 +3711,12 @@ void build_intermediate(Context* context) {
     buf_foreach (Func, func, context->funcs) {
         assert(buf_empty(context->tmp_ops));
 
-        for (u32 s = 0; s < func->stmt_count; s += 1) {
-            Stmt* stmt = &func->stmts[s];
+        if (func->kind != func_kind_normal) {
+            continue;
+        }
+
+        for (u32 s = 0; s < func->body.stmt_count; s += 1) {
+            Stmt* stmt = &func->body.stmts[s];
 
             u32 a = buf_length(context->tmp_ops);
 
@@ -3508,28 +3737,28 @@ void build_intermediate(Context* context) {
 
         buf_push(context->tmp_ops, ((Op) { op_end_of_function }));
 
-        func->op_count = buf_length(context->tmp_ops) - 1;
-        func->ops = (Op*) arena_alloc(&context->arena, buf_bytes(context->tmp_ops));
-        mem_copy((u8*) context->tmp_ops, (u8*) func->ops, buf_bytes(context->tmp_ops));
+        func->body.op_count = buf_length(context->tmp_ops) - 1;
+        func->body.ops = (Op*) arena_alloc(&context->arena, buf_bytes(context->tmp_ops));
+        mem_copy((u8*) context->tmp_ops, (u8*) func->body.ops, buf_bytes(context->tmp_ops));
 
-        func->tmp_count = buf_length(context->tmp_tmps);
-        func->tmps = (Tmp*) arena_alloc(&context->arena, buf_bytes(context->tmp_tmps));
-        mem_copy((u8*) context->tmp_tmps, (u8*) func->tmps, buf_bytes(context->tmp_tmps));
+        func->body.tmp_count = buf_length(context->tmp_tmps);
+        func->body.tmps = (Tmp*) arena_alloc(&context->arena, buf_bytes(context->tmp_tmps));
+        mem_copy((u8*) context->tmp_tmps, (u8*) func->body.tmps, buf_bytes(context->tmp_tmps));
 
         buf_clear(context->tmp_ops);
         buf_clear(context->tmp_tmps);
 
-        #if 1
+        #if 0
         u8* name = string_table_access(context->string_table, func->name);
-        printf("%s has %u operations:\n", name, (u64) func->op_count);
-        for (u32 i = 0; i < func->op_count; i += 1) {
+        printf("%s has %u operations:\n", name, (u64) func->body.op_count);
+        for (u32 i = 0; i < func->body.op_count; i += 1) {
             printf("  ");
-            print_op(context, func, &func->ops[i]);
+            print_op(context, func, &func->body.ops[i]);
             printf("\n");
         }
         printf("temps:\n");
-        for (u32 t = 0; t < func->tmp_count; t += 1) {
-            printf("  $%u is %u bytes\n", (u64) t, (u64) func->tmps[t].size);
+        for (u32 t = 0; t < func->body.tmp_count; t += 1) {
+            printf("  $%u is %u bytes\n", (u64) t, (u64) func->body.tmps[t].size);
         }
         #endif
     }
@@ -3548,8 +3777,8 @@ struct Eval_Stack_Frame {
 u8* eval_get_local(Eval_Stack_Frame* frame, Local local, bool allow_literal) {
     Mem_Item* item;
     switch (local.kind) {
-        case local_variable:  item = &frame->func->mem_layout.vars[local.value]; break;
-        case local_temporary: item = &frame->func->mem_layout.tmps[local.value]; break;
+        case local_variable:  item = &frame->func->body.mem_layout.vars[local.value]; break;
+        case local_temporary: item = &frame->func->body.mem_layout.tmps[local.value]; break;
         case local_literal: {
             assert(allow_literal);
             assert(!local.as_reference);
@@ -3572,29 +3801,34 @@ void eval_ops(Context* context) {
 
 
     buf_foreach (Func, func, context->funcs) {
-        assert(func->mem_layout.vars == null && func->mem_layout.tmps == null);
+        if (func->kind != func_kind_normal) {
+            continue;
+        }
 
-        u8* mem_item_data = arena_alloc(&context->arena, sizeof(Mem_Item) * (func->var_count + func->tmp_count));
-        func->mem_layout.vars = (Mem_Item*) mem_item_data;
-        func->mem_layout.tmps = func->mem_layout.vars + func->var_count;
+        assert(func->body.mem_layout.vars == null && func->body.mem_layout.tmps == null);
+
+
+        u8* mem_item_data = arena_alloc(&context->arena, sizeof(Mem_Item) * (func->body.var_count + func->body.tmp_count));
+        func->body.mem_layout.vars = (Mem_Item*) mem_item_data;
+        func->body.mem_layout.tmps = func->body.mem_layout.vars + func->body.var_count;
 
         u32 offset = 0;
 
-        for (u32 v = 0; v < func->var_count; v += 1) {
-            u64 size = type_size_of(context, func->vars[v].type_index);
-            func->mem_layout.vars[v].size = size;
-            func->mem_layout.vars[v].offset = offset;
+        for (u32 v = 0; v < func->body.var_count; v += 1) {
+            u64 size = type_size_of(context, func->body.vars[v].type_index);
+            func->body.mem_layout.vars[v].size = size;
+            func->body.mem_layout.vars[v].offset = offset;
             offset = round_to_next(offset + size, 8);
         }
 
-        for (u32 t = 0; t < func->tmp_count; t += 1) {
-            u64 size = func->tmps[t].size;
-            func->mem_layout.tmps[t].size = size;
-            func->mem_layout.tmps[t].offset = offset;
+        for (u32 t = 0; t < func->body.tmp_count; t += 1) {
+            u64 size = func->body.tmps[t].size;
+            func->body.mem_layout.tmps[t].size = size;
+            func->body.mem_layout.tmps[t].offset = offset;
             offset = round_to_next(offset + size, 8);
         }
 
-        func->mem_layout.total_bytes = offset;
+        func->body.mem_layout.total_bytes = offset;
     }
 
 
@@ -3604,19 +3838,19 @@ void eval_ops(Context* context) {
 
     Eval_Stack_Frame* frame = arena_insert(&context->stack, ((Eval_Stack_Frame) {0}));
     frame->func = main_func;
-    frame->local_data = arena_alloc(&context->stack, frame->func->mem_layout.total_bytes);
-    mem_clear(frame->local_data, frame->func->mem_layout.total_bytes);
+    frame->local_data = arena_alloc(&context->stack, frame->func->body.mem_layout.total_bytes);
+    mem_clear(frame->local_data, frame->func->body.mem_layout.total_bytes);
 
     u64 instructions_executed = 0;
 
     while (1) {
         if (frame->current_op == null) {
-            frame->current_op = frame->func->ops;
+            frame->current_op = frame->func->body.ops;
         }
 
         bool break_into_call = false;
 
-        Op* last_op = frame->func->ops + frame->func->op_count;
+        Op* last_op = frame->func->body.ops + frame->func->body.op_count;
         while (frame->current_op != last_op && !break_into_call) {
             Op* op = frame->current_op;
             frame->current_op += 1;
@@ -3630,7 +3864,7 @@ void eval_ops(Context* context) {
 
             switch (op->kind) {
                 case op_reset_temporary: {
-                    Mem_Item* item = &frame->func->mem_layout.tmps[op->temporary];
+                    Mem_Item* item = &frame->func->body.mem_layout.tmps[op->temporary];
                     mem_clear(frame->local_data + item->offset, item->size);
                 } break;
 
@@ -3701,18 +3935,26 @@ void eval_ops(Context* context) {
 
                 case op_call: {
                     Func* callee = context->funcs + op->call.func_index;
+
+                    if (callee->kind == func_kind_imported) {
+                        u8* name = string_table_access(context->string_table, callee->name);
+                        printf("WARNING: Can't call imported function \"%s\" from intermediate mode for now.\n", name);
+                        break;
+                    }
+
                     Eval_Stack_Frame* next_frame = arena_insert(&context->stack, ((Eval_Stack_Frame) {0}));
                     next_frame->func = callee;
                     next_frame->parent = frame;
                     next_frame->call_result_into = op->call.target;
-                    next_frame->local_data = arena_alloc(&context->stack, next_frame->func->mem_layout.total_bytes);
-                    mem_clear(next_frame->local_data, next_frame->func->mem_layout.total_bytes);
+                    next_frame->local_data = arena_alloc(&context->stack, next_frame->func->body.mem_layout.total_bytes);
+                    mem_clear(next_frame->local_data, next_frame->func->body.mem_layout.total_bytes);
 
-                    for (u32 p = 0; p < callee->param_count; p += 1) {
+                    for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                         Local param = op->call.params[p].local;
                         u64 param_size = op->call.params[p].size;
 
-                        Local into_variable = { local_variable, false, p + 1 };
+                        u32 var_index = callee->signature.params[p].var_index;
+                        Local into_variable = { local_variable, false, var_index };
 
                         u8* our = eval_get_local(frame, param, false);
                         u8* their = eval_get_local(next_frame, into_variable, false);
@@ -3763,12 +4005,14 @@ void eval_ops(Context* context) {
 
         if (!break_into_call) {
             if (frame->parent != null) {
-                Local output_local = { local_variable, false, 0 };
-                Local target_local = frame->call_result_into;
+                if (frame->func->signature.has_output) {
+                    Local output_local = { local_variable, false, frame->func->body.output_var_index };
+                    Local target_local = frame->call_result_into;
 
-                u64* output_pointer = (u64*) eval_get_local(frame, output_local, false);
-                u64* target_pointer = (u64*) eval_get_local(frame->parent, target_local, false);
-                *target_pointer = *output_pointer;
+                    u64* output_pointer = (u64*) eval_get_local(frame, output_local, false);
+                    u64* target_pointer = (u64*) eval_get_local(frame->parent, target_local, false);
+                    *target_pointer = *output_pointer;
+                }
 
                 frame = frame->parent;
             } else {
@@ -3782,11 +4026,11 @@ void eval_ops(Context* context) {
         u8* name = string_table_access(context->string_table, frame->func->name);
         printf("  fn %s:\n", name);
 
-        for (u32 i = 0; i < frame->func->var_count; i += 1) {
-            u32 offset = frame->func->mem_layout.vars[i].offset;
+        for (u32 i = 0; i < frame->func->body.var_count; i += 1) {
+            u32 offset = frame->func->body.mem_layout.vars[i].offset;
             u64 value = *((u64*) (frame->local_data + offset));
 
-            Var* var = &frame->func->vars[i];
+            Var* var = &frame->func->body.vars[i];
             u8* name = string_table_access(context->string_table, var->name);
 
             printf("    %s = %u\n", name, (u64) value);
@@ -3932,8 +4176,8 @@ void instruction_mul_or_div_reg(u8** b, bool mul, Reg reg, u8 bytes) {
 Mem_Item* get_stack_item(Func* func, Local local) {
     Mem_Item* item;
     switch (local.kind) {
-        case local_variable:  item = &func->stack_layout.vars[local.value]; break;
-        case local_temporary: item = &func->stack_layout.tmps[local.value]; break;
+        case local_variable:  item = &func->body.stack_layout.vars[local.value]; break;
+        case local_temporary: item = &func->body.stack_layout.tmps[local.value]; break;
         case local_literal: assert(false);
         default: assert(false);
     }
@@ -4143,7 +4387,7 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
     u8 primitive_size = primitive_size_of(op->primitive);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("  > ");
+    printf("; ");
     print_op(context, func, op);
     printf("\n");
     #endif
@@ -4215,7 +4459,7 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
         case op_call: {
             Func* callee = &context->funcs[op->call.func_index];
 
-            for (u32 p = 0; p < callee->param_count; p += 1) {
+            for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                 Local local = op->call.params[p].local;
                 u8 size = op->call.params[p].size;
 
@@ -4238,16 +4482,37 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
             }
 
             // Actually call the function
-            buf_push(context->bytecode, 0xe8);
-            buf_push(context->bytecode, 0xde);
-            buf_push(context->bytecode, 0xad);
-            buf_push(context->bytecode, 0xbe);
-            buf_push(context->bytecode, 0xef);
+            switch (callee->kind) {
+                case func_kind_normal: {
+                    buf_push(context->bytecode, 0xe8);
+                    buf_push(context->bytecode, 0xde);
+                    buf_push(context->bytecode, 0xad);
+                    buf_push(context->bytecode, 0xbe);
+                    buf_push(context->bytecode, 0xef);
 
-            Call_Fixup fixup = {0};
-            fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-            fixup.func_index = op->call.func_index;
-            buf_push(context->call_fixups, fixup);
+                    Call_Fixup fixup = {0};
+                    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
+                    fixup.func_index = op->call.func_index;
+                    buf_push(context->call_fixups, fixup);
+                } break;
+
+                case func_kind_imported: {
+                    buf_push(context->bytecode, 0xff);
+                    buf_push(context->bytecode, 0x15);
+                    buf_push(context->bytecode, 0xde);
+                    buf_push(context->bytecode, 0xad);
+                    buf_push(context->bytecode, 0xbe);
+                    buf_push(context->bytecode, 0xef);
+
+                    Fixup fixup = {0};
+                    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
+                    fixup.kind = fixup_imported_function;
+                    fixup.import_index = callee->import_info.index;
+                    buf_push(context->fixups, fixup);
+                } break;
+
+                default: assert(false);
+            }
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
             u8* name = string_table_access(context->string_table, callee->name);
@@ -4288,10 +4553,12 @@ void build_machinecode(Context* context) {
         panic("No main function");
     }
     Func* main_func = context->funcs + main_func_index;
-
+    assert(main_func->kind == func_kind_normal); // TODO I'm not sure if this is strictly speaking neccesary!
 
     buf_foreach (Func, func, context->funcs) {
-        func->bytecode_start = buf_length(context->bytecode);
+        if (func->kind != func_kind_normal) continue;
+
+        func->body.bytecode_start = buf_length(context->bytecode);
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         u8* name = string_table_access(context->string_table, func->name);
@@ -4299,105 +4566,114 @@ void build_machinecode(Context* context) {
         #endif
 
         // Lay out stack
-        assert(func->stack_layout.vars == null && func->stack_layout.tmps == null);
+        assert(func->body.stack_layout.vars == null && func->body.stack_layout.tmps == null);
 
-        u8* mem_item_data = arena_alloc(&context->arena, sizeof(Mem_Item) * (func->var_count + func->tmp_count));
-        func->stack_layout.vars = (Mem_Item*) mem_item_data;
-        func->stack_layout.tmps = func->stack_layout.vars + func->var_count;
+        u64 mem_item_data_bytes = sizeof(Mem_Item) * (func->body.var_count + func->body.tmp_count);
+        u8* mem_item_data = arena_alloc(&context->arena, mem_item_data_bytes);
+        mem_clear(mem_item_data, mem_item_data_bytes);
+
+        func->body.stack_layout.vars = (Mem_Item*) mem_item_data;
+        func->body.stack_layout.tmps = func->body.stack_layout.vars + func->body.var_count;
 
         u32 offset = 0;
 
         // Shadow space for calling other functions
         u32 max_params = U32_MAX;
-        for (u32 i = 0; i < func->op_count; i += 1) {
-            Op* op = &func->ops[i];
+        for (u32 i = 0; i < func->body.op_count; i += 1) {
+            Op* op = &func->body.ops[i];
             if (op->kind == op_call) {
                 Func* callee = &context->funcs[op->call.func_index];
 
                 if (max_params == U32_MAX) max_params = 0;
-                max_params = max(max_params, callee->param_count);
+                max_params = max(max_params, callee->signature.param_count);
             }
         }
         if (max_params != U32_MAX) {
             offset += max(max_params, 4)*POINTER_SIZE;
         }
 
+        // Mark parameter variables so they don't get allocated normaly
+        for (u32 p = 0; p < func->signature.param_count; p += 1) {
+            u32 var_index = func->signature.params[p].var_index;
+            func->body.stack_layout.vars[var_index].offset = U32_MAX;
+        }
+
         // Variables
-        for (u32 v = 0; v < func->var_count; v += 1) {
-            u64 size = type_size_of(context, func->vars[v].type_index);
+        for (u32 v = 0; v < func->body.var_count; v += 1) {
+            Mem_Item* mem_item = &func->body.stack_layout.vars[v];
 
-            if (v > 0 && v <= func->param_count) {
-                // Parameter, defer until later
-                if (size > POINTER_SIZE) unimplemented(); // TODO parameter by-reference??
-                continue;
-            }
+            if (mem_item->offset == U32_MAX) continue; // Ignore parameters for now
 
-            if (size > 0) {
-                offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
-                func->stack_layout.vars[v].size = size;
-                func->stack_layout.vars[v].offset = offset;
-                offset += size;
-            }
+            u64 size = type_size_of(context, func->body.vars[v].type_index);
+            offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
+            mem_item->size = size;
+            mem_item->offset = offset;
+            offset += size;
         }
 
         // Temporaries
-        for (u32 t = 0; t < func->tmp_count; t += 1) {
-            u64 size = func->tmps[t].size;
+        for (u32 t = 0; t < func->body.tmp_count; t += 1) {
+            u64 size = func->body.tmps[t].size;
             offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
 
-            func->stack_layout.tmps[t].size = size;
-            func->stack_layout.tmps[t].offset = offset;
+            func->body.stack_layout.tmps[t].size = size;
+            func->body.stack_layout.tmps[t].offset = offset;
 
             offset += size;
         }
 
         offset = ((offset + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
-        func->stack_layout.total_bytes = offset;
+        func->body.stack_layout.total_bytes = offset;
 
         // Parameters
-        for (u32 v = 1; v <= func->param_count; v += 1) {
-            u64 size = type_size_of(context, func->vars[v].type_index);
+        for (u32 p = 0; p < func->signature.param_count; p += 1) {
+            u32 var_index = func->signature.params[p].var_index;
+            Mem_Item* mem_item = &func->body.stack_layout.vars[var_index];
+            assert(mem_item->offset == U32_MAX);
+
+            u64 size = type_size_of(context, func->body.vars[var_index].type_index);
             assert(size <= POINTER_SIZE);
 
-            func->stack_layout.vars[v].size = POINTER_SIZE;
-            func->stack_layout.vars[v].offset = func->stack_layout.total_bytes + 8*v;
+            mem_item->size = POINTER_SIZE;
+            mem_item->offset = func->body.stack_layout.total_bytes + POINTER_SIZE + POINTER_SIZE*p;
         }
 
         #if 0
-        printf("%x total size\n", func->stack_layout.total_bytes);
-        for (u32 v = 0; v < func->var_count; v += 1) {
-            Mem_Item* item = &func->stack_layout.vars[v];
-            Var* var = &func->vars[v];
+        printf("%x total size\n", func->body.stack_layout.total_bytes);
+        for (u32 v = 0; v < func->body.var_count; v += 1) {
+            Mem_Item* item = &func->body.stack_layout.vars[v];
+            Var* var = &func->body.vars[v];
             printf("  %s\t%x, %x\n", string_table_access(context->string_table, var->name), (u32) item->offset, (u64) item->size);
         }
-        for (u32 t = 0; t < func->tmp_count; t += 1) {
-            Mem_Item* item = &func->stack_layout.tmps[t];
+        for (u32 t = 0; t < func->body.tmp_count; t += 1) {
+            Mem_Item* item = &func->body.stack_layout.tmps[t];
             printf("  $%u    %x, %x\n", (u64) t, (u32) item->offset, (u64) item->size);
         }
         #endif
 
-        if (func->stack_layout.total_bytes < I8_MAX) {
+        if (func->body.stack_layout.total_bytes < I8_MAX) {
             buf_push(context->bytecode, 0x48);
             buf_push(context->bytecode, 0x83);
             buf_push(context->bytecode, 0xec);
-            str_push_integer(&context->bytecode, sizeof(i8), (u8) func->stack_layout.total_bytes);
+            str_push_integer(&context->bytecode, sizeof(i8), (u8) func->body.stack_layout.total_bytes);
         } else {
             buf_push(context->bytecode, 0x48);
             buf_push(context->bytecode, 0x81);
             buf_push(context->bytecode, 0xec);
-            str_push_integer(&context->bytecode, sizeof(i32), func->stack_layout.total_bytes);
+            str_push_integer(&context->bytecode, sizeof(i32), func->body.stack_layout.total_bytes);
         }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("sub rsp, %x\n", func->stack_layout.total_bytes);
+        printf("sub rsp, %x\n", func->body.stack_layout.total_bytes);
         #endif
         
         // TODO calling convention -- Preserve non-volatile registers! Also, we need to allocate stack space for that!
 
         // Copy parameters onto stack
-        for (u32 p = 0; p < func->param_count; p += 1) {
-            Local local = { local_variable, false, p + 1 };
+        for (u32 p = 0; p < func->signature.param_count; p += 1) {
+            u32 var_index = func->signature.params[p].var_index;
+            Local local = { local_variable, false, var_index };
 
-            u64 operand_size = type_size_of(context, func->vars[p + 1].type_index);
+            u64 operand_size = type_size_of(context, func->signature.params[p].type_index);
             assert(operand_size <= 8);
 
             if (p < 4) {
@@ -4414,50 +4690,53 @@ void build_machinecode(Context* context) {
         }
 
         // Write out operations
-        for (u32 i = 0; i < func->op_count; i += 1) {
-            Op* op = &func->ops[i];
+        for (u32 i = 0; i < func->body.op_count; i += 1) {
+            Op* op = &func->body.ops[i];
             machinecode_for_op(context, func, op);
         }
 
         // Pass output
-        Local output_local = { local_variable, false, 0 };
-        Primitive output_primitive = context->type_buf[func->vars[0].type_index];
+        if (func->signature.has_output) {
+            u32 var_index = func->body.output_var_index;
 
-        if (output_primitive == primitive_void) {
-            instruction_arithmetic_reg_reg(&context->bytecode, arithmetic_xor, reg_rax, reg_rax, POINTER_SIZE);
-        } else if (primitive_is_compound(output_primitive)) {
-            if (output_primitive == primitive_array) {
-                unimplemented(); // TODO by-reference semantics
+            Local output_local = { local_variable, false, var_index };
+            Primitive output_primitive = context->type_buf[func->signature.output_type_index];
+
+            if (primitive_is_compound(output_primitive)) {
+                if (output_primitive == primitive_array) {
+                    unimplemented(); // TODO by-reference semantics
+                } else {
+                    assert(false);
+                }
             } else {
-                assert(false);
+                u8 operand_size = primitive_size_of(output_primitive);
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, output_local, operand_size);
             }
         } else {
-            u8 operand_size = primitive_size_of(output_primitive);
-            Local output_local = { local_variable, false, 0 };
-            instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, output_local, operand_size);
+            instruction_arithmetic_reg_reg(&context->bytecode, arithmetic_xor, reg_rax, reg_rax, POINTER_SIZE);
         }
 
         // Reset stack
-        if (func->stack_layout.total_bytes < I8_MAX) {
+        if (func->body.stack_layout.total_bytes < I8_MAX) {
             buf_push(context->bytecode, 0x48);
             buf_push(context->bytecode, 0x83);
             buf_push(context->bytecode, 0xc4);
-            buf_push(context->bytecode, func->stack_layout.total_bytes);
+            buf_push(context->bytecode, func->body.stack_layout.total_bytes);
         } else {
             buf_push(context->bytecode, 0x48);
             buf_push(context->bytecode, 0x81);
             buf_push(context->bytecode, 0xc4);
-            str_push_integer(&context->bytecode, sizeof(i32), func->stack_layout.total_bytes);
+            str_push_integer(&context->bytecode, sizeof(i32), func->body.stack_layout.total_bytes);
         }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("add rsp, %x\n", (u64) func->stack_layout.total_bytes);
+        printf("add rsp, %x\n", (u64) func->body.stack_layout.total_bytes);
         #endif
 
 
         // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
         // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
         // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
-        if (func == main_func) continue; // Don't return out of main, so we can inject fake stuff manually after it
+        if (func == main_func) continue; // Don't 'ret' after main, so we can inject fake stuff manually after it
 
 
         // Return to caller
@@ -4472,10 +4751,13 @@ void build_machinecode(Context* context) {
         i32* target = (i32*) (context->bytecode + fixup->text_location);
         assert(*target == 0xefbeadde);
 
-        u32 jump_to = context->funcs[fixup->func_index].bytecode_start;
-        u32 jump_from = fixup->text_location + sizeof(i32);
+        Func* callee = &context->funcs[fixup->func_index];
+        assert(callee->kind == func_kind_normal);
 
-        *target = ((i32) jump_to) - ((i32) jump_from);
+        u32 jump_to = callee->body.bytecode_start;
+        u32 jump_from = fixup->text_location + sizeof(i32);
+        i32 jump_by = ((i32) jump_to) - ((i32) jump_from);
+        *target = jump_by;
     }
 
     // Move output into .data+0
@@ -4498,9 +4780,13 @@ void build_machinecode(Context* context) {
     }
 
 
-    Import_Index index_get_std_handle = add_import(context, "kernel32.lib", "GetStdHandle");
-    Import_Index index_write_file     = add_import(context, "kernel32.lib", "WriteFile");
-    Import_Index index_exit_process   = add_import(context, "kernel32.lib", "ExitProcess");
+    u32 library_name_index = string_table_canonicalize(&context->string_table, "kernel32.lib", 12);
+    u32 name_1_index = string_table_canonicalize(&context->string_table, "GetStdHandle", 12);
+    u32 name_2_index = string_table_canonicalize(&context->string_table, "WriteFile", 9);
+    u32 name_3_index = string_table_canonicalize(&context->string_table, "ExitProcess", 11);
+    Import_Index index_get_std_handle = add_import(context, library_name_index, name_1_index);
+    Import_Index index_write_file     = add_import(context, library_name_index, name_2_index);
+    Import_Index index_exit_process   = add_import(context, library_name_index, name_3_index);
 
     str_push_str(&context->bytecode_data, "_i\n\0", 4);
 
@@ -4819,8 +5105,9 @@ bool read_archive_member_header(
 bool parse_library(Context* context, Library_Import* import) {
     // TODO how do we actually find libraries? Windows has some paths where it stuffs these. Otherwise we should look in
     // the working directory, I guess.
+    u8* raw_lib_name = string_table_access(context->string_table, import->lib_name);
     u8* path;
-    if (str_cmp(import->lib_name, "kernel32.lib")) {
+    if (str_cmp(raw_lib_name, "kernel32.lib")) {
         path = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64/kernel32.lib";
     } else {
         unimplemented();
@@ -4900,7 +5187,7 @@ bool parse_library(Context* context, Library_Import* import) {
         for (u32 j = 0; j < buf_length(import->function_names); j += 1) {
             u32* hint = &import->function_hints[j];
             if (*hint != U32_MAX) continue;
-            u8* specified_name = import->function_names[j];
+            u8* specified_name = string_table_access(context->string_table, import->function_names[j]);
 
             bool match = true;
             for (u32 k = 0; k < symbol_name_length; k += 1) {
@@ -4947,7 +5234,8 @@ bool parse_library(Context* context, Library_Import* import) {
 
     for (u32 i = 0; i < buf_length(import->function_names); i += 1) {
         if (import->function_hints[i] == U32_MAX) {
-            printf("Could not find %s in \"%s\"\n", import->function_names[i], path);
+            u8* name = string_table_access(context->string_table, import->function_names[i]);
+            printf("Could not find %s in \"%s\"\n", name, path);
             return false;
         }
     }
@@ -5058,7 +5346,7 @@ bool write_executable(u8* path, Context* context) {
                 panic("Import data will be invalid, because it has functions at to high rvas: %x!", function_name_address);
             }
 
-            u8* name = import->function_names[j];
+            u8* name = string_table_access(context->string_table, import->function_names[j]);
             u16 hint = import->function_hints[j];
 
             buf_push(idata, (u8) (hint & 0xff));
@@ -5170,7 +5458,7 @@ bool write_executable(u8* path, Context* context) {
     if (main_func_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
     }
-    u32 main_bytecode_start = context->funcs[main_func_index].bytecode_start;
+    u32 main_bytecode_start = context->funcs[main_func_index].body.bytecode_start;
     image.entry_point = text_memory_start + main_bytecode_start;
 
     image.base_of_code = text_memory_start;
@@ -5422,24 +5710,30 @@ void print_verbose_info(Context* context) {
         u8* name = string_table_access(context->string_table, func->name);
         printf("  fn %s\n", name);
 
-        printf("    %u variables: ", (u64) func->var_count);
-        for (u32 v = 0; v < func->var_count; v += 1) {
-            Var* var = func->vars + v;
-            u8* name = string_table_access(context->string_table, var->name);
+        if (func->kind == func_kind_normal) {
+            printf("    %u variables: ", (u64) func->body.var_count);
+            for (u32 v = 0; v < func->body.var_count; v += 1) {
+                Var* var = &func->body.vars[v];
+                u8* name = string_table_access(context->string_table, var->name);
 
-            if (v == 0) {
-                printf("%s", name);
-            } else {
-                printf(", %s", name);
+                if (v == 0) {
+                    printf("%s", name);
+                } else {
+                    printf(", %s", name);
+                }
             }
-        }
-        printf("\n");
-
-        printf("    %u statements:\n", (u64) func->stmt_count);
-        for (u32 s = 0; s < func->stmt_count; s += 1) {
-            printf("      ");
-            print_stmt(context, func, func->stmts + s);
             printf("\n");
+
+            printf("    %u statements:\n", (u64) func->body.stmt_count);
+            for (u32 s = 0; s < func->body.stmt_count; s += 1) {
+                printf("      ");
+                print_stmt(context, func, &func->body.stmts[s]);
+                printf("\n");
+            }
+        } else if (func->kind == func_kind_imported) {
+            printf("    (Imported)\n");
+        } else {
+            assert(false);
         }
     }
 }
