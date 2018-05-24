@@ -1,15 +1,16 @@
 
 extern "kernel32.lib" {
-    #fn GetStdHandle(key: u32) -> 'void;
-    #fn WriteFile(file: 'void, buffer: 'u8, length: u32, written: 'u32, overlapped: 'void);
-    fn OutputDebugStringA(string: 'u8);
+    fn GetStdHandle(key: u32) -> u64;
+    fn WriteFile(file: u64, buffer: 'u8, length: u32, written: 'u32, overlapped: 'void);
     fn ExitProcess(exit_code: u32);
 }
 
 fn main() -> u8 {
-    var foo: [3]u8 = [3]u8 { 72, 72, 0 };
-    OutputDebugStringA(@foo);
-    ExitProcess(1);
+    var text: [3]u8 = [3]u8 { 72, 105, 0 };
+    var written: u32 = 0;
+    var handle: u64 = GetStdHandle(4294967285);
+    WriteFile(handle, @text, 3, @written, null);
+    ExitProcess(0);
 }
 
 #fn four() -> u8 {

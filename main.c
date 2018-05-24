@@ -698,6 +698,7 @@ typedef struct Token {
         token_keyword_extern,
         token_keyword_var,
         token_keyword_fn,
+        token_keyword_null,
     } kind;
 
     union {
@@ -864,7 +865,14 @@ struct Expr {
 
     union {
         union { u32 index; u32 unresolved_name; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
-        u64 literal_value;
+
+        struct {
+            u64 value;
+            enum {
+                expr_literal_integer,
+                expr_literal_pointer,
+            } kind;
+        } literal;
 
         struct {
             Expr** content; // *[*Expr]
@@ -1132,7 +1140,7 @@ u8* reg_names[REG_COUNT] = {
     "r12", "r13", "r14", "r15"
 };
 
-//#define PRINT_GENERATED_INSTRUCTIONS
+#define PRINT_GENERATED_INSTRUCTIONS
 
 
 
@@ -1388,6 +1396,9 @@ void print_token(u8* string_table, Token* t) {
         case token_keyword_fn: {
             printf("keyword fn");
         } break;
+        case token_keyword_null: {
+            printf("keyword null");
+        } break;
 
         default: assert(false);
     }
@@ -1407,7 +1418,19 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         } break;
 
         case expr_literal: {
-            printf("%u", expr->literal_value);
+            switch (expr->literal.kind) {
+                case expr_literal_integer: {
+                    printf("%u", expr->literal.value);
+                } break;
+                case expr_literal_pointer: {
+                    if (expr->literal.value == 0) {
+                        printf("null");
+                    } else {
+                        printf("%x", expr->literal.value);
+                    }
+                } break;
+                default: assert(false);
+            }
         } break;
 
         case expr_compound_literal: {
@@ -1702,6 +1725,7 @@ u32 parse_type(Context* context, Token* t, u32 length) {
             case token_keyword_var:
             case token_keyword_fn:
             case token_keyword_extern:
+            case token_keyword_null:
             {
                 printf("Unexpected token in type: ");
                 print_token(context->string_table, &t[i]);
@@ -1981,7 +2005,9 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
         }
 
         switch (t->kind) {
-            case token_literal: {
+            case token_literal:
+            case token_keyword_null:
+            {
                 if (length != 1) {
                     printf("Unexpected token(s) after %u: ", t->literal_value);
                     for (u32 i = 1; i < length; i += 1) {
@@ -1994,7 +2020,15 @@ Expr* parse_expr(Context* context, Token* t, u32 length) {
                 } else {
                     Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
                     expr->kind = expr_literal;
-                    expr->literal_value = t->literal_value;
+
+                    if (t->kind == token_literal) {
+                        expr->literal.value = t->literal_value;
+                        expr->literal.kind = expr_literal_integer;
+                    } else {
+                        expr->literal.value = 0;
+                        expr->literal.kind = expr_literal_pointer;
+                    }
+
                     expr->pos = t->pos;
                     return expr;
                 }
@@ -2367,6 +2401,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
                 case token_arrow:
                 case token_tick:
                 case token_at:
+                case token_keyword_null:
                 {
                     Stmt stmt = {0};
                     stmt.pos = body[stmt_start].pos;
@@ -2524,6 +2559,7 @@ bool build_ast(Context* context, u8* path) {
     u32 keyword_extern = string_table_canonicalize(&context->string_table, "extern", 6);
     u32 keyword_var    = string_table_canonicalize(&context->string_table, "var", 3);
     u32 keyword_fn     = string_table_canonicalize(&context->string_table, "fn", 2);
+    u32 keyword_null   = string_table_canonicalize(&context->string_table, "null", 4);
     init_primitive_names(context->primitive_names, &context->string_table);
 
     for (u32 t = 0; t < PRIMITIVE_COUNT; t += 1) {
@@ -2585,6 +2621,8 @@ bool build_ast(Context* context, u8* path) {
                 buf_push(tokens, ((Token) { token_keyword_fn,  .pos = file_pos }));
             } else if (string_table_index == keyword_extern) {
                 buf_push(tokens, ((Token) { token_keyword_extern,  .pos = file_pos }));
+            } else if (string_table_index == keyword_null) {
+                buf_push(tokens, ((Token) { token_keyword_null,  .pos = file_pos }));
             } else {
                 buf_push(tokens, ((Token) { token_identifier, .identifier_string_table_index = string_table_index, .pos = file_pos }));
             }
@@ -2861,27 +2899,42 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
             Primitive solidify_to_primitive = context->type_buf[solidify_to];
-            if (solidify_to_primitive == primitive_pointer) {
-                solidify_to_primitive = primitive_u64;
+
+            switch (expr->literal.kind) {
+                case expr_literal_integer: {
+                    if (solidify_to_primitive == primitive_pointer) {
+                        solidify_to_primitive = primitive_u64;
+                    }
+                    bool can_solidify = solidify_to_primitive >= primitive_u8 && solidify_to_primitive <= primitive_i64;
+
+                    if (can_solidify) {
+                        expr->type_index = solidify_to_primitive;
+
+                        u64 mask = size_mask(primitive_size_of(solidify_to_primitive));
+                        u64 value = expr->literal.value;
+
+                        if (value != (value & mask)) {
+                            printf(
+                                "Warning: Literal %u won't fit fully into a %s and will be masked! (Line %u)\n",
+                                (u64) value, primitive_name(solidify_to_primitive), (u64) expr->pos.line
+                            );
+                        }
+                    } else {
+                        expr->type_index = primitive_unsolidified_int;
+                    }
+                } break;
+
+                case expr_literal_pointer: {
+                    if (solidify_to_primitive == primitive_pointer) {
+                        expr->type_index = solidify_to;
+                    } else {
+                        expr->type_index = primitive_invalid;
+                    }
+                } break;
+
+                default: assert(false);
             }
 
-            bool can_solidify = solidify_to_primitive >= primitive_u8 && solidify_to_primitive <= primitive_i64;
-
-            if (can_solidify) {
-                expr->type_index = solidify_to_primitive;
-
-                u64 mask = size_mask(primitive_size_of(solidify_to_primitive));
-                u64 value = expr->literal_value;
-
-                if (value != (value & mask)) {
-                    printf(
-                        "Warning: Literal %u won't fit fully into a %s and will be masked! (Line %u)\n",
-                        (u64) value, primitive_name(solidify_to_primitive), (u64) expr->pos.line
-                    );
-                }
-            } else {
-                expr->type_index = primitive_unsolidified_int;
-            }
         } break;
 
         case expr_compound_literal: {
@@ -3371,7 +3424,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         {
             Local source;
             switch (expr->kind) {
-                case expr_literal:  source = (Local) { local_literal, false, expr->literal_value };  break;
+                case expr_literal:  source = (Local) { local_literal, false, expr->literal.value };  break;
                 case expr_variable: source = (Local) { local_variable, false, expr->variable.index }; break;
                 default: assert(false);
             }
@@ -4274,10 +4327,8 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_r
     #endif
 }
 
-void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, Reg reg, Local local, u8 bytes) {
-    Mem_Item* item = get_stack_item(func, local);
-    u32 offset = item->offset;
-
+// Moves to/from '[rsp + offset]'
+void instruction_mov_stack_manual(u8** b, Mov_Mode mode, Reg reg, u32 offset, u8 bytes) {
     u8 rex = REX_BASE | REX_W;
     u8 modrm = 0;
     u8 opcode;
@@ -4329,6 +4380,12 @@ void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, Reg reg, Local loc
         printf("mov%u %s, [rsp + %x]\n", (u64) bytes*8, reg_names[reg], (u64) offset);
     }
     #endif
+}
+
+void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, Reg reg, Local local, u8 bytes) {
+    Mem_Item* item = get_stack_item(func, local);
+    u32 offset = item->offset;
+    instruction_mov_stack_manual(b, mode, reg, offset, bytes);
 }
 
 void instruction_mov_imm_to_reg(u8** b, u64 value, Reg reg, u8 bytes) {
@@ -4469,7 +4526,7 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
                     case 1: reg = reg_rdx; break;
                     case 2: reg = reg_r8; break;
                     case 3: reg = reg_r9; break;
-                    default: unimplemented(); // TODO additional parameters go on the stack. We also need more space in that case.
+                    default: reg = reg_rax; break;
                 }
 
                 if (local.kind == local_literal) {
@@ -4478,6 +4535,11 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
                     unimplemented(); // TODO
                 } else {
                     instruction_mov_stack(&context->bytecode, func, mov_from, reg, local, size);
+                }
+
+                if (p >= 4) {
+                    u32 offset = POINTER_SIZE * (p + 1);
+                    instruction_mov_stack_manual(&context->bytecode, mov_to, reg, offset, size);
                 }
             }
 
@@ -4578,18 +4640,19 @@ void build_machinecode(Context* context) {
         u32 offset = 0;
 
         // Shadow space for calling other functions
-        u32 max_params = U32_MAX;
+        u32 max_params = 4;
+        bool any_params = false;
         for (u32 i = 0; i < func->body.op_count; i += 1) {
             Op* op = &func->body.ops[i];
             if (op->kind == op_call) {
                 Func* callee = &context->funcs[op->call.func_index];
 
-                if (max_params == U32_MAX) max_params = 0;
+                any_params = true;
                 max_params = max(max_params, callee->signature.param_count);
             }
         }
-        if (max_params != U32_MAX) {
-            offset += max(max_params, 4)*POINTER_SIZE;
+        if (any_params) {
+            offset += max_params * POINTER_SIZE;
         }
 
         // Mark parameter variables so they don't get allocated normaly
@@ -4732,13 +4795,6 @@ void build_machinecode(Context* context) {
         printf("add rsp, %x\n", (u64) func->body.stack_layout.total_bytes);
         #endif
 
-
-        // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
-        // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
-        // TODO TODO TODO TODO TODO TODO REMOVE REMOVE REMOVE This will break stuff later on!!!!!!!!
-        if (func == main_func) continue; // Don't 'ret' after main, so we can inject fake stuff manually after it
-
-
         // Return to caller
         buf_push(context->bytecode, 0xc3);
         #ifdef PRINT_GENERATED_INSTRUCTIONS
@@ -4759,180 +4815,6 @@ void build_machinecode(Context* context) {
         i32 jump_by = ((i32) jump_to) - ((i32) jump_from);
         *target = jump_by;
     }
-
-    // Move output into .data+0
-    {
-        Local output_local = { local_variable, false, 0 };
-        u8 output_reg = reg_rax;
-
-        buf_push(context->bytecode, 0x88);
-        buf_push(context->bytecode, 0x05 | (output_reg << 3));
-        buf_push(context->bytecode, 0xde);
-        buf_push(context->bytecode, 0xad);
-        buf_push(context->bytecode, 0xbe);
-        buf_push(context->bytecode, 0xef);
-
-        Fixup fixup = {0};
-        fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-        fixup.kind = fixup_data;
-        fixup.data_offset = 0;
-        buf_push(context->fixups, fixup);
-    }
-
-
-    u32 library_name_index = string_table_canonicalize(&context->string_table, "kernel32.lib", 12);
-    u32 name_1_index = string_table_canonicalize(&context->string_table, "GetStdHandle", 12);
-    u32 name_2_index = string_table_canonicalize(&context->string_table, "WriteFile", 9);
-    u32 name_3_index = string_table_canonicalize(&context->string_table, "ExitProcess", 11);
-    Import_Index index_get_std_handle = add_import(context, library_name_index, name_1_index);
-    Import_Index index_write_file     = add_import(context, library_name_index, name_2_index);
-    Import_Index index_exit_process   = add_import(context, library_name_index, name_3_index);
-
-    str_push_str(&context->bytecode_data, "_i\n\0", 4);
-
-    Fixup fixup = {0};
-
-    // sub rsp,58h  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x83);
-    buf_push(context->bytecode, 0xec);
-    buf_push(context->bytecode, 0x58);
-
-    //lea rax,[0cc3000h]  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x8d);
-    buf_push(context->bytecode, 0x05);
-    buf_push(context->bytecode, 0xde);
-    buf_push(context->bytecode, 0xad);
-    buf_push(context->bytecode, 0xbe);
-    buf_push(context->bytecode, 0xef);
-    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-    fixup.kind = fixup_data;
-    fixup.data_offset = 0;
-    buf_push(context->fixups, fixup);
-    // mov qword ptr [rsp+38h],rax  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x89);
-    buf_push(context->bytecode, 0x44);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x38);
-
-    // GetStdHandle()
-    // mov ecx, 0xfffffff5   (param)
-    buf_push(context->bytecode, 0xb9);
-    buf_push(context->bytecode, 0xf5);
-    buf_push(context->bytecode, 0xff);
-    buf_push(context->bytecode, 0xff);
-    buf_push(context->bytecode, 0xff);
-    // call qword ptr [rip + 0x0f9b]  
-    buf_push(context->bytecode, 0xff);
-    buf_push(context->bytecode, 0x15);
-    buf_push(context->bytecode, 0xde);
-    buf_push(context->bytecode, 0xad);
-    buf_push(context->bytecode, 0xbe);
-    buf_push(context->bytecode, 0xef);
-
-    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-    fixup.kind = fixup_imported_function;
-    fixup.import_index = index_get_std_handle;
-    buf_push(context->fixups, fixup);
-
-    // mov qword ptr [rsp+40h],rax  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x89);
-    buf_push(context->bytecode, 0x44);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x40);
-    
-    // This is space for the `bytes_written` pointer which is returned
-    // mov dword ptr [rsp+30h],0  
-    buf_push(context->bytecode, 0xc7);
-    buf_push(context->bytecode, 0x44);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x30);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    
-    // WriteFile()
-    // mov qword ptr [rsp+20h],0  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0xc7);
-    buf_push(context->bytecode, 0x44);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x20);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    // lea r9,[rsp+30h]  
-    buf_push(context->bytecode, 0x4c);
-    buf_push(context->bytecode, 0x8d);
-    buf_push(context->bytecode, 0x4c);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x30);
-    // mov r8d,3  
-    buf_push(context->bytecode, 0x41);
-    buf_push(context->bytecode, 0xb8);
-    buf_push(context->bytecode, 0x03);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    buf_push(context->bytecode, 0x00);
-    // mov rdx,qword ptr [rsp+38h]  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x8b);
-    buf_push(context->bytecode, 0x54);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x38);
-    // mov rcx,qword ptr [rsp+40h]  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x8b);
-    buf_push(context->bytecode, 0x4c);
-    buf_push(context->bytecode, 0x24);
-    buf_push(context->bytecode, 0x40);
-    // call        qword ptr [rip + buf_push(context->bytecode, 0x0f72]  
-    buf_push(context->bytecode, 0xff);
-    buf_push(context->bytecode, 0x15);
-    buf_push(context->bytecode, 0xde);
-    buf_push(context->bytecode, 0xad);
-    buf_push(context->bytecode, 0xbe);
-    buf_push(context->bytecode, 0xef);
-
-    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-    fixup.kind = fixup_imported_function;
-    fixup.import_index = index_write_file;
-    buf_push(context->fixups, fixup);
-
-    // ExitProcess()
-    // xor ecx,ecx  
-    buf_push(context->bytecode, 0x33);
-    buf_push(context->bytecode, 0xc9);
-    // call qword ptr [rip + 0x0f72]  
-    buf_push(context->bytecode, 0xff);
-    buf_push(context->bytecode, 0x15);
-    buf_push(context->bytecode, 0xde);
-    buf_push(context->bytecode, 0xad);
-    buf_push(context->bytecode, 0xbe);
-    buf_push(context->bytecode, 0xef);
-
-    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
-    fixup.kind = fixup_imported_function;
-    fixup.import_index = index_exit_process;
-    buf_push(context->fixups, fixup);
-
-    // xor eax,eax  
-    buf_push(context->bytecode, 0x33);
-    buf_push(context->bytecode, 0xc0);
-
-    // Reset stack
-    // add rsp,58h  
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x83);
-    buf_push(context->bytecode, 0xc4);
-    buf_push(context->bytecode, 0x58);
-    // ret
-    buf_push(context->bytecode, 0xc3);
 
     arena_stack_pop(&context->stack);
 }
@@ -5757,7 +5639,7 @@ void main() {
     print_verbose_info(&context);
 
     build_intermediate(&context);
-    eval_ops(&context);
+    //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
 
     build_machinecode(&context);
     if (!write_executable("out.exe", &context)) {
