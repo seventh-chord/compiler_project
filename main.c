@@ -47,7 +47,6 @@ void printf_flush();
 #define panic(x, ...)    (printf("Panic at %s:%u: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
 #define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
 
-
 void main();
 void program_entry() {
     stdout = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -138,7 +137,7 @@ bool mem_cmp(u8* a, u8* b, u64 count) {
 }
 
 bool str_cmp(u8* a, u8* b) {
-    while (1) {
+    while (true) {
         if (*a != *b) {
             return false;
         }
@@ -289,6 +288,7 @@ struct Arena_Page {
 };
 
 #define arena_insert(a, e) (arena_insert_with_size((a), &(e), sizeof((e))))
+#define arena_new(a, T)    (arena_insert_with_size((a), &((T) {0}), sizeof(T)))
 
 void arena_make_space(Arena* arena, u64 size) {
     if (arena->current_page == null) {
@@ -414,7 +414,7 @@ u32 string_table_search(u8* table, u8* string) {
     return string_table_search_with_length(table, string, length);
 }
 
-u32 string_table_canonicalize(u8** table, u8* string, u32 length) {
+u32 string_table_intern(u8** table, u8* string, u32 length) {
     u32 index;
 
     index = string_table_search_with_length(*table, string, length);
@@ -428,6 +428,15 @@ u32 string_table_canonicalize(u8** table, u8* string, u32 length) {
     buf_push(*table, 0);
 
     return index;
+}
+
+u32 string_table_intern_cstr(u8** table, u8* string) {
+    u32 length = 0;
+    for (u8* p = string; *p != 0; p += 1) {
+        length += 1;
+    }
+    
+    return string_table_intern(table, string, length);
 }
 
 // NB when inserting into the string table, old pointer may get invalidated as we reallocate!
@@ -657,62 +666,66 @@ typedef struct File_Pos {
     u32 line;
 } File_Pos;
 
-
-#define BRACKET_CURLY_CLOSE  0
-#define BRACKET_ROUND_CLOSE  1
-#define BRACKET_SQUARE_CLOSE 2
-#define BRACKET_OPEN   4
-#define BRACKET_CURLY_OPEN    (BRACKET_CURLY_CLOSE  | BRACKET_OPEN)
-#define BRACKET_ROUND_OPEN    (BRACKET_ROUND_CLOSE  | BRACKET_OPEN)
-#define BRACKET_SQUARE_OPEN   (BRACKET_SQUARE_CLOSE | BRACKET_OPEN)
-const u8 BRACKET_NAMES[8] = { '}', ')', ']', 0, '{', '(', '[', 0 };
-
-u8* long_bracket_name(u8 kind) {
-    switch (kind) {
-        case BRACKET_CURLY_CLOSE:  case BRACKET_CURLY_OPEN:  return "curly bracket";
-        case BRACKET_SQUARE_CLOSE: case BRACKET_SQUARE_OPEN: return "square bracket";
-        case BRACKET_ROUND_CLOSE:  case BRACKET_ROUND_OPEN:  return "parenthesis";
-        default: assert(false);
-    }
-    return null;
-}
-
 typedef struct Token {
     enum {
         token_end_of_stream = 0,
+
+        token_bracket_round_open   = '(',
+        token_bracket_round_close  = ')',
+        token_bracket_square_open  = '[',
+        token_bracket_square_close = ']',
+        token_bracket_curly_open   = '{',
+        token_bracket_curly_close  = '}',
+        token_semicolon = ';',
+        token_comma     = ',',
+        token_colon     = ':',
+
+        token_SEPARATOR = 128, // Values before this use literal ascii character codes, to simplify some parsing
 
         token_identifier,
         token_literal,
         token_string,
 
         token_operator,
-        token_bracket,
-
-        token_arrow,
-        token_semicolon,
-        token_comma,
-        token_colon,
-        token_tick,
-        token_at,
 
         token_keyword_extern,
         token_keyword_var,
         token_keyword_fn,
         token_keyword_null,
+        token_keyword_if,
+        token_keyword_else,
+        token_keyword_for,
     } kind;
 
     union {
         u32 identifier_string_table_index;
+
         u64 literal_value;
+
         struct {
             u8* bytes; // null-terminated
             u64 length;
         } string;
-        u8 operator_symbol;
-        struct {
-            u8 kind;
-            i16 offset_to_matching;
-        } bracket;
+
+        enum {
+            token_operator_add,
+            token_operator_sub,
+            token_operator_mul, // also used for pointers
+            token_operator_div,
+
+            token_operator_greater,
+            token_operator_greater_or_equal,
+            token_operator_less,
+            token_operator_less_or_equal,
+            token_operator_equal,
+
+            token_operator_assign,
+
+            token_operator_arrow,
+            token_operator_and,
+        } operator;
+
+        i32 bracket_offset_to_matching;
     };
 
     File_Pos pos;
@@ -748,17 +761,17 @@ typedef enum Primitive {
 } Primitive;
 
 void init_primitive_names(u32* names, u8** string_table) {
-    names[primitive_unsolidified_int] = string_table_canonicalize(string_table, "<int>", 5);
+    names[primitive_unsolidified_int] = string_table_intern(string_table, "<int>", 5);
 
-    names[primitive_void] = string_table_canonicalize(string_table, "void", 4);
-    names[primitive_u8]   = string_table_canonicalize(string_table, "u8",   2);
-    names[primitive_u16]  = string_table_canonicalize(string_table, "u16",  3);
-    names[primitive_u32]  = string_table_canonicalize(string_table, "u32",  3);
-    names[primitive_u64]  = string_table_canonicalize(string_table, "u64",  3);
-    names[primitive_i8]   = string_table_canonicalize(string_table, "i8",   2);
-    names[primitive_i16]  = string_table_canonicalize(string_table, "i16",  3);
-    names[primitive_i32]  = string_table_canonicalize(string_table, "i32",  3);
-    names[primitive_i64]  = string_table_canonicalize(string_table, "i64",  3);
+    names[primitive_void] = string_table_intern(string_table, "void", 4);
+    names[primitive_u8]   = string_table_intern(string_table, "u8",   2);
+    names[primitive_u16]  = string_table_intern(string_table, "u16",  3);
+    names[primitive_u32]  = string_table_intern(string_table, "u32",  3);
+    names[primitive_u64]  = string_table_intern(string_table, "u64",  3);
+    names[primitive_i8]   = string_table_intern(string_table, "i8",   2);
+    names[primitive_i16]  = string_table_intern(string_table, "i16",  3);
+    names[primitive_i32]  = string_table_intern(string_table, "i32",  3);
+    names[primitive_i64]  = string_table_intern(string_table, "i64",  3);
 }
 
 u8* primitive_name(Primitive primitive) {
@@ -843,10 +856,59 @@ u64 size_mask(u8 size) {
 }
 
 
+
+typedef enum Binary_Op {
+    binary_op_invalid,
+    binary_add,
+    binary_sub,
+    binary_mul,
+    binary_div,
+    binary_equal,
+    binary_greater,
+    binary_greater_or_equal,
+    binary_less,
+    binary_less_or_equal,
+    BINARY_OP_COUNT,
+} Binary_Op;
+
+u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
+    [binary_mul] = 2,
+    [binary_div] = 2,
+    [binary_add] = 1,
+    [binary_sub] = 1,
+    [binary_equal] = 0,
+    [binary_greater] = 0,
+    [binary_greater_or_equal] = 0,
+    [binary_less] = 0,
+    [binary_less_or_equal] = 0,
+};
+
+bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
+    [binary_sub] = true,
+    [binary_div] = true,
+    [binary_mul] = false,
+    [binary_add] = false,
+    [binary_equal] = false,
+    [binary_greater] = false,
+    [binary_greater_or_equal] = false,
+    [binary_less] = false,
+    [binary_less_or_equal] = false,
+};
+
+
+typedef struct Expr_List Expr_List;
+typedef struct Expr Expr;
+
+struct Expr_List {
+    Expr* expr;
+    Expr_List* next;
+};
+
+
 #define EXPR_FLAG_UNRESOLVED 0x01
 #define EXPR_FLAG_ASSIGNABLE 0x02
 
-enum Expr_Kind {
+typedef enum Expr_Kind {
     expr_variable,
     expr_literal,
     expr_compound_literal,
@@ -856,11 +918,10 @@ enum Expr_Kind {
     expr_address_of,
     expr_dereference,
     expr_subscript,
-};
+} Expr_Kind;
 
-typedef struct Expr Expr;
 struct Expr {
-    u8 kind;
+    Expr_Kind kind;
     u8 flags;
 
     union {
@@ -875,18 +936,12 @@ struct Expr {
         } literal;
 
         struct {
-            Expr** content; // *[*Expr]
+            Expr_List* content; // *[*Expr]
             u32 count;
         } compound_literal;
 
         struct {
-            enum {
-                binary_add,
-                binary_sub,
-                binary_mul,
-                binary_div,
-            } op;
-
+            Binary_Op op;
             Expr* left;
             Expr* right;
         } binary;
@@ -897,8 +952,8 @@ struct Expr {
                 u32 func_index;
             }; // discriminated by EXPR_FLAG_UNRESOLVED
 
+            Expr_List* params;
             u32 param_count;
-            Expr** params; // Pointer to an array of pointers to expressions! (*[*Expr] as opposed to **[Expr])
         } call;
 
         Expr* cast_from;
@@ -915,21 +970,30 @@ struct Expr {
     File_Pos pos;
 };
 
-typedef struct Stmt {
+typedef struct Stmt Stmt;
+struct Stmt {
     enum {
+        stmt_end, // Sentinel, returned to mark that no more statements can be parsed
+
         stmt_declaration,
         stmt_expr,
         stmt_assignment,
+
+        stmt_block,
     } kind;
 
     union {
-        struct { u32 var_index; } declaration;
+        struct { u32 var_index; Expr* right; } declaration; // 'right' might be null
         Expr* expr;
         struct { Expr* left; Expr* right; } assignment;
+
+        struct { Stmt* inner; } block;
     };
 
     File_Pos pos;
-} Stmt;
+
+    Stmt* next;
+};
 
 
 typedef struct Local {
@@ -1112,8 +1176,7 @@ typedef struct Func {
             Mem_Layout mem_layout; // used for eval_ops
             Mem_Layout stack_layout; // for machinecode generations
 
-            Stmt* stmts;
-            u32 stmt_count;
+            Stmt* first_stmt;
 
             Op* ops;
             u32 op_count;
@@ -1140,7 +1203,7 @@ u8* reg_names[REG_COUNT] = {
     "r12", "r13", "r14", "r15"
 };
 
-#define PRINT_GENERATED_INSTRUCTIONS
+//#define PRINT_GENERATED_INSTRUCTIONS
 
 
 
@@ -1158,7 +1221,6 @@ typedef struct Context {
     Func* funcs; // stretchy-buffer
 
     // These are only for temporary use, we copy to arena buffers & clear
-    Stmt* tmp_stmts; // stretchy-buffer
     Var* tmp_vars; // stretchy-buffer
     Op* tmp_ops; // stretchy-buffer, linearized from of stmts
     Tmp* tmp_tmps; // stretchy-buffer, also built during op generation
@@ -1215,7 +1277,7 @@ Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
 }
 
 bool type_cmp(Context* context, u32 a, u32 b) {
-    while (1) {
+    while (true) {
         Primitive a_primitive = context->type_buf[a];
         Primitive b_primitive = context->type_buf[b];
         a += 1;
@@ -1253,7 +1315,7 @@ u64 type_size_of(Context* context, u32 type_index) {
     u64 array_multiplier = 1;
     u64 size = 0;
 
-    while (1) {
+    while (true) {
         Primitive primitive = context->type_buf[type_index];
         type_index += 1;
 
@@ -1275,7 +1337,7 @@ u32 type_duplicate(Context* context, u32 type_index) {
     u32 new = buf_length(context->type_buf);
 
     u32 i = type_index;
-    while (1) {
+    while (true) {
         Primitive p = context->type_buf[i];
         buf_push(context->type_buf, p);
 
@@ -1299,7 +1361,7 @@ u32 type_duplicate(Context* context, u32 type_index) {
 
 void print_type(Context* context, u32 type_index) {
     u32 i = type_index;
-    while (1) {
+    while (true) {
         Primitive p = context->type_buf[i];
         i += 1;
 
@@ -1311,7 +1373,7 @@ void print_type(Context* context, u32 type_index) {
             case primitive_unsolidified_int: printf("<int>"); break;
 
             case primitive_pointer: {
-                printf("'");
+                printf("*");
                 keep_going = true;
             } break;
 
@@ -1341,16 +1403,14 @@ void print_type(Context* context, u32 type_index) {
 }
 
 void print_token(u8* string_table, Token* t) {
-    switch (t->kind) {
-        case token_end_of_stream: {
-            printf("end of file");
-        } break;
+    u8* s = null;
 
+    switch (t->kind) {
         case token_identifier: {
             u32 index = t->identifier_string_table_index;
-            u8* name = string_table_access(string_table, index);
-            printf("%s", name);
+            s = string_table_access(string_table, index);
         } break;
+
         case token_literal: {
             printf("%u", t->literal_value);
         } break;
@@ -1359,48 +1419,47 @@ void print_token(u8* string_table, Token* t) {
         } break;
 
         case token_operator: {
-            u8 operator = t->operator_symbol;
-            printf("%c", operator);
-        } break;
-        case token_bracket: {
-            printf("%c", BRACKET_NAMES[t->bracket.kind]);
-        } break;
-
-        case token_semicolon: {
-            printf(";");
-        } break;
-        case token_comma: {
-            printf(",");
-        } break;
-        case token_colon: {
-            printf(":");
-        } break;
-        case token_arrow: {
-            printf("->");
+            switch (t->operator) {
+                case token_operator_add:              printf("+"); break;
+                case token_operator_sub:              printf("-"); break;
+                case token_operator_mul:              printf("*"); break;
+                case token_operator_div:              printf("/"); break;
+                case token_operator_greater:          printf(">"); break;
+                case token_operator_greater_or_equal: printf(">="); break;
+                case token_operator_less:             printf("<"); break;
+                case token_operator_less_or_equal:    printf("<="); break;
+                case token_operator_equal:            printf("=="); break;
+                case token_operator_assign:           printf("="); break;
+                case token_operator_arrow:            printf("->"); break;
+            }
         } break;
 
-        case token_tick: {
-            printf("'");
-        } break;
+        case token_end_of_stream: s = "end of file"; break;
 
-        case token_at: {
-            printf("@");
-        } break;
+        case token_semicolon: s = ";"; break;
+        case token_comma:     s = ","; break;
+        case token_colon:     s = ":"; break;
 
-        case token_keyword_extern: {
-            printf("keyword extern");
-        } break;
-        case token_keyword_var: {
-            printf("keyword var");
-        } break;
-        case token_keyword_fn: {
-            printf("keyword fn");
-        } break;
-        case token_keyword_null: {
-            printf("keyword null");
-        } break;
+        case token_bracket_round_open:   s = "("; break;
+        case token_bracket_round_close:  s = ")"; break;
+        case token_bracket_square_open:  s = "["; break;
+        case token_bracket_square_close: s = "]"; break;
+        case token_bracket_curly_open:   s = "{"; break;
+        case token_bracket_curly_close:  s = "}"; break;
+
+        case token_keyword_extern:  s = "keyword extern"; break;
+        case token_keyword_var:     s = "keyword var"; break;
+        case token_keyword_fn:      s = "keyword fn"; break;
+        case token_keyword_null:    s = "keyword null"; break;
+        case token_keyword_if:      s = "keyword if"; break;
+        case token_keyword_else:    s = "keyword else"; break;
+        case token_keyword_for:     s = "keyword for"; break;
 
         default: assert(false);
+    }
+
+    if (s != null) {
+        printf(s);
     }
 }
 
@@ -1436,9 +1495,11 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         case expr_compound_literal: {
             print_type(context, expr->type_index);
             printf(" { ");
-            for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
-                if (i != 0) printf(", ");
-                print_expr(context, func, expr->compound_literal.content[i]);
+            bool first = true;
+            for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
+                if (!first) printf(", ");
+                first = false;
+                print_expr(context, func, list->expr);
             }
             printf(" }");
         } break;
@@ -1451,6 +1512,13 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 case binary_sub: printf(" - "); break;
                 case binary_mul: printf(" * "); break;
                 case binary_div: printf(" / "); break;
+
+                case binary_equal:              printf(" == "); break;
+                case binary_greater:            printf(" > "); break;
+                case binary_greater_or_equal:   printf(" >= "); break;
+                case binary_less:               printf(" < "); break;
+                case binary_less_or_equal:      printf(" <= "); break;
+
                 default: assert(false);
             }
             print_expr(context, func, expr->binary.right);
@@ -1468,9 +1536,11 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             }
 
             printf("(");
-            for (u32 i = 0; i < expr->call.param_count; i += 1) {
-                if (i != 0) printf(", ");
-                print_expr(context, func, expr->call.params[i]);
+            bool first = true;
+            for (Expr_List* list = expr->call.params; list != null; list = list->next) {
+                if (!first) printf(", ");
+                first = false;
+                print_expr(context, func, list->expr);
             }
             printf(")");
         } break;
@@ -1483,12 +1553,12 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         } break;
 
         case expr_address_of: {
-            printf("@");
+            printf("&");
             print_expr(context, func, expr->address_from);
         } break;
 
         case expr_dereference: {
-            printf("'");
+            printf("*");
             print_expr(context, func, expr->dereference_from);
         } break;
 
@@ -1520,7 +1590,18 @@ void print_stmt(Context* context, Func* func, Stmt* stmt) {
         case stmt_declaration: {
             Var* var = &func->body.vars[stmt->declaration.var_index];
             u8* name = string_table_access(context->string_table, var->name);
-            printf("var %s;", name);
+            printf("var %s", name);
+
+            if (stmt->declaration.right != null) {
+                printf(" = ");
+                print_expr(context, func, stmt->declaration.right);
+            }
+
+            printf(";");
+        } break;
+
+        case stmt_block: {
+            unimplemented();
         } break;
 
         default: assert(false);
@@ -1642,102 +1723,665 @@ u32 find_func(Context* context, u32 name) {
     return U32_MAX;
 }
 
-u32 parse_type(Context* context, Token* t, u32 length) {
-    u32 start = buf_length(context->type_buf);
-    u32 type_length = 0;
-
-    bool done = false;
-
-    for (u32 i = 0; i < length; i += 1) {
-        if (done) {
-            printf("Unexpected token after type: ");
-            print_token(context->string_table, &t[i]);
-            printf(" (Line %u)\n", (u64) t[i].pos.line);
-            return U32_MAX;
-        }
-
-        switch (t[i].kind) {
-            case token_identifier: {
-                Primitive primitive = primitive_invalid;
-                for (u32 p = 0; p < PRIMITIVE_COUNT; p += 1) {
-                    if (context->primitive_names[p] == t[i].identifier_string_table_index) {
-                        primitive = p;
-                        break;
-                    }
-                }
-
-                if (primitive != primitive_invalid) {
-                    if (type_length == 0) {
-                        start = primitive; // because we have entries for all primitives at start of context->type_buf
-                    } else {
-                        buf_push(context->type_buf, primitive);
-                        type_length += 1;
-                    }
-
-                    done = true;
-                } else {
-                    u8* name = string_table_access(context->string_table, t[i].identifier_string_table_index);
-                    printf("Not a valid type: %s (Line %u)\n", name, (u64) t[i].pos.line);
-                    return U32_MAX;
-                }
-            } break;
-
-            case token_tick: {
-                buf_push(context->type_buf, primitive_pointer);
-                type_length += 1;
-            } break;
-
-            case token_bracket: {
-                if (
-                    i + 3 >= length ||
-                    t[i].kind != token_bracket ||
-                    t[i].bracket.kind != BRACKET_SQUARE_OPEN ||
-                    t[i + 1].kind != token_literal ||
-                    t[i + 2].kind != token_bracket ||
-                    t[i + 2].bracket.kind != BRACKET_SQUARE_CLOSE
-                ) {
-                    printf("Unexpected token in type: ");
-                    print_token(context->string_table, &t[i]);
-                    printf(" (Line %u)\n", (u64) t[i].pos.line);
-                    return U32_MAX;
-                }
-
-                buf_push(context->type_buf, primitive_array);
-
-                u64 array_size = t[i + 1].literal_value;
-                for (u32 i = 0; i < sizeof(u64); i += 1) {
-                    buf_push(context->type_buf, (u8) (array_size & 0xff));
-                    array_size = array_size >> 8;
-                }
-
-                type_length += 9;
-                i += 2;
-            } break;
-
-            case token_literal:
-            case token_string:
-            case token_operator:
-            case token_arrow:
-            case token_semicolon:
-            case token_comma:
-            case token_colon:
-            case token_at:
-            case token_keyword_var:
-            case token_keyword_fn:
-            case token_keyword_extern:
-            case token_keyword_null:
-            {
-                printf("Unexpected token in type: ");
-                print_token(context->string_table, &t[i]);
-                printf(" (Line %u)\n", (u64) t[i].pos.line);
-                return U32_MAX;
-            } break;
-
-            default: assert(false);
+Primitive parse_primitive_name(Context* context, u32 name_index) {
+    for (u32 p = 0; p < PRIMITIVE_COUNT; p += 1) {
+        if (context->primitive_names[p] == name_index) {
+            return p;
         }
     }
 
-    return start;
+    return primitive_invalid;
+}
+
+u32 parse_type(Context* context, Token* t, u32* length) {
+    Token* t_start = t;
+
+    u32 index = buf_length(context->type_buf);
+
+    while (true) {
+        if (t->kind == token_bracket_square_open) {
+            t += 1;
+
+            if (t->kind != token_literal) {
+                printf("Expected array size, but got ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", t->pos.line);
+
+                *length = t - t_start + 2;
+                return U32_MAX;
+            }
+            u64 array_size = t->literal_value;
+            t += 1;
+
+            if (t->kind != token_bracket_square_close) {
+                printf("Expected closing square bracket ] after array size, but got ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", t->pos.line);
+
+                *length = t - t_start + 1;
+                return U32_MAX;
+            }
+            t += 1;
+
+            buf_push(context->type_buf, primitive_array);
+            for (u32 i = 0; i < sizeof(u64); i += 1) {
+                buf_push(context->type_buf, (u8) (array_size & 0xff));
+                array_size = array_size >> 8;
+            }
+
+        } else if (t->kind == token_operator && t->operator == token_operator_mul) {
+            buf_push(context->type_buf, primitive_pointer);
+            t += 1;
+
+        } else if (t->kind == token_identifier) {
+            Primitive p = parse_primitive_name(context, t->identifier_string_table_index);
+
+            if (p == primitive_invalid) {
+                u8* name = string_table_access(context->string_table, t->identifier_string_table_index);
+                printf("Not a valid type: %s (Line %u)\n", name, (u64) t->pos.line);
+
+                *length = t - t_start + 1;
+                return U32_MAX;
+            }
+
+            if (t == t_start) {
+                *length = 1;
+                return p;
+            } else {
+                buf_push(context->type_buf, p);
+                *length = t - t_start + 1;
+                return index;
+            }
+
+            t += 1;
+
+        } else {
+            printf("Unexpected token in type: ");
+            print_token(context->string_table, t);
+            printf(" (Line %u)\n", (u64) t->pos.line);
+
+            t += 1;
+            *length = t - t_start;
+            return U32_MAX;
+        }
+    }
+}
+
+typedef struct Shunting_Yard {
+    Expr** expr_queue;
+    u32 expr_queue_index, expr_queue_size;
+
+    Binary_Op* op_queue;
+    u32 op_queue_index, op_queue_size;
+
+    Expr* prefix;
+    Expr** prefix_insert_slot;
+} Shunting_Yard;
+
+Shunting_Yard* shunting_yard_setup(Context* context) {
+    Shunting_Yard* yard = arena_new(&context->stack, Shunting_Yard);
+
+    yard->op_queue_size = 25;
+    yard->expr_queue_size = 25;
+
+    yard->op_queue = (void*) arena_alloc(&context->stack, yard->op_queue_size * sizeof(*yard->op_queue));
+    yard->expr_queue = (void*) arena_alloc(&context->stack, yard->expr_queue_size * sizeof(*yard->expr_queue));
+
+    return yard;
+}
+
+void shunting_yard_push_prefix_for_next_expr(Shunting_Yard* yard, Expr* prefix, Expr** slot) {
+    if (yard->prefix == null) {
+        yard->prefix = prefix;
+    } else {
+        *yard->prefix_insert_slot = prefix;
+    }
+
+    yard->prefix_insert_slot = slot;
+}
+
+void shunting_yard_push_expr(Context* context, Shunting_Yard* yard, Expr* new_expr) {
+    if (yard->prefix != null) {
+        *yard->prefix_insert_slot = new_expr;
+        new_expr = yard->prefix;
+
+        yard->prefix = null;
+        yard->prefix_insert_slot = null;
+    }
+
+    assert(yard->expr_queue_index < yard->expr_queue_size);
+    yard->expr_queue[yard->expr_queue_index] = new_expr;
+    yard->expr_queue_index += 1;
+}
+
+void shunting_yard_collapse(Context* context, Shunting_Yard* yard) {
+    assert(yard->op_queue_index >= 1);
+    assert(yard->expr_queue_index >= 2);
+
+    Expr* expr = arena_new(&context->arena, Expr);
+    expr->kind = expr_binary;
+
+    expr->binary.op = yard->op_queue[yard->op_queue_index - 1];
+    expr->binary.right = yard->expr_queue[yard->expr_queue_index - 1];
+    expr->binary.left = yard->expr_queue[yard->expr_queue_index - 2];
+    yard->op_queue_index -= 1;
+    yard->expr_queue_index -= 2;
+
+    expr->pos = expr->binary.left->pos;
+
+    shunting_yard_push_expr(context, yard, expr);
+}
+
+void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_op) {
+    u8 new_precedence = BINARY_OP_PRECEDENCE[new_op];
+
+    while (yard->op_queue_index > 0) {
+        Binary_Op head_op = yard->op_queue[yard->op_queue_index - 1];
+        bool force_left = BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[head_op];
+        u8 old_precedence = BINARY_OP_PRECEDENCE[head_op];
+
+        if (old_precedence > new_precedence || (force_left && old_precedence == new_precedence)) {
+            shunting_yard_collapse(context, yard);
+        } else {
+            break;
+        }
+    }
+
+    assert(yard->op_queue_index < yard->op_queue_size);
+    yard->op_queue[yard->op_queue_index] = new_op;
+    yard->op_queue_index += 1;
+}
+
+Expr* parse_expr(Context* context, Token* t, u32* length) {
+    Token* t_start = t;
+
+    // NB: We only pop the stack if we succesfully parse. That is, for eroneous code we leak memory.
+    // As we should terminate at some point in that case though, it doesn't really matter.
+    arena_stack_push(&context->stack);
+
+    enum {
+        expr_mode_value,
+        expr_mode_binary,
+    } mode = expr_mode_value;
+
+    Shunting_Yard* yard = shunting_yard_setup(context);
+    
+    while (true) {
+        bool could_parse = false;
+
+        if (t->kind == token_identifier && mode == expr_mode_value) {
+            u32 name_index = t->identifier_string_table_index;
+            mode = expr_mode_binary;
+            t += 1;
+
+            // Function call
+            if (t->kind == token_bracket_round_open) {
+                t += 1;
+
+                Expr_List* param_list = null;
+                Expr_List* param_list_head = null;
+                u32 param_count = 0;
+
+                while (t->kind != token_bracket_round_close) {
+                    u32 param_length = 0;
+                    Expr* param = parse_expr(context, t, &param_length);
+                    t += param_length;
+
+                    if (param == null) {
+                        *length = t - t_start;
+                        return null;
+                    }
+
+                    if (t->kind != token_bracket_round_close) {
+                        if (t->kind != token_comma) {
+                            printf("Expected comma , or closing parenthesis ) after parameter in call, but got ");
+                            print_token(context->string_table, t);
+                            printf(" (Line %u)\n", (u64) t->pos.line);
+                            *length = t - t_start;
+                            return null;
+                        }
+                        t += 1;
+                    }
+
+                    Expr_List* list_item = arena_new(&context->arena, Expr_List);
+                    list_item->expr = param;
+
+                    if (param_list_head == null) {
+                        param_list_head = list_item;
+                    } else {
+                        param_list->next = list_item;
+                    }
+                    param_list = list_item;
+
+                    param_count += 1;
+                }
+
+                if (t->kind != token_bracket_round_close) {
+                    printf("Expected a closing parenthesis ) after function call, but got ");
+                    print_token(context->string_table, t);
+                    printf(" (Line %u)\n", (u64) t->pos.line);
+                    *length = t - t_start;
+                    return null;
+                }
+                t += 1;
+
+                Expr* expr = arena_new(&context->arena, Expr);
+                expr->kind = expr_call;
+                expr->call.unresolved_name = name_index;
+                expr->flags |= EXPR_FLAG_UNRESOLVED;
+                expr->call.params = param_list_head;
+                expr->call.param_count = param_count;
+
+                shunting_yard_push_expr(context, yard, expr);
+                could_parse = true;
+            
+            // Structure literal
+            } else if (t->kind == token_bracket_curly_open) {
+                unimplemented(); // TODO
+
+            // Variable
+            } else {
+                Expr* expr = arena_new(&context->arena, Expr);
+                expr->kind = expr_variable;
+                expr->variable.unresolved_name = name_index;
+                expr->flags |= EXPR_FLAG_UNRESOLVED;
+                expr->pos = t->pos;
+
+                shunting_yard_push_expr(context, yard, expr);
+                could_parse = true;
+            }
+
+        } else if (t->kind == token_literal && mode == expr_mode_value) {
+            Expr* expr = arena_new(&context->arena, Expr);
+            expr->kind = expr_literal;
+            expr->literal.value = t->literal_value;
+            expr->literal.kind = expr_literal_integer;
+
+            shunting_yard_push_expr(context, yard, expr);
+
+            t += 1;
+            mode = expr_mode_binary;
+            could_parse = true;
+
+        } else if (t->kind == token_keyword_null && mode == expr_mode_value) {
+            Expr* expr = arena_new(&context->arena, Expr);
+            expr->kind = expr_literal;
+            expr->literal.value = 0;
+            expr->literal.kind = expr_literal_pointer;
+            expr->pos = t->pos;
+
+            shunting_yard_push_expr(context, yard, expr);
+
+            t += 1;
+            mode = expr_mode_binary;
+            could_parse = true;
+
+        // Parenthesized expr
+        } else if (t->kind == token_bracket_round_open && mode == expr_mode_value) {
+            t += 1;
+            u32 inner_length = 0;
+            Expr* inner = parse_expr(context, t, &inner_length);
+            t += inner_length;
+
+            if (inner == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            if (t->kind != token_bracket_round_close) {
+                printf("Expected a closing parenthesis ) after parenthesized subexpression, but got ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", (u64) t->pos.line);
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            shunting_yard_push_expr(context, yard, inner);
+
+            mode = expr_mode_binary;
+            could_parse = true;
+
+        } else if (t->kind == token_bracket_square_open && mode == expr_mode_value) {
+            // Compound literal
+            if (mode == expr_mode_value) {
+                u32 type_length = 0;
+                u32 type_index = parse_type(context, t, &type_length);
+                t += type_length;
+
+                if (type_index == U32_MAX) {
+                    *length = t - t_start;
+                    return null;
+                }
+
+                if (t->kind != token_bracket_curly_open) {
+                    printf("Expected open curly brace { after type of compound literal, but got ");
+                    print_token(context->string_table, t);
+                    printf(" (Line %u)\n", (u64) t->pos.line);
+                    *length = t - t_start;
+                    return null;
+                }
+                t += 1;
+
+                Expr_List* expr_list = null;
+                Expr_List* expr_list_head = null;
+                u32 expr_count = 0;
+
+                while (t->kind != token_bracket_curly_close) {
+                    u32 sub_expr_length = 0;
+                    Expr* sub_expr = parse_expr(context, t, &sub_expr_length);
+                    t += sub_expr_length;
+
+                    if (sub_expr == null) {
+                        *length = t - t_start;
+                        return null;
+                    }
+
+                    if (t->kind != token_bracket_curly_close) {
+                        if (t->kind != token_comma) {
+                            printf("Expected comma , or closing brace } after value in compound literal, but got ");
+                            print_token(context->string_table, t);
+                            printf(" (Line %u)\n", (u64) t->pos.line);
+                            *length = t - t_start;
+                            return null;
+                        }
+                        t += 1;
+                    }
+
+                    Expr_List* list_item = arena_new(&context->arena, Expr_List);
+                    list_item->expr = sub_expr;
+
+                    if (expr_list_head == null) {
+                        expr_list_head = list_item;
+                    } else {
+                        expr_list->next = list_item;
+                    }
+                    expr_list = list_item;
+
+                    expr_count += 1;
+                }
+                
+                if (t->kind != token_bracket_curly_close) {
+                    printf("Expected open curly brace } to close compound literal, but got ");
+                    print_token(context->string_table, t);
+                    printf(" (Line %u)\n", (u64) t->pos.line);
+                    *length = t - t_start;
+                    return null;
+                }
+                t += 1;
+
+                Expr* expr = arena_new(&context->arena, Expr);
+                expr->kind = expr_compound_literal;
+                expr->type_index = type_index;
+                expr->compound_literal.content = expr_list_head;
+                expr->compound_literal.count = expr_count;
+                expr->pos = t->pos;
+
+                shunting_yard_push_expr(context, yard, expr);
+
+                could_parse = true;
+                mode = expr_mode_binary;
+
+            // Subscript
+            } else if (mode == expr_mode_binary) {
+                unimplemented(); // TODO
+            }
+
+        // End of expression
+        } else if (
+            mode == expr_mode_binary && (
+                t->kind == token_semicolon ||
+                t->kind == token_comma ||
+                t->kind == token_bracket_round_close ||
+                t->kind == token_bracket_square_close ||
+                t->kind == token_bracket_curly_close ||
+                (t->kind == token_operator && t->operator == token_operator_assign) ||
+                t->kind == token_keyword_var ||
+                t->kind == token_keyword_fn
+            )
+        ) {
+            break;
+
+        } else if (t->kind == token_operator) {
+            if (mode == expr_mode_value) {
+                switch (t->operator) {
+                    case token_operator_and: {
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = expr_address_of;
+                        expr->pos = t->pos;
+
+                        shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->address_from);
+
+                        t += 1;
+                        could_parse = true;
+                    } break;
+
+                    case token_operator_mul: {
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = expr_dereference;
+                        expr->pos = t->pos;
+
+                        shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->dereference_from);
+
+                        t += 1;
+                        could_parse = true;
+
+                    } break;
+                }
+
+            } else if (mode == expr_mode_binary) {
+                Binary_Op op = binary_op_invalid;
+                switch (t->operator) {
+                    case token_operator_add:                op = binary_add; break;
+                    case token_operator_sub:                op = binary_sub; break;
+                    case token_operator_mul:                op = binary_mul; break;
+                    case token_operator_div:                op = binary_div; break;
+                    case token_operator_greater:            op = binary_greater; break;
+                    case token_operator_greater_or_equal:   op = binary_greater_or_equal; break;
+                    case token_operator_less:               op = binary_less;
+                    case token_operator_less_or_equal:      op = binary_less_or_equal; break;
+                    case token_operator_equal:              op = binary_equal; break;
+                }
+
+                if (op != binary_op_invalid) {
+                    shunting_yard_push_op(context, yard, op);
+                    could_parse = true;
+                    mode = expr_mode_value;
+                }
+
+                t += 1;
+            }
+        }
+
+        if (!could_parse) {
+            printf("Expected ");
+            switch (mode) {
+                case expr_mode_value:  printf("a value or a unary operator"); break;
+                case expr_mode_binary: printf("a binary operator or a postfix operator (array subscript or member access)"); break;
+            }
+            printf(" but got: ");
+            print_token(context->string_table, t);
+            printf(" (Line %u)\n", (u64) t->pos.line);
+            *length = t - t_start;
+            return null;
+        }
+    }
+
+    while (yard->op_queue_index > 0) {
+        shunting_yard_collapse(context, yard);
+    }
+    assert(yard->expr_queue_index == 1);
+    Expr* expr = yard->expr_queue[0];
+
+    arena_stack_pop(&context->stack);
+
+    *length = t - t_start;
+    return expr;
+}
+
+Stmt* parse_stmts(Context* context, Token* t, u32* length) {
+    Token* t_start = t;
+    
+    // Semicolons are just empty statements, skip them
+    while (t->kind == token_semicolon) t += 1;
+
+    Stmt* stmt = arena_new(&context->arena, Stmt);
+    stmt->pos = t->pos;
+
+    enum { expect_nothing, expect_semicolon, expect_closing_bracket } expect = expect_nothing;
+
+    // End of a block
+    if (t->kind == token_bracket_curly_close) {
+        stmt->kind = stmt_end;
+
+    // Basic blocks
+    } else if (t->kind == token_bracket_curly_open) {
+        expect = expect_closing_bracket;
+        t += 1;
+
+        u32 inner_length = 0;
+        Stmt* inner_stmts = parse_stmts(context, t, &inner_length);
+        t += inner_length;
+
+        if (inner_stmts == null) {
+            return null;
+        } else {
+            stmt->kind = stmt_block;
+            stmt->block.inner = inner_stmts;
+        }
+
+    // Control flow - if
+    } else if (t->kind == token_keyword_if) {
+        expect = expect_closing_bracket;
+
+        unimplemented(); // TODO
+
+    // Control flow - for
+    } else if (t->kind == token_keyword_for) {
+        expect = expect_closing_bracket;
+
+        unimplemented(); // TODO
+
+    // Variable declaration
+    } else if (t->kind == token_keyword_var) {
+        expect = expect_semicolon;
+        t += 1;
+
+        if (t->kind != token_identifier) {
+            printf("Expected variable name, but found ");
+            print_token(context->string_table, t);
+            printf(" (Line %u)\n", t->pos.line);
+            return null;
+        }
+        u32 name_index = t->identifier_string_table_index;
+        t += 1;
+
+        if (t->kind != token_colon) {
+            u8* name = string_table_access(context->string_table, name_index);
+            printf("Expected 'var %s: type', but got ", name);
+            print_token(context->string_table, t);
+            printf(" (Line %u)\n", t->pos.line);
+            return null;
+        }
+        t += 1;
+
+
+        u32 type_length = 0;
+        u32 type_index = parse_type(context, t, &type_length);
+        if (type_index == U32_MAX) return null;
+        t += type_length;
+
+        Expr* expr = null;
+        if (t->kind == token_operator && t->operator == token_operator_assign) {
+            t += 1;
+
+            u32 right_length = 0;
+            expr = parse_expr(context, t, &right_length); 
+            if (expr == null) return null;
+            t += right_length;
+        }
+
+        u32 var_index = buf_length(context->tmp_vars);
+        buf_push(context->tmp_vars, ((Var) {
+            .name = name_index,
+            .declaration_pos = stmt->pos,
+            .type_index = type_index,
+        }));
+
+        stmt->kind = stmt_declaration;
+        stmt->declaration.var_index = var_index;
+        stmt->declaration.right = expr;
+
+    // Assignment or free standing expression
+    } else {
+        expect = expect_semicolon;
+
+        u32 left_length = 0;
+        Expr* left = parse_expr(context, t, &left_length);
+        t += left_length;
+
+        if (left == null) return null;
+
+        if (t->kind == token_operator && t->operator == token_operator_assign) {
+            t += 1;
+
+            u32 right_length = 0;
+            Expr* right = parse_expr(context, t, &right_length);
+            t += right_length;
+
+            if (right == null) return null;
+
+            stmt->kind = stmt_assignment;
+            stmt->assignment.left = left;
+            stmt->assignment.right = right;
+        } else {
+            stmt->kind = stmt_expr;
+            stmt->expr = left;
+        }
+    }
+
+    switch (expect) {
+        case expect_semicolon: {
+            if (t->kind != token_semicolon) {
+                printf("Expected semicolon after statement, but got ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", (u64) t->pos.line);
+                return null;
+            }
+
+            t += 1;
+        } break;
+
+        case expect_closing_bracket: {
+            if (t->kind != token_bracket_curly_close) {
+                printf("Expected closing curly bracket at end of block, but got ");
+                print_token(context->string_table, t);
+                printf("(Line %u)\n", (u64) t->pos.line);
+                return null;
+            }
+
+            t += 1;
+        } break;
+
+        case expect_nothing: break;
+        default: assert(false);
+    }
+
+    // Try parsing more statements after this one
+    if (stmt->kind != stmt_end) {
+        u32 next_length = 0;
+        Stmt* next_stmt = parse_stmts(context, t, &next_length);
+        t += next_length;
+
+        if (next_stmt == null) {
+            return null; // Propagate errors
+        } else {
+            stmt->next = next_stmt;
+        }
+    }
+
+    *length = t - t_start;
+    return stmt;
 }
 
 bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u32 length) {
@@ -1754,8 +2398,8 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
         if (t[i].kind == token_comma && i + 1 < length) {
             func->signature.param_count += 1;
         }
-        if (t[i].kind == token_bracket && (t[i].bracket.kind & BRACKET_OPEN)) {
-            i += t[i].bracket.offset_to_matching;
+        if (t[i].kind == token_bracket_round_open || t[i].kind == token_bracket_square_open || t[i].kind == token_bracket_curly_open) {
+            i += t[i].bracket_offset_to_matching;
         }
     }
 
@@ -1796,8 +2440,16 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
             return false;
         }
 
-        u32 type_index = parse_type(context, &t[start + 2], length - 2);
+        u32 type_length = 0;
+        u32 type_index = parse_type(context, &t[start + 2], &type_length);
         if (type_index == U32_MAX) {
+            return false;
+        }
+
+        if (type_length != length - 2) {
+            printf("Invalid token after type in parameter delcaration list: ");
+            print_token(context->string_table, &t[start + 2 + type_length]);
+            printf(" (Line %u)\n", (u64) t[start + 2 + type_length].pos.line);
             return false;
         }
 
@@ -1812,371 +2464,6 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
     }
 
     return true;
-}
-
-Expr* parse_expr(Context* context, Token* t, u32 length);
-
-bool parse_comma_separated_expr_list(
-    Context* context, Token* t, u32 length,
-    Expr*** out_exprs,
-    u32* out_count
-)
-{
-    *out_count = 0;
-    *out_exprs = null;
-
-    if (length == 0) {
-        return true;
-    }
-
-    // Figure out how many exprs we need to allocate
-    *out_count = 1;
-    for (u32 i = 0; i < length; i += 1) {
-        if (t[i].kind == token_comma && i + 1 < length) {
-            *out_count += 1;
-        }
-        if (t[i].kind == token_bracket && (t[i].bracket.kind & BRACKET_OPEN)) {
-            i += t[i].bracket.offset_to_matching;
-        }
-    }
-
-    // This will probably allocate to much memory, but at least it will allways allocate enough
-    *out_exprs = (Expr**) arena_alloc(&context->arena, *out_count * sizeof(Expr));
-
-    u32 i = 0;
-    u32 e = 0;
-    while (i < length) {
-        u32 start = i;
-        while (i < length) {
-            if (t[i].kind == token_comma) {
-                break;
-            }
-            if (t[i].kind == token_bracket && (t[i].bracket.kind & BRACKET_OPEN)) {
-                i += t[i].bracket.offset_to_matching;
-            }
-            i += 1;
-        }
-        u32 end = i;
-        i += 1; // Skip the comma
-
-        Expr* expr = parse_expr(context, &t[start], end - start);
-        if (expr == null) {
-            return false;
-        }
-
-        (*out_exprs)[e] = expr;
-        e += 1;
-    }
-
-    assert(e == *out_count);
-
-    return true;
-}
-
-Expr* parse_expr(Context* context, Token* t, u32 length) {
-    if (length == 0) {
-        printf("Expected expression but found nothing (Line %u)\n", (u64) t->pos.line);
-        return null;
-    }
-
-    bool brackets_enclosed =
-        t[0].kind == token_bracket &&
-        t[0].bracket.kind == BRACKET_ROUND_OPEN &&
-        t[0].bracket.offset_to_matching == length - 1;
-    if (brackets_enclosed) {
-        assert(
-            t[length - 1].kind == token_bracket &&
-            t[length - 1].bracket.kind == BRACKET_ROUND_CLOSE
-        );
-        return parse_expr(context, t + 1, length - 2);
-    }
-
-    u32 op_pos = U32_MAX;
-    u8 op_precedence = U8_MAX;
-
-    for (u32 i = 0; i < length; i += 1) {
-        if (t[i].kind == token_bracket) {
-            if (t[i].bracket.kind & BRACKET_OPEN) {
-                // Skip ahead to closing bracket
-                i += t[i].bracket.offset_to_matching;
-                if (i >= length) {
-                    printf("Unclosed %s in expression (Line %u)\n",  long_bracket_name(t[i].bracket.kind), (u64) t->pos.line);
-                    return null;
-                }
-            } else {
-                printf("Unopened %s in expression (Line %u)\n",  long_bracket_name(t[i].bracket.kind), (u64) t->pos.line);
-                return null;
-            }
-        }
-
-        if (t[i].kind == token_operator) {
-            u8 precedence;
-            switch (t[i].operator_symbol) {
-                case '+': precedence = 1; break;
-                case '-': precedence = 1; break;
-                case '*': precedence = 2; break;
-                case '/': precedence = 2; break;
-                case '=': precedence = 3; break;
-                default: assert(false);
-            }
-
-            if (precedence <= op_precedence) {
-                op_precedence = precedence;
-                op_pos = i;
-            }
-        }
-    }
-
-    // We didnt find an operator
-    if (op_pos == U32_MAX) {
-        bool array_subscript = t[length - 1].kind == token_bracket && t[length - 1].bracket.kind == BRACKET_SQUARE_CLOSE;
-        
-        if (array_subscript) {
-            i32 open_bracket = (length - 1) + t[length - 1].bracket.offset_to_matching;
-            if (open_bracket < 0 || open_bracket >= length) {
-                printf("The parser is hosed and I don't wanna fix it right now\n"); // TODO hmmm
-                return null;
-            }
-
-            Expr* array = parse_expr(context, t, open_bracket);
-            Expr* index = parse_expr(context, &t[open_bracket + 1], length - open_bracket - 2);
-
-            Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-            expr->kind = expr_subscript;
-            expr->subscript.array = array;
-            expr->subscript.index = index;
-            expr->pos = array->pos;
-            return expr;
-        }
-
-        bool compound_literal = 
-            t[0].kind == token_identifier || // type name
-            (t[0].kind == token_bracket && t[0].bracket.kind == BRACKET_SQUARE_OPEN); // start of array literal
-
-        u32 compound_literal_type_length, compound_literal_content_start, compound_literal_content_length;
-
-        if (compound_literal) {
-            // We might just have a variable, look ahead for a curly brace
-            u32 bracket_at = U32_MAX;
-            for (u32 i = 1; i < length; i += 1) {
-                if (t[i].kind == token_bracket && t[i].bracket.kind == BRACKET_CURLY_OPEN) {
-                    bracket_at = i;
-                    break;
-                }
-            }
-
-            if (bracket_at == U32_MAX) {
-                compound_literal = false;
-            } else {
-                u32 closing_bracket = bracket_at + t[bracket_at].bracket.offset_to_matching;
-                if (closing_bracket + 1 != length) {
-                    printf("Unexpected tokens after compound literal: ");
-                    for (u32 i = closing_bracket + 1; i < length; i += 1) {
-                        print_token(context->string_table, &t[i]);
-                    }
-                    printf(" (Line %u)\n", t[closing_bracket].pos.line);
-                    return null;
-                }
-
-                compound_literal_type_length = bracket_at;
-                compound_literal_content_start = bracket_at + 1;
-                compound_literal_content_length = length - bracket_at - 2;
-            }
-        }
-
-        if (compound_literal) {
-            Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-            expr->kind = expr_compound_literal;
-            expr->pos = t->pos;
-
-            expr->type_index = parse_type(context, t, compound_literal_type_length);
-            if (expr->type_index == U32_MAX) return null;
-
-            bool result = parse_comma_separated_expr_list(
-                context,
-                t + compound_literal_content_start,
-                compound_literal_content_length,
-                &expr->compound_literal.content,
-                &expr->compound_literal.count
-            );
-            if (!result) return null;
-
-            return expr;
-        }
-
-        switch (t->kind) {
-            case token_literal:
-            case token_keyword_null:
-            {
-                if (length != 1) {
-                    printf("Unexpected token(s) after %u: ", t->literal_value);
-                    for (u32 i = 1; i < length; i += 1) {
-                        if (i > 1) printf(", ");
-                        print_token(context->string_table, &t[i]);
-                    }
-                    printf(" (Line %u)\n", (u64) t->pos.line);
-                    return null;
-
-                } else {
-                    Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                    expr->kind = expr_literal;
-
-                    if (t->kind == token_literal) {
-                        expr->literal.value = t->literal_value;
-                        expr->literal.kind = expr_literal_integer;
-                    } else {
-                        expr->literal.value = 0;
-                        expr->literal.kind = expr_literal_pointer;
-                    }
-
-                    expr->pos = t->pos;
-                    return expr;
-                }
-            } break;
-
-            case token_identifier: {
-                u32 name_index = t->identifier_string_table_index;
-
-                if (length == 1) {
-                    Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                    expr->variable.unresolved_name = name_index;
-                    expr->flags |= EXPR_FLAG_UNRESOLVED;
-                    expr->pos = t->pos;
-                    return expr;
-                } else {
-                    bool proper_brackets =
-                        t[1].kind == token_bracket &&
-                        t[1].bracket.kind == BRACKET_ROUND_OPEN &&
-                        t[1].bracket.offset_to_matching == length - 2;
-
-                    if (!proper_brackets) {
-                        u8* name = string_table_access(context->string_table, name_index);
-                        printf("Expected parentheses after function '%s', surounding arguments. Got the following tokens instead: ", name);
-                        for (u32 i = 1; i < length; i += 1) {
-                            if (i > 1) printf(", ");
-                            print_token(context->string_table, &t[i]);
-                        }
-                        printf(" (Starting on line %u)\n", (u64) t[1].pos.line);
-                        return null;
-                    }
-                    assert(
-                        t[length - 1].kind == token_bracket &&
-                        t[length - 1].bracket.kind == BRACKET_ROUND_CLOSE
-                    );
-
-                    u32 name_index = t[0].identifier_string_table_index;
-
-                    Primitive cast_primitive = primitive_invalid;
-                    for (u32 i = 0; i < PRIMITIVE_COUNT; i += 1) {
-                        if (context->primitive_names[i] == name_index) {
-                            cast_primitive = i;
-                            break;
-                        }
-                    }
-
-                    if (cast_primitive != primitive_invalid) {
-                        Expr* cast_from = parse_expr(context, t + 2, length - 3);
-                        if (cast_from == null) return null;
-
-                        Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                        expr->kind = expr_cast;
-                        expr->cast_from = cast_from;
-                        expr->pos = t->pos;
-                        expr->type_index = cast_primitive; // because we have entries for all primitives at start of context->type_buf
-                        return expr;
-
-                    } else { // Parse as a normal function call
-                        Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                        expr->kind = expr_call;
-                        expr->call.unresolved_name = name_index;
-                        expr->flags |= EXPR_FLAG_UNRESOLVED;
-                        expr->pos = t->pos;
-
-                        bool result = parse_comma_separated_expr_list(
-                            context, &t[2], length - 3,
-                            &expr->call.params,
-                            &expr->call.param_count
-                        );
-                        if (!result) return null;
-
-                        return expr;
-                    }
-                }
-            } break;
-
-            case token_tick: {
-                Expr* sub_expr = parse_expr(context, t + 1, length - 1);
-                if (sub_expr == null) return null;
-
-                Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                expr->kind = expr_dereference;
-                expr->address_from = sub_expr;
-                expr->pos = t->pos;
-                return expr;
-            } break;
-
-            case token_at: {
-                Expr* sub_expr = parse_expr(context, t + 1, length - 1);
-                if (sub_expr == null) return null;
-
-                Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-                expr->kind = expr_address_of;
-                expr->address_from = sub_expr;
-                expr->pos = t->pos;
-                return expr;
-            } break;
-
-            case token_string:
-            case token_operator:
-            case token_semicolon:
-            case token_arrow:
-            case token_bracket:
-            case token_comma:
-            case token_colon:
-            case token_keyword_var:
-            case token_keyword_fn:
-            case token_keyword_extern:
-            {
-                printf("Expected literal or variable, but got ");
-                print_token(context->string_table, t);
-                printf(" (Line %u)\n", (u64) t->pos.line);
-                return null;
-            }
-
-            default: {
-                assert(false);
-                return null;
-            } break;
-        }
-    
-    // We did find an operator
-    } else {
-        u8 binary_op;
-        Token* op_token = t + op_pos;
-        switch (op_token->operator_symbol) {
-            case '+': binary_op = binary_add; break;
-            case '-': binary_op = binary_sub; break;
-            case '*': binary_op = binary_mul; break;
-            case '/': binary_op = binary_div; break;
-            default: {
-                printf("Expected binary operator, but got %c (Line %u)\n", op_token->operator_symbol, (u64) op_token->pos.line);
-                return null;
-            } break;
-        }
-
-        Expr* left  = parse_expr(context, t, op_pos);
-        Expr* right = parse_expr(context, t + op_pos + 1, length - op_pos - 1);
-
-        if (left == null || right == null) { return null; }
-
-        Expr* expr = arena_insert(&context->arena, ((Expr) {0}));
-        expr->kind = expr_binary;
-        expr->binary.op = binary_op;
-        expr->binary.left = left;
-        expr->binary.right = right;
-        expr->pos = left->pos;
-        return expr;
-    }
 }
 
 // This parsing function returns length via a pointer, rather than taking it as a parameter
@@ -2213,10 +2500,8 @@ Func* parse_function(Context* context, Token* t, u32* length) {
         }
     }
 
-
     // NB we use these while parsing, and then copy them into the memory arena
     buf_clear(context->tmp_vars); 
-    buf_clear(context->tmp_stmts);
 
     buf_push(context->funcs, ((Func) {0}));
     Func* func = buf_end(context->funcs) - 1;
@@ -2224,7 +2509,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
     // Parameter list
     t += 1;
-    if (t->kind != token_bracket || t->bracket.kind != BRACKET_ROUND_OPEN) {
+    if (t->kind != token_bracket_round_open) {
         u8* name = string_table_access(context->string_table, name_index);
         printf("Expected a open parenthesis '(' to after 'fn %s', but got ", name);
         print_token(context->string_table, t);
@@ -2232,44 +2517,30 @@ Func* parse_function(Context* context, Token* t, u32* length) {
         return null;
     }
 
-    Token* parameter_start = t + 1;
-    u32 parameter_length = t->bracket.offset_to_matching - 1;
-    t = t + t->bracket.offset_to_matching;
-    if (!parse_parameter_declaration_list(context, func, parameter_start, parameter_length)) {
-        // We already printed an error in parse_parameter_declaration_list
-        return null;
-    }
+    u32 parameter_length = t->bracket_offset_to_matching - 1;
+    if (!parse_parameter_declaration_list(context, func, t + 1, parameter_length)) return null;
+    t += parameter_length + 2;
 
     // Return type
-    t += 1;
+    if (t->kind == token_operator && t->operator == token_operator_arrow) {
+        t += 1;
 
-    Token* return_type_start = t;
-    while (t->kind != token_end_of_stream) {
-        if (t->kind == token_semicolon || (t->kind == token_bracket && t->bracket.kind == BRACKET_CURLY_OPEN)) {
-            break;
-        } else {
-            t += 1;
-        }
-    }
-    u32 return_type_length = (u32) (t - return_type_start);
+        u32 output_type_length = 0;
+        u32 output_type_index = parse_type(context, t, &output_type_length);
+        t += output_type_length;
 
-    if (return_type_length > 0) {
-        return_type_start += 1;
-        return_type_length -= 1;
-
-        u32 output_type_index = parse_type(context, return_type_start, return_type_length);
         if (output_type_index == U32_MAX) {
             return null;
+        } else {
+            func->signature.has_output = true;
+            func->signature.output_type_index = output_type_index;
+            func->body.output_var_index = buf_length(context->tmp_vars);
+
+            Var output_var = {0};
+            output_var.name = string_table_intern(&context->string_table, "output", 6);
+            output_var.type_index = output_type_index;
+            buf_push(context->tmp_vars, output_var);
         }
-
-        func->signature.has_output = true;
-        func->signature.output_type_index = output_type_index;
-        func->body.output_var_index = buf_length(context->tmp_vars);
-
-        Var output_var = {0};
-        output_var.name = string_table_canonicalize(&context->string_table, "output", 6);
-        output_var.type_index = output_type_index;
-        buf_push(context->tmp_vars, output_var);
     } else {
         func->signature.has_output = false;
         func->signature.output_type_index = primitive_void;
@@ -2284,176 +2555,32 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     } else {
         func->kind = func_kind_normal;
 
-        if (t->kind != token_bracket || t->bracket.kind != BRACKET_CURLY_OPEN) {
+        if (t->kind != token_bracket_curly_open) {
             u8* name = string_table_access(context->string_table, name_index);
-            printf("Expected an open curly brace '{' after 'fn %s ...', but found ", name);
+            printf("Expected an open curly brace { after 'fn %s ...', but found ", name);
             print_token(context->string_table, t);
             printf(" (Line %u)\n", (u64) t->pos.line);
             return null;
         }
 
         Token* body = t + 1;
-        u32 body_length = t->bracket.offset_to_matching - 1;
-        t = t + t->bracket.offset_to_matching;
+        u32 body_length = t->bracket_offset_to_matching - 1;
+        t = t + t->bracket_offset_to_matching;
 
         *length = (u32) (t - start) + 1;
 
-        for (u32 i = 0; i < body_length; i += 1) {
-            u32 stmt_start = i;
-            u32 equals_position = U32_MAX;
-            while (i < body_length && body[i].kind != token_semicolon) {
-                if (body[i].kind == token_operator && body[i].operator_symbol == '=') {
-                    equals_position = i - stmt_start;
-                }
-                i += 1;
-            }
-            u32 stmt_length = i - stmt_start;
-            if (stmt_length == 0) { continue; }
 
-            if (i == body_length) {
-                printf("No semicolon at end of statement starting on line %u\n", (u64) body[stmt_start].pos.line);
-                valid = false;
-            }
+        u32 stmts_length = 0;
+        Stmt* first_stmt = parse_stmts(context, body, &stmts_length);
 
-            switch (body[stmt_start].kind) {
-                case token_keyword_var: {
-                    if (stmt_length < 2 || body[stmt_start + 1].kind != token_identifier) {
-                        printf("Expected identifier after 'var', but found ");
-                        print_token(context->string_table, &body[stmt_start + 1]);
-                        printf(" (Line %u)\n", (u64) body[stmt_start + 1].pos.line);
-                        valid = false;
-                        break;
-                    }
-
-                    u32 name_index = body[stmt_start + 1].identifier_string_table_index;
-
-                    bool redeclaration = false;
-                    buf_foreach(Var, v, context->tmp_vars) {
-                        if (v->name == name_index) {
-                            u8* name = string_table_access(context->string_table, name_index);
-                            printf(
-                                "Redeclaration of variable %s on line %u. First delcaration on line %u\n",
-                                name, (u64) body[stmt_start + 1].pos.line, (u64) v->declaration_pos.line
-                            );
-                            redeclaration = true;
-                            valid = false;
-                        }
-                    }
-                    if (redeclaration) break;
-
-                    u32 var_index = buf_length(context->tmp_vars);
-                    buf_push(context->tmp_vars, ((Var) {0}));
-                    Var* var = &context->tmp_vars[var_index];
-                    var->name = name_index;
-
-                    if (stmt_length > 2 && body[stmt_start + 2].kind != token_colon) {
-                        u8* name = string_table_access(context->string_table, name_index);
-                        printf("Expected 'var %s: type', but got ", name);
-                        print_token(context->string_table, &body[stmt_start + 2]);
-                        printf(" (Line %u)\n", body[stmt_start].pos.line);
-                        valid = false;
-                        break;
-                    }
-
-                    u32 type_length = min(equals_position, stmt_length) - 3;
-                    var->type_index = parse_type(context, &body[stmt_start + 3], type_length);
-
-                    if (var->type_index == U32_MAX) {
-                        valid = false;
-                        break;
-                    }
-
-                    Stmt stmt = {0};
-                    stmt.kind = stmt_declaration;
-                    stmt.declaration.var_index = var_index;
-                    stmt.pos = body[stmt_start].pos;
-                    buf_push(context->tmp_stmts, stmt);
-
-                    if (equals_position != U32_MAX) {
-                        Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
-                        if (right == null) {
-                            valid = false;
-                            break;
-                        }
-
-                        Expr* left = arena_insert(&context->arena, ((Expr) {0}));
-                        left->kind = expr_variable;
-                        left->variable.index = var_index;
-                        left->type_index = var->type_index;
-                        left->pos = body[stmt_start].pos;
-
-                        Stmt stmt = {0};
-                        stmt.kind = stmt_assignment;
-                        stmt.assignment.left = left;
-                        stmt.assignment.right = right;
-                        stmt.pos = body[stmt_start].pos;
-                        buf_push(context->tmp_stmts, stmt);
-                    }
-                } break;
-
-                case token_identifier:
-                case token_literal:
-                case token_string:
-                case token_operator:
-                case token_bracket:
-                case token_comma:
-                case token_colon:
-                case token_arrow:
-                case token_tick:
-                case token_at:
-                case token_keyword_null:
-                {
-                    Stmt stmt = {0};
-                    stmt.pos = body[stmt_start].pos;
-
-                    if (equals_position == U32_MAX) {
-                        Expr* expr = parse_expr(context, &body[stmt_start], stmt_length);
-
-                        if (expr == null) {
-                            valid = false;
-                            break;
-                        }
-
-                        stmt.kind = stmt_expr;
-                        stmt.expr = expr;
-                    } else {
-                        Expr* left = parse_expr(context, &body[stmt_start], equals_position);
-                        Expr* right = parse_expr(context, &body[stmt_start + equals_position + 1], stmt_length - equals_position - 1);
-
-                        if (left == null || right == null) {
-                            valid = false;
-                            break;
-                        }
-
-                        stmt.kind = stmt_assignment;
-                        stmt.assignment.left = left;
-                        stmt.assignment.right = right;
-                    }
-
-                    buf_push(context->tmp_stmts, stmt);
-                } break;
-
-                case token_keyword_fn: {
-                    printf("Can't declare a function inside another function (Line %u)\n", (u64) body[i].pos.line);
-                    valid = false;
-                } break;
-
-                case token_keyword_extern: {
-                    printf("Can't declare an extern block inside a function (Line %u)\n", (u64) body[i].pos.line);
-                    valid = false;
-                } break;
-
-                case token_semicolon: assert(false);
-                default: assert(false);
-            }
+        if (first_stmt == null || stmts_length != body_length) {
+            valid = false;
         }
+
+        func->body.first_stmt = first_stmt;
     }
 
     // Copy data out of temporary buffers into permanent arena storage
-    func->body.stmt_count = buf_length(context->tmp_stmts);
-    func->body.stmts = (Stmt*) arena_alloc(&context->arena, buf_bytes(context->tmp_stmts));
-    mem_copy((u8*) context->tmp_stmts, (u8*) func->body.stmts, buf_bytes(context->tmp_stmts));
-
     func->body.var_count = buf_length(context->tmp_vars);
     func->body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
     mem_copy((u8*) context->tmp_vars, (u8*) func->body.vars, buf_bytes(context->tmp_vars));
@@ -2489,20 +2616,20 @@ bool parse_extern(Context* context, Token* t, u32* length) {
         return false;
     }
     u8* library_name = t->string.bytes;
-    u32 library_name_index = string_table_canonicalize(&context->string_table, t->string.bytes, t->string.length);
+    u32 library_name_index = string_table_intern(&context->string_table, t->string.bytes, t->string.length);
 
     // Body
     t += 1;
-    if (t->kind != token_bracket || t->bracket.kind != BRACKET_CURLY_OPEN) {
-        printf("Expected an open curly brace '{' after 'extern \"%s\" ...', but found ", library_name);
+    if (t->kind != token_bracket_curly_open) {
+        printf("Expected an open curly brace { after 'extern \"%s\" ...', but found ", library_name);
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
     }
 
     Token* body = t + 1;
-    u32 body_length = t->bracket.offset_to_matching - 1;
-    t = t + t->bracket.offset_to_matching;
+    u32 body_length = t->bracket_offset_to_matching - 1;
+    t = t + t->bracket_offset_to_matching;
 
     *length = (u32) (t - start) + 1;
 
@@ -2546,6 +2673,7 @@ bool parse_extern(Context* context, Token* t, u32* length) {
     return valid;
 }
 
+
 bool build_ast(Context* context, u8* path) {
     u8* file;
     u32 file_length;
@@ -2556,13 +2684,21 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    u32 keyword_extern = string_table_canonicalize(&context->string_table, "extern", 6);
-    u32 keyword_var    = string_table_canonicalize(&context->string_table, "var", 3);
-    u32 keyword_fn     = string_table_canonicalize(&context->string_table, "fn", 2);
-    u32 keyword_null   = string_table_canonicalize(&context->string_table, "null", 4);
+    enum { KEYWORD_COUNT = 7 };
+    u32 keyword_token_table[KEYWORD_COUNT][2] = {
+        { token_keyword_extern, string_table_intern_cstr(&context->string_table, "extern") },
+        { token_keyword_var,    string_table_intern_cstr(&context->string_table, "var") },
+        { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
+        { token_keyword_null,   string_table_intern_cstr(&context->string_table, "null") },
+        { token_keyword_if,     string_table_intern_cstr(&context->string_table, "if") },
+        { token_keyword_else,   string_table_intern_cstr(&context->string_table, "else") },
+        { token_keyword_for,    string_table_intern_cstr(&context->string_table, "for") },
+    };
+
     init_primitive_names(context->primitive_names, &context->string_table);
 
     for (u32 t = 0; t < PRIMITIVE_COUNT; t += 1) {
+        // Now we can use primitive_* as a type index directly
         buf_push(context->type_buf, t);
     }
 
@@ -2613,17 +2749,19 @@ bool build_ast(Context* context, u8* path) {
             u32 length = last - first + 1;
             u8* identifier = &file[first];
 
-            u32 string_table_index = string_table_canonicalize(&context->string_table, identifier, length);
+            u32 string_table_index = string_table_intern(&context->string_table, identifier, length);
 
-            if (string_table_index == keyword_var) {
-                buf_push(tokens, ((Token) { token_keyword_var, .pos = file_pos }));
-            } else if (string_table_index == keyword_fn) {
-                buf_push(tokens, ((Token) { token_keyword_fn,  .pos = file_pos }));
-            } else if (string_table_index == keyword_extern) {
-                buf_push(tokens, ((Token) { token_keyword_extern,  .pos = file_pos }));
-            } else if (string_table_index == keyword_null) {
-                buf_push(tokens, ((Token) { token_keyword_null,  .pos = file_pos }));
-            } else {
+
+            bool is_keyword = false;
+            for (u32 k = 0; k < KEYWORD_COUNT; k += 1) {
+                if (string_table_index == keyword_token_table[k][1]) {
+                    buf_push(tokens, ((Token) { keyword_token_table[k][0], .pos = file_pos }));
+                    is_keyword = true;
+                    break;
+                }
+            }
+
+            if (!is_keyword) {
                 buf_push(tokens, ((Token) { token_identifier, .identifier_string_table_index = string_table_index, .pos = file_pos }));
             }
         } break;
@@ -2666,44 +2804,73 @@ bool build_ast(Context* context, u8* path) {
             buf_push(tokens, ((Token) { token_literal, .literal_value = value, .pos = file_pos }));
         } break;
 
-        case '+': case '-':
-        case '*': case '/':
-        case '=':
+        case '+': case '-': case '*': case '/':
+        case '=': case '<': case '>':
+        case '&':
         {
-            if (i + 1 < file_length && file[i + 1] == '>') {
-                buf_push(tokens, ((Token) { token_arrow, .pos = file_pos }));
+            u8 a = file[i];
+            u8 b = i + 1 < file_length? file[i + 1] : 0;
+
+            int operator;
+
+            if (a == '-' && b == '>') {
+                operator = token_operator_arrow;
+                i += 2;
+            } else if (a == '<' && b == '=') {
+                operator = token_operator_less_or_equal;
+                i += 2;
+            } else if (a == '>' && b == '=') {
+                operator = token_operator_greater_or_equal;
+                i += 2;
+            } else if (a == '=' && b == '=') {
+                operator = token_operator_equal;
                 i += 2;
             } else {
-                u8 symbol = file[i];
-                buf_push(tokens, ((Token) { token_operator, .operator_symbol = symbol, .pos = file_pos }));
+                switch (a) {
+                    case '+': operator = token_operator_add; break;
+                    case '-': operator = token_operator_sub; break;
+                    case '*': operator = token_operator_mul; break;
+                    case '/': operator = token_operator_div; break;
+                    case '&': operator = token_operator_and; break;
+                    case '>': operator = token_operator_greater; break;
+                    case '<': operator = token_operator_less; break;
+                    case '=': operator = token_operator_assign; break;
+                    default: assert(false);
+                }
                 i += 1;
             }
+
+            buf_push(tokens, ((Token) { token_operator, .operator = operator, .pos = file_pos }));
         } break;
 
         case '{': case '}':
         case '(': case ')':
         case '[': case ']':
         {
-            u8 kind;
             u8 our_char = file[i];
-            switch (file[i]) {
-                case '{': kind = BRACKET_CURLY_OPEN;   break;
-                case '}': kind = BRACKET_CURLY_CLOSE;  break;
-                case '(': kind = BRACKET_ROUND_OPEN;   break;
-                case ')': kind = BRACKET_ROUND_CLOSE;  break;
-                case '[': kind = BRACKET_SQUARE_OPEN;  break;
-                case ']': kind = BRACKET_SQUARE_CLOSE; break;
+
+            u8 kind = our_char;
+
+            u8 matching_kind;
+            bool open;
+            switch (kind) {
+                case '{': matching_kind = '}'; open = true;  break;
+                case '}': matching_kind = '{'; open = false; break;
+                case '(': matching_kind = ')'; open = true;  break;
+                case ')': matching_kind = '('; open = false; break;
+                case '[': matching_kind = ']'; open = true;  break;
+                case ']': matching_kind = '['; open = false; break;
             }
             i += 1;
 
-            i16 offset;
+            i32 offset;
 
             if (all_brackets_matched) {
-                if (kind & BRACKET_OPEN) {
+                if (open) {
                     Bracket_Info* info = arena_insert(&context->stack, ((Bracket_Info) {0}));
                     info->our_char = our_char;
                     info->our_line = file_pos.line;
-                    info->needed_match = kind & (~BRACKET_OPEN);
+                    info->needed_match = matching_kind;
                     info->token_position = buf_length(tokens);
                     info->previous = bracket_match;
                     bracket_match = info;
@@ -2726,17 +2893,16 @@ bool build_ast(Context* context, u8* path) {
                         u32 close_position = buf_length(tokens);
                         u32 unsigned_offset = close_position - open_position;
                         assert(unsigned_offset <= I16_MAX);
-                        offset = -((i16) unsigned_offset);
-                        tokens[open_position].bracket.offset_to_matching = -offset;
+                        offset = -((i32) unsigned_offset);
+                        tokens[open_position].bracket_offset_to_matching = -offset;
                         bracket_match = bracket_match->previous;
                     }
                 }
             }
 
             buf_push(tokens, ((Token) {
-                token_bracket,
-                .bracket.kind = kind,
-                .bracket.offset_to_matching = offset,
+                kind,
+                .bracket_offset_to_matching = offset,
                 .pos = file_pos,
             }));
         } break;
@@ -2792,15 +2958,6 @@ bool build_ast(Context* context, u8* path) {
         case ';': {
             i += 1;
             buf_push(tokens, ((Token) { token_semicolon, .pos = file_pos }));
-        } break;
-
-        case '\'': {
-            i += 1;
-            buf_push(tokens, ((Token) { token_tick, .pos = file_pos }));
-        } break;
-        case '@': {
-            i += 1;
-            buf_push(tokens, ((Token) { token_at, .pos = file_pos }));
         } break;
 
         case '\n':
@@ -2956,8 +3113,8 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                     return false;
                 }
 
-                for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
-                    Expr* child = expr->compound_literal.content[i];
+                for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
+                    Expr* child = list->expr;
                     if (!typecheck_expr(context, func, child, expected_child_type_index)) {
                         return false;
                     }
@@ -3102,15 +3259,16 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                 return false;
             }
 
-            for (u32 p = 0; p < expr->call.param_count; p += 1) {
+            Expr_List* param_expr = expr->call.params;
+            for (u32 p = 0; p < expr->call.param_count; p += 1, param_expr = param_expr->next) {
                 u32 var_index = callee->signature.params[p].var_index;
                 u32 expected_type_index = callee->signature.params[p].type_index;
 
-                if (!typecheck_expr(context, func, expr->call.params[p], expected_type_index)) {
+                if (!typecheck_expr(context, func, param_expr->expr, expected_type_index)) {
                     return false;
                 }
 
-                u32 actual_type_index = expr->call.params[p]->type_index;
+                u32 actual_type_index = param_expr->expr->type_index;
                 if (!type_cmp(context, expected_type_index, actual_type_index)) {
                     u8* func_name = string_table_access(context->string_table, callee->name);
                     printf("Invalid type for parameter %u to %s: Expected ", (u64) (p + 1), func_name);
@@ -3214,6 +3372,7 @@ bool typecheck(Context* context) {
 
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
         Func* func = context->funcs + f;
+        if (func->kind != func_kind_normal) continue;
 
         mem_clear((u8*) func->body.in_scope_map, sizeof(bool) * func->body.var_count);
 
@@ -3226,8 +3385,7 @@ bool typecheck(Context* context) {
             func->body.in_scope_map[var_index] = true;
         }
 
-        for (u32 i = 0; i < func->body.stmt_count; i += 1) {
-            Stmt* stmt = func->body.stmts + i;
+        for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
             switch (stmt->kind) {
                 case stmt_assignment: {
                     if (!typecheck_expr(context, func, stmt->assignment.left, primitive_invalid)) {
@@ -3269,8 +3427,26 @@ bool typecheck(Context* context) {
                 } break;
 
                 case stmt_declaration: {
+                    if (stmt->declaration.right != null) {
+                        u32 var_type_index = func->body.vars[stmt->declaration.var_index].type_index;
+                        if (!typecheck_expr(context, func, stmt->declaration.right, var_type_index)) {
+                            valid = false;
+                        } else if (!type_cmp(context, var_type_index, stmt->declaration.right->type_index)) {
+                            printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                            print_type(context, var_type_index);
+                            printf(" but got ");
+                            print_type(context, stmt->declaration.right->type_index);
+                            printf(" (Line %u)\n", stmt->pos.line);
+                            valid = false;
+                        }
+                    }
+
                     assert(!func->body.in_scope_map[stmt->declaration.var_index]);
                     func->body.in_scope_map[stmt->declaration.var_index] = true;
+                } break;
+
+                case stmt_block: {
+                    unimplemented();
                 } break;
 
                 default: assert(false);
@@ -3471,10 +3647,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 op.binary.target = element_pointer;
                 buf_push(context->tmp_ops, op);
 
-                for (u32 i = 0; i < array_length; i += 1) {
+                bool first = true;
+                for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
                     element_pointer.as_reference = false;
 
-                    if (i != 0) {
+                    if (!first) {
                         Op op = {0};
                         op.kind = op_add;
                         op.primitive = primitive_pointer;
@@ -3482,10 +3659,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                         op.binary.target = element_pointer;
                         buf_push(context->tmp_ops, op);
                     }
+                    first = false;
 
                     element_pointer.as_reference = true;
 
-                    linearize_expr(context, expr->compound_literal.content[i], element_pointer, false);
+                    linearize_expr(context, list->expr, element_pointer, false);
                 }
 
                 intermediate_deallocate_temporary(context, element_pointer);
@@ -3524,17 +3702,18 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             assert(!get_address);
 
             Op_Call_Param* call_params = (Op_Call_Param*) arena_alloc(&context->arena, sizeof(Op_Call_Param) * expr->call.param_count);
-            for (u32 p = 0; p < expr->call.param_count; p += 1) {
-                Expr* param_expr = expr->call.params[p];
 
-                u64 param_size = type_size_of(context, param_expr->type_index);
+            u32 p = 0;
+            for (Expr_List* param_expr = expr->call.params; param_expr != null; param_expr = param_expr->next) {
+                u64 param_size = type_size_of(context, param_expr->expr->type_index);
                 if (param_size > 8) unimplemented(); // TODO by-reference semantics
 
                 Local local = intermediate_allocate_temporary(context, param_size);
-                linearize_expr(context, param_expr, local, false);
+                linearize_expr(context, param_expr->expr, local, false);
 
                 call_params[p].size = param_size;
                 call_params[p].local = local;
+                p += 1;
             }
 
             Op op = {0};
@@ -3768,16 +3947,33 @@ void build_intermediate(Context* context) {
             continue;
         }
 
-        for (u32 s = 0; s < func->body.stmt_count; s += 1) {
-            Stmt* stmt = &func->body.stmts[s];
-
+        for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
             u32 a = buf_length(context->tmp_ops);
 
             switch (stmt->kind) {
-                case stmt_assignment: linearize_assignment(context, stmt->assignment.left, stmt->assignment.right); break;
-                case stmt_expr:       linearize_expr(context, stmt->expr, (Local) {0}, false); break;
+                case stmt_assignment: {
+                    linearize_assignment(context, stmt->assignment.left, stmt->assignment.right); break;
+                } break;
+
+                case stmt_expr: {
+                    linearize_expr(context, stmt->expr, (Local) {0}, false); break;
+                } break;
 
                 case stmt_declaration: {
+                    if (stmt->declaration.right != null) {
+                        Expr left = {0};
+                        left.kind = expr_variable;
+                        left.variable.index = stmt->declaration.var_index;
+                        left.flags |= EXPR_FLAG_ASSIGNABLE;
+                        left.type_index = func->body.vars[left.variable.index].type_index;
+                        left.pos = stmt->pos;
+
+                        linearize_assignment(context, &left, stmt->declaration.right);
+                    }
+                } break;
+
+                case stmt_block: {
+                    unimplemented();
                 } break;
 
                 default: assert(false);
@@ -3896,7 +4092,7 @@ void eval_ops(Context* context) {
 
     u64 instructions_executed = 0;
 
-    while (1) {
+    while (true) {
         if (frame->current_op == null) {
             frame->current_op = frame->func->body.ops;
         }
@@ -5591,9 +5787,7 @@ void print_executable_info(u8* path) {
 
 void print_verbose_info(Context* context) {
     printf("%u functions:\n", (u64) buf_length(context->funcs));
-    for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
-        Func* func = context->funcs + f;
-
+    buf_foreach (Func, func, context->funcs) {
         u8* name = string_table_access(context->string_table, func->name);
         printf("  fn %s\n", name);
 
@@ -5611,10 +5805,10 @@ void print_verbose_info(Context* context) {
             }
             printf("\n");
 
-            printf("    %u statements:\n", (u64) func->body.stmt_count);
-            for (u32 s = 0; s < func->body.stmt_count; s += 1) {
+            printf("    Statements:\n");
+            for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
                 printf("      ");
-                print_stmt(context, func, &func->body.stmts[s]);
+                print_stmt(context, func, stmt);
                 printf("\n");
             }
         } else if (func->kind == func_kind_imported) {
@@ -5632,23 +5826,23 @@ void main() {
     i64 start_time = perf_time();
 
     Context context = {0};
-    bool success;
-
-    if (!build_ast(&context, "W:/asm2/code.txt")) {
-        return; // We print errors inside build_ast
-    }
-    if (!typecheck(&context)) {
-        return;
-    }
-
-    print_verbose_info(&context);
-
+    if (!build_ast(&context, "W:/asm2/code.txt")) return;
+    if (!typecheck(&context)) return;
+    //print_verbose_info(&context);
     build_intermediate(&context);
     //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
-
     build_machinecode(&context);
-    if (!write_executable("out.exe", &context)) {
-        return;
+    if (!write_executable("out.exe", &context)) return;
+
+    {
+        u64 total_ops = 0;
+        buf_foreach (Func, func, context.funcs) {
+            if (func->kind == func_kind_normal) {
+                total_ops += func->body.op_count;
+            }
+        }
+
+        printf("%u intermediate ops, %u bytes of machine code\n", total_ops, buf_length(context.bytecode));
     }
 
     printf("Running generated executable:\n");
