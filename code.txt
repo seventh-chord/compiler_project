@@ -10,7 +10,11 @@ fn main() -> u8 {
     var message_a: [3]u8 = [3]u8 { 72, 105, 10 };
     var message_b: [3]u8 = [3]u8 { 89, 111, 10 };
 
-    var message: *u8 = &message_a;
+    var message: *u8;
+    
+    {
+        message = &message_a;
+    }
     
     #if (3*3 < 3 + 3) {
     #    message = &message_a;
@@ -23,16 +27,6 @@ fn main() -> u8 {
     WriteFile(handle, message, 3, &written, null);
     ExitProcess(0);
 }
-
-#fn scope_test() {
-#    var a: u8 = 3;
-#
-#    {
-#        var b: u8 = 4;
-#    }
-#
-#    var c: u8 = a + b;
-#}
 
 #fn four() -> u8 {
 #    var big_boy: [4][4]u64 = [4][4]u64 {

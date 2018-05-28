@@ -1168,8 +1168,6 @@ typedef struct Func {
             u32 var_count;
             u32 output_var_index;
 
-            bool* in_scope_map; // internal
-
             Tmp* tmps;
             u32 tmp_count;
 
@@ -2585,8 +2583,6 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     func->body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
     mem_copy((u8*) context->tmp_vars, (u8*) func->body.vars, buf_bytes(context->tmp_vars));
 
-    func->body.in_scope_map = (bool*) arena_alloc(&context->arena, sizeof(bool) * func->body.var_count);
-
     if (!valid) {
         return null;
     } else {
@@ -3052,7 +3048,36 @@ bool build_ast(Context* context, u8* path) {
     }
 }
 
-bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
+
+
+typedef struct Scope Scope;
+struct Scope {
+    u32 var_count;
+    u8* map; // list of booleans, for marking which variables currently are in scope
+
+    Scope *child;
+};
+
+Scope* scope_new(Context* context, u32 var_count) {
+    Scope* scope = arena_new(&context->stack, Scope);
+    scope->var_count = var_count;
+    scope->map = arena_alloc(&context->stack, var_count);
+    mem_clear(scope->map, var_count);
+    return scope;
+}
+
+Scope* scope_push(Context* context, Scope* scope) {
+    if (scope->child == null) {
+        scope->child = scope_new(context, scope->var_count);
+    }
+
+    mem_copy(scope->map, scope->child->map, scope->var_count);
+    return scope->child;
+}
+
+
+
+bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
             Primitive solidify_to_primitive = context->type_buf[solidify_to];
@@ -3115,7 +3140,7 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
 
                 for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
                     Expr* child = list->expr;
-                    if (!typecheck_expr(context, func, child, expected_child_type_index)) {
+                    if (!typecheck_expr(context, func, scope, child, expected_child_type_index)) {
                         return false;
                     }
 
@@ -3152,13 +3177,25 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                     return false;
                 }
 
-                if (func->body.in_scope_map[var_index] == false) {
+                if (scope->map[var_index] == false) {
                     Var* var = &func->body.vars[var_index];
                     u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
-                    printf(
-                        "Can't use variable %s on line %u before its declaration on line %u\n",
-                        var_name, (u64) expr->pos.line, (u64) var->declaration_pos.line
-                    );
+
+                    u64 use_line = expr->pos.line;
+                    u64 decl_line = var->declaration_pos.line;
+
+                    if (use_line <= decl_line) {
+                        printf(
+                            "Can't use variable %s on line %u before its declaration on line %u\n",
+                            var_name, use_line, decl_line
+                        );
+                    } else {
+                        printf(
+                            "Can't use variable %s on line %u, as it is not in scope\n",
+                            var_name, use_line
+                        );
+                    }
+
                     return false;
                 }
 
@@ -3172,8 +3209,8 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
         } break;
 
         case expr_binary: {
-            if (!typecheck_expr(context, func, expr->binary.left, solidify_to))  return false;
-            if (!typecheck_expr(context, func, expr->binary.right, solidify_to)) return false;
+            if (!typecheck_expr(context, func, scope, expr->binary.left, solidify_to))  return false;
+            if (!typecheck_expr(context, func, scope, expr->binary.right, solidify_to)) return false;
 
             assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
             assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
@@ -3184,9 +3221,9 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                 bool right_strong = context->type_buf[expr->binary.right->type_index] != solidify_to;
 
                 if (left_strong) {
-                    assert(typecheck_expr(context, func, expr->binary.right, expr->binary.left->type_index));
+                    assert(typecheck_expr(context, func, scope, expr->binary.right, expr->binary.left->type_index));
                 } else if (right_strong) {
-                    assert(typecheck_expr(context, func, expr->binary.left, expr->binary.right->type_index));
+                    assert(typecheck_expr(context, func, scope, expr->binary.left, expr->binary.right->type_index));
                 }
             }
 
@@ -3264,7 +3301,7 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
                 u32 var_index = callee->signature.params[p].var_index;
                 u32 expected_type_index = callee->signature.params[p].type_index;
 
-                if (!typecheck_expr(context, func, param_expr->expr, expected_type_index)) {
+                if (!typecheck_expr(context, func, scope, param_expr->expr, expected_type_index)) {
                     return false;
                 }
 
@@ -3285,11 +3322,11 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
         case expr_cast: {
             Primitive primitive = context->type_buf[expr->type_index];
             assert(primitive >= primitive_u8 && primitive <= primitive_i64);
-            typecheck_expr(context, func, expr->cast_from, expr->type_index);
+            typecheck_expr(context, func, scope, expr->cast_from, expr->type_index);
         } break;
 
         case expr_address_of: {
-            if (!typecheck_expr(context, func, expr->address_from, primitive_invalid)) {
+            if (!typecheck_expr(context, func, scope, expr->address_from, primitive_invalid)) {
                 return false;
             }
 
@@ -3307,7 +3344,7 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
         } break;
 
         case expr_dereference: {
-            if (!typecheck_expr(context, func, expr->dereference_from, primitive_invalid)) {
+            if (!typecheck_expr(context, func, scope, expr->dereference_from, primitive_invalid)) {
                 return false;
             }
 
@@ -3325,11 +3362,11 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
         } break;
 
         case expr_subscript: {
-            if (!typecheck_expr(context, func, expr->subscript.array, primitive_invalid)) {
+            if (!typecheck_expr(context, func, scope, expr->subscript.array, primitive_invalid)) {
                 return false;
             }
 
-            if (!typecheck_expr(context, func, expr->subscript.index, primitive_u64)) {
+            if (!typecheck_expr(context, func, scope, expr->subscript.index, primitive_u64)) {
                 return false;
             }
 
@@ -3367,91 +3404,101 @@ bool typecheck_expr(Context* context, Func* func, Expr* expr, u32 solidify_to) {
     return true;
 }
 
+bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
+    switch (stmt->kind) {
+        case stmt_assignment: {
+            if (!typecheck_expr(context, func, scope, stmt->assignment.left, primitive_invalid)) {
+                return false;
+            }
+            u32 left_type_index = stmt->assignment.left->type_index;
+
+            if (!typecheck_expr(context, func, scope, stmt->assignment.right, left_type_index)) {
+                return false;
+            }
+            u32 right_type_index = stmt->assignment.right->type_index;
+
+            if (!type_cmp(context, left_type_index, right_type_index)) {
+                printf("Types on left and right side of assignment don't match: ");
+                print_type(context, left_type_index);
+                printf(" vs ");
+                print_type(context, right_type_index);
+                printf(" (Line %u)\n", (u64) stmt->pos.line);
+                return false;
+            }
+
+            if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
+                printf("Can't assign to left hand side: ");
+                print_expr(context, func, stmt->assignment.left);
+                printf(" (Line %u)\n", (u64) stmt->pos.line);
+                return false;
+            }
+        } break;
+
+        case stmt_expr: {
+            if (!typecheck_expr(context, func, scope, stmt->expr, primitive_invalid)) {
+                return false;
+            }
+        } break;
+
+        case stmt_declaration: {
+            if (stmt->declaration.right != null) {
+                u32 var_type_index = func->body.vars[stmt->declaration.var_index].type_index;
+                if (!typecheck_expr(context, func, scope, stmt->declaration.right, var_type_index)) {
+                    return false;
+                } else if (!type_cmp(context, var_type_index, stmt->declaration.right->type_index)) {
+                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                    print_type(context, var_type_index);
+                    printf(" but got ");
+                    print_type(context, stmt->declaration.right->type_index);
+                    printf(" (Line %u)\n", stmt->pos.line);
+                    return false;
+                }
+            }
+
+            assert(!scope->map[stmt->declaration.var_index]);
+            scope->map[stmt->declaration.var_index] = true;
+        } break;
+
+        case stmt_block: {
+            Scope* child_scope = scope_push(context, scope);
+            for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
+                typecheck_stmt(context, func, child_scope, inner);
+            }
+        } break;
+
+        default: assert(false);
+    }
+
+    return true;
+}
+
 bool typecheck(Context* context) {
     bool valid = true;
 
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
+        arena_stack_push(&context->stack);
+
         Func* func = context->funcs + f;
         if (func->kind != func_kind_normal) continue;
 
-        mem_clear((u8*) func->body.in_scope_map, sizeof(bool) * func->body.var_count);
+        Scope* scope = scope_new(context, func->body.var_count);
 
         // output and parameters are allways in scope
         if (func->signature.has_output) {
-            func->body.in_scope_map[func->body.output_var_index] = true;
+            scope->map[func->body.output_var_index] = true;
         }
         for (u32 i = 0; i < func->signature.param_count; i += 1) {
             u32 var_index = func->signature.params[i].var_index;
-            func->body.in_scope_map[var_index] = true;
+            scope->map[var_index] = true;
         }
 
         for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
-            switch (stmt->kind) {
-                case stmt_assignment: {
-                    if (!typecheck_expr(context, func, stmt->assignment.left, primitive_invalid)) {
-                        valid = false;
-                        break;
-                    }
-                    u32 left_type_index = stmt->assignment.left->type_index;
-
-                    if (!typecheck_expr(context, func, stmt->assignment.right, left_type_index)) {
-                        valid = false;
-                        break;
-                    }
-                    u32 right_type_index = stmt->assignment.right->type_index;
-
-                    if (!type_cmp(context, left_type_index, right_type_index)) {
-                        printf("Types on left and right side of assignment don't match: ");
-                        print_type(context, left_type_index);
-                        printf(" vs ");
-                        print_type(context, right_type_index);
-                        printf(" (Line %u)\n", (u64) stmt->pos.line);
-                        valid = false;
-                        break;
-                    }
-
-                    if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
-                        printf("Can't assign to left hand side: ");
-                        print_expr(context, func, stmt->assignment.left);
-                        printf(" (Line %u)\n", (u64) stmt->pos.line);
-                        valid = false;
-                        break;
-                    }
-                } break;
-
-                case stmt_expr: {
-                    if (!typecheck_expr(context, func, stmt->expr, primitive_invalid)) {
-                        valid = false;
-                        break;
-                    }
-                } break;
-
-                case stmt_declaration: {
-                    if (stmt->declaration.right != null) {
-                        u32 var_type_index = func->body.vars[stmt->declaration.var_index].type_index;
-                        if (!typecheck_expr(context, func, stmt->declaration.right, var_type_index)) {
-                            valid = false;
-                        } else if (!type_cmp(context, var_type_index, stmt->declaration.right->type_index)) {
-                            printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                            print_type(context, var_type_index);
-                            printf(" but got ");
-                            print_type(context, stmt->declaration.right->type_index);
-                            printf(" (Line %u)\n", stmt->pos.line);
-                            valid = false;
-                        }
-                    }
-
-                    assert(!func->body.in_scope_map[stmt->declaration.var_index]);
-                    func->body.in_scope_map[stmt->declaration.var_index] = true;
-                } break;
-
-                case stmt_block: {
-                    unimplemented();
-                } break;
-
-                default: assert(false);
+            if (!typecheck_stmt(context, func, scope, stmt)) {
+                valid = false;
             }
         }
+
+        arena_stack_pop(&context->stack);
     }
 
     return valid;
@@ -3938,6 +3985,39 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
     }
 }
 
+void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
+    switch (stmt->kind) {
+        case stmt_assignment: {
+            linearize_assignment(context, stmt->assignment.left, stmt->assignment.right); break;
+        } break;
+
+        case stmt_expr: {
+            linearize_expr(context, stmt->expr, (Local) {0}, false); break;
+        } break;
+
+        case stmt_declaration: {
+            if (stmt->declaration.right != null) {
+                Expr left = {0};
+                left.kind = expr_variable;
+                left.variable.index = stmt->declaration.var_index;
+                left.flags |= EXPR_FLAG_ASSIGNABLE;
+                left.type_index = func->body.vars[left.variable.index].type_index;
+                left.pos = stmt->pos;
+
+                linearize_assignment(context, &left, stmt->declaration.right);
+            }
+        } break;
+
+        case stmt_block: {
+            for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
+                linearize_stmt(context, func, inner);
+            }
+        } break;
+
+        default: assert(false);
+    }
+}
+
 void build_intermediate(Context* context) {
     // Linearize statements
     buf_foreach (Func, func, context->funcs) {
@@ -3948,39 +4028,7 @@ void build_intermediate(Context* context) {
         }
 
         for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
-            u32 a = buf_length(context->tmp_ops);
-
-            switch (stmt->kind) {
-                case stmt_assignment: {
-                    linearize_assignment(context, stmt->assignment.left, stmt->assignment.right); break;
-                } break;
-
-                case stmt_expr: {
-                    linearize_expr(context, stmt->expr, (Local) {0}, false); break;
-                } break;
-
-                case stmt_declaration: {
-                    if (stmt->declaration.right != null) {
-                        Expr left = {0};
-                        left.kind = expr_variable;
-                        left.variable.index = stmt->declaration.var_index;
-                        left.flags |= EXPR_FLAG_ASSIGNABLE;
-                        left.type_index = func->body.vars[left.variable.index].type_index;
-                        left.pos = stmt->pos;
-
-                        linearize_assignment(context, &left, stmt->declaration.right);
-                    }
-                } break;
-
-                case stmt_block: {
-                    unimplemented();
-                } break;
-
-                default: assert(false);
-            }
-
-            u32 b = buf_length(context->tmp_ops);
-
+            linearize_stmt(context, func, stmt);
             buf_foreach (Tmp, tmp, context->tmp_tmps) assert(!tmp->currently_allocated);
         }
 
