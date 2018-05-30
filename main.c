@@ -1102,12 +1102,27 @@ struct Stmt {
     } kind;
 
     union {
-        struct { u32 var_index; Expr* right; } declaration; // 'right' might be null
-        Expr* expr;
-        struct { Expr* left; Expr* right; } assignment;
+        struct {
+            u32 var_index;
+            Expr* right; // 'right' might be null
+        } declaration;
 
-        struct { Stmt* inner; } block;
-        struct { Expr* condition; Stmt* then; Stmt* else_then; } conditional;
+        Expr* expr;
+
+        struct {
+            Expr* left;
+            Expr* right;
+        } assignment;
+
+        struct {
+            Stmt* inner;
+        } block;
+
+        struct {
+            Expr* condition;
+            Stmt* then;
+            Stmt* else_then;
+        } conditional;
     };
 
     File_Pos pos;
@@ -1185,6 +1200,7 @@ typedef struct Op {
         } cast;
 
         struct {
+            bool conditional;
             Local condition;
             i64 jump;
         } jump;
@@ -1743,7 +1759,12 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             printf("}");
 
             if (stmt->conditional.else_then != null) {
-                unimplemented();
+                printf(" else {\n");
+
+                print_stmts(context, func, stmt->conditional.else_then, indent_level + 1);
+
+                for (u32 i = 0; i < indent_level; i += 1) printf("    ");
+                printf("}");
             }
         } break;
 
@@ -2433,6 +2454,26 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
     return expr;
 }
 
+Stmt* parse_stmts(Context* context, Token* t, u32* length);
+
+Stmt* parse_basic_block(Context* context, Token* t, u32* length) {
+    if (!expect_single_token(context, t, '{', "before block")) return null;
+    t += 1;
+
+    u32 inner_length = 0;
+    Stmt* stmts = parse_stmts(context, t, &inner_length);
+    t += inner_length;
+    *length = inner_length + 1;
+
+    if (stmts == null) return null;
+
+    if (!expect_single_token(context, t, '}', "after block")) return null;
+    t += 1;
+
+    *length = inner_length + 2;
+    return stmts;
+}
+
 Stmt* parse_stmts(Context* context, Token* t, u32* length) {
     Token* t_start = t;
     
@@ -2448,52 +2489,58 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
 
     // Basic blocks
     } else if (t->kind == token_bracket_curly_open) {
-        t += 1;
-
-        u32 inner_length = 0;
-        Stmt* inner_stmts = parse_stmts(context, t, &inner_length);
-        t += inner_length;
-
-        if (inner_stmts == null) return null;
+        u32 block_length = 0;
+        Stmt* inner = parse_basic_block(context, t, &block_length);
+        t += block_length;
+        if (inner == null) return null;
 
         stmt->kind = stmt_block;
-        stmt->block.inner = inner_stmts;
-
-        if (!expect_single_token(context, t, token_bracket_curly_close, "after if")) return null;
-        t += 1;
+        stmt->block.inner = inner;
 
     // Control flow - if
     } else if (t->kind == token_keyword_if) {
+        stmt->kind = stmt_conditional;
+
         t += 1;
 
-        if (!expect_single_token(context, t, '(', "after if")) return null;
+        if (!expect_single_token(context, t, '(', "before condition")) return null;
         t += 1;
 
         u32 condition_length = 0;
-        Expr* condition = parse_expr(context, t, &condition_length);
+        stmt->conditional.condition = parse_expr(context, t, &condition_length);
         t += condition_length;
+        if (stmt->conditional.condition == null) return null;
 
-        if (condition == null) return null;
-
-        if (!expect_single_token(context, t, ')', "after if")) return null;
-        t += 1;
-        if (!expect_single_token(context, t, '{', "after if")) return null;
+        if (!expect_single_token(context, t, ')', "after condition")) return null;
         t += 1;
 
-        u32 inner_length = 0;
-        Stmt* inner_stmts = parse_stmts(context, t, &inner_length);
-        t += inner_length;
-
-        if (!expect_single_token(context, t, '}', "after if")) return null;
-        t += 1;
-
-        stmt->kind = stmt_conditional;
-        stmt->conditional.condition = condition;
-        stmt->conditional.then = inner_stmts;
+        u32 block_length = 0;
+        stmt->conditional.then = parse_basic_block(context, t, &block_length);
+        t += block_length;
+        if (stmt->conditional.then == null) return null;
 
         if (t->kind == token_keyword_else) {
             t += 1;
-            unimplemented(); // TODO
+
+            switch (t->kind) {
+                case token_bracket_curly_open: {
+                    u32 block_length = 0;
+                    stmt->conditional.else_then = parse_basic_block(context, t, &block_length);
+                    t += block_length;
+                    if (stmt->conditional.else_then == null) return null;
+                } break;
+
+                case token_keyword_if: {
+                    unimplemented(); // TODO if else
+                } break;
+
+                default: {
+                    printf("Expected another if-statmenet or a basic block after else, but got ");
+                    print_token(context->string_table, t);
+                    printf(" (Line %u)\n", t->pos.line);
+                    return null;
+                } break;
+            }
         }
 
     // Control flow - for
@@ -3739,7 +3786,9 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
 
             if (stmt->conditional.else_then != null) {
                 Scope* else_scope = scope_push(context, scope);
-                unimplemented();
+                for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
+                    if (!typecheck_stmt(context, func, else_scope, inner)) return false;
+                }
             }
         } break;
 
@@ -4338,10 +4387,11 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             Local bool_local = intermediate_allocate_temporary(context, 1);
             linearize_expr(context, stmt->conditional.condition, bool_local, false);
 
-            Op* jump_op = buf_end(context->tmp_ops);
+            Op* if_jump_op = buf_end(context->tmp_ops);
             buf_push(context->tmp_ops, ((Op) {0}));
-            jump_op->kind = op_jump;
-            jump_op->jump.condition = bool_local;
+            if_jump_op->kind = op_jump;
+            if_jump_op->jump.conditional = true;
+            if_jump_op->jump.condition = bool_local;
 
             u64 start_length = buf_length(context->tmp_ops);
 
@@ -4351,12 +4401,26 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
                 linearize_stmt(context, func, inner);
             }
 
+
             u64 end_length = buf_length(context->tmp_ops);
-            u64 jump = end_length - start_length;
-            jump_op->jump.jump = (i64) jump;
+            if_jump_op->jump.jump = (i64) (end_length - start_length);
 
             if (stmt->conditional.else_then != null) {
-                unimplemented();
+                if_jump_op->jump.jump += 1; // Also jump past else_jump_op
+
+                Op* else_jump_op = buf_end(context->tmp_ops);
+                buf_push(context->tmp_ops, ((Op) {0}));
+                else_jump_op->kind = op_jump;
+                else_jump_op->jump.conditional = false;
+
+                u64 start_length = buf_length(context->tmp_ops);
+
+                for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
+                    linearize_stmt(context, func, inner);
+                }
+
+                u64 end_length = buf_length(context->tmp_ops);
+                else_jump_op->jump.jump = (i64) (end_length - start_length);
             }
         } break;
 
@@ -4706,7 +4770,7 @@ void eval_ops(Context* context) {
 
                 case op_jump: {
                     u8 condition = *eval_get_local(frame, op->jump.condition, true);
-                    if (!condition) {
+                    if (!op->jump.conditional || !condition) {
                         frame->current_op += op->jump.jump;
                     }
                 } break;
@@ -5468,16 +5532,23 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
         } break;
 
         case op_jump: {
-            instruction_load_local(&context->bytecode, func, reg_rcx, op->jump.condition, 1);
-            instruction_xor_reg_imm(&context->bytecode, reg_rcx, 1, 1);
-            instruction_zero_extend_8_to_64(&context->bytecode, reg_rcx);
-            i8* small_jump_size = instruction_jmp_rcx_zero(&context->bytecode);
-            u64 small_jump_from = buf_length(context->bytecode);
-            i32* big_jump_size = instruction_jmp_i32(&context->bytecode);
-            u64 small_jump_to = buf_length(context->bytecode);
-            u64 big_jump_from = small_jump_to;
+            i32* big_jump_size;
+            u64 big_jump_from;
 
-            *small_jump_size = (i8) (small_jump_to - small_jump_from);
+            if (op->jump.conditional) {
+                instruction_load_local(&context->bytecode, func, reg_rcx, op->jump.condition, 1);
+                instruction_xor_reg_imm(&context->bytecode, reg_rcx, 1, 1);
+                instruction_zero_extend_8_to_64(&context->bytecode, reg_rcx);
+                i8* small_jump_size = instruction_jmp_rcx_zero(&context->bytecode);
+                u64 small_jump_from = buf_length(context->bytecode);
+                big_jump_size = instruction_jmp_i32(&context->bytecode);
+                u64 small_jump_to = buf_length(context->bytecode);
+                big_jump_from = small_jump_to;
+                *small_jump_size = (i8) (small_jump_to - small_jump_from);
+            } else {
+                big_jump_size = instruction_jmp_i32(&context->bytecode);
+                big_jump_from = buf_length(context->bytecode);
+            }
 
             if (op->jump.jump < 0) {
                 unimplemented(); // TODO reverse jumps require something else than the simple fixup scheme

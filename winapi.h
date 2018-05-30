@@ -1,5 +1,5 @@
 
-// NB (Morten, 26.03.18) Im not sure if we need these, stuff works just fine without them it seems...
+// NB Im not sure if we need these, stuff works just fine without them it seems...
 #define WINAPI_PRE  __declspec(dllimport)
 #define WINAPI_POST //__stdcall // Is ignored on x64, but needed on x86
 
