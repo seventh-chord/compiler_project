@@ -2107,300 +2107,313 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
     // As we should terminate at some point in that case though, it doesn't really matter.
     arena_stack_push(&context->stack);
 
-    enum {
-        expr_mode_value,
-        expr_mode_binary,
-    } mode = expr_mode_value;
+    bool expect_value = true;
 
     Shunting_Yard* yard = shunting_yard_setup(context);
     
     while (true) {
         bool could_parse = false;
+        bool reached_end = false;
 
-        if (t->kind == token_identifier && mode == expr_mode_value) {
-            u32 name_index = t->identifier_string_table_index;
-            mode = expr_mode_binary;
-            t += 1;
+        if (expect_value) {
+            switch (t->kind) {
+                // Variable, function call, structure literal
+                case token_identifier: {
+                    u32 name_index = t->identifier_string_table_index;
+                    expect_value = false;
+                    t += 1;
 
-            // Function call
-            if (t->kind == token_bracket_round_open) {
-                t += 1;
+                    // Function call
+                    if (t->kind == token_bracket_round_open) {
+                        t += 1;
 
-                Expr_List* param_list = null;
-                Expr_List* param_list_head = null;
-                u32 param_count = 0;
+                        Expr_List* param_list = null;
+                        Expr_List* param_list_head = null;
+                        u32 param_count = 0;
 
-                while (t->kind != token_bracket_round_close) {
-                    u32 param_length = 0;
-                    Expr* param = parse_expr(context, t, &param_length);
-                    t += param_length;
+                        while (t->kind != token_bracket_round_close) {
+                            u32 param_length = 0;
+                            Expr* param = parse_expr(context, t, &param_length);
+                            t += param_length;
 
-                    if (param == null) {
-                        *length = t - t_start;
-                        return null;
-                    }
+                            if (param == null) {
+                                *length = t - t_start;
+                                return null;
+                            }
 
-                    if (t->kind != token_bracket_round_close) {
-                        if (t->kind != token_comma) {
-                            printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
-                            print_token(context->string_table, t);
-                            printf(" (Line %u)\n", (u64) t->pos.line);
+                            if (t->kind != token_bracket_round_close) {
+                                if (t->kind != token_comma) {
+                                    printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
+                                    print_token(context->string_table, t);
+                                    printf(" (Line %u)\n", (u64) t->pos.line);
+                                    *length = t - t_start;
+                                    return null;
+                                }
+                                t += 1;
+                            }
+
+                            Expr_List* list_item = arena_new(&context->arena, Expr_List);
+                            list_item->expr = param;
+
+                            if (param_list_head == null) {
+                                param_list_head = list_item;
+                            } else {
+                                param_list->next = list_item;
+                            }
+                            param_list = list_item;
+
+                            param_count += 1;
+                        }
+
+                        if (!expect_single_token(context, t, token_bracket_round_close, "after function call")) {
                             *length = t - t_start;
                             return null;
                         }
                         t += 1;
-                    }
 
-                    Expr_List* list_item = arena_new(&context->arena, Expr_List);
-                    list_item->expr = param;
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = expr_call;
+                        expr->call.unresolved_name = name_index;
+                        expr->flags |= EXPR_FLAG_UNRESOLVED;
+                        expr->call.params = param_list_head;
+                        expr->call.param_count = param_count;
 
-                    if (param_list_head == null) {
-                        param_list_head = list_item;
+                        shunting_yard_push_expr(context, yard, expr);
+                        could_parse = true;
+                    
+                    // Structure literal
+                    } else if (t->kind == token_bracket_curly_open) {
+                        unimplemented(); // TODO
+
+                    // Variable
                     } else {
-                        param_list->next = list_item;
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = expr_variable;
+                        expr->variable.unresolved_name = name_index;
+                        expr->flags |= EXPR_FLAG_UNRESOLVED;
+                        expr->pos = t->pos;
+
+                        shunting_yard_push_expr(context, yard, expr);
+                        could_parse = true;
                     }
-                    param_list = list_item;
-
-                    param_count += 1;
-                }
-
-                if (!expect_single_token(context, t, token_bracket_round_close, "after function call")) {
-                    *length = t - t_start;
-                    return null;
-                }
-                t += 1;
-
-                Expr* expr = arena_new(&context->arena, Expr);
-                expr->kind = expr_call;
-                expr->call.unresolved_name = name_index;
-                expr->flags |= EXPR_FLAG_UNRESOLVED;
-                expr->call.params = param_list_head;
-                expr->call.param_count = param_count;
-
-                shunting_yard_push_expr(context, yard, expr);
-                could_parse = true;
-            
-            // Structure literal
-            } else if (t->kind == token_bracket_curly_open) {
-                unimplemented(); // TODO
-
-            // Variable
-            } else {
-                Expr* expr = arena_new(&context->arena, Expr);
-                expr->kind = expr_variable;
-                expr->variable.unresolved_name = name_index;
-                expr->flags |= EXPR_FLAG_UNRESOLVED;
-                expr->pos = t->pos;
-
-                shunting_yard_push_expr(context, yard, expr);
-                could_parse = true;
-            }
-
-        } else if ((t->kind == token_literal || t->kind == token_keyword_null || t->kind == token_keyword_true || t->kind == token_keyword_false) && mode == expr_mode_value) {
-            Expr* expr = arena_new(&context->arena, Expr);
-            expr->kind = expr_literal;
-            expr->literal.value = 0;
-            expr->literal.kind = expr_literal_pointer;
-            expr->pos = t->pos;
-
-            switch (t->kind) {
-                case token_literal: {
-                    expr->literal.value = t->literal_value;
-                    expr->literal.kind = expr_literal_integer;
                 } break;
-                case token_keyword_null: {
+
+                case token_literal:
+                case token_keyword_null:
+                case token_keyword_true:
+                case token_keyword_false:
+                {
+                    Expr* expr = arena_new(&context->arena, Expr);
+                    expr->kind = expr_literal;
                     expr->literal.value = 0;
                     expr->literal.kind = expr_literal_pointer;
+                    expr->pos = t->pos;
+
+                    switch (t->kind) {
+                        case token_literal: {
+                            expr->literal.value = t->literal_value;
+                            expr->literal.kind = expr_literal_integer;
+                        } break;
+                        case token_keyword_null: {
+                            expr->literal.value = 0;
+                            expr->literal.kind = expr_literal_pointer;
+                        } break;
+                        case token_keyword_false: {
+                            expr->literal.value = 0;
+                            expr->literal.kind = expr_literal_bool;
+                        } break;
+                        case token_keyword_true: {
+                            expr->literal.value = 1;
+                            expr->literal.kind = expr_literal_bool;
+                        } break;
+                        default: assert(false);
+                    }
+
+                    shunting_yard_push_expr(context, yard, expr);
+
+                    t += 1;
+                    could_parse = true;
+                    expect_value = false;
                 } break;
-                case token_keyword_false: {
-                    expr->literal.value = 0;
-                    expr->literal.kind = expr_literal_bool;
-                } break;
-                case token_keyword_true: {
-                    expr->literal.value = 1;
-                    expr->literal.kind = expr_literal_bool;
-                } break;
-            }
 
-            shunting_yard_push_expr(context, yard, expr);
+                // Parenthesized expression
+                case token_bracket_round_open: {
+                    t += 1;
+                    u32 inner_length = 0;
+                    Expr* inner = parse_expr(context, t, &inner_length);
+                    t += inner_length;
 
-            t += 1;
-            mode = expr_mode_binary;
-            could_parse = true;
-
-        // Parenthesized expr
-        } else if (t->kind == token_bracket_round_open && mode == expr_mode_value) {
-            t += 1;
-            u32 inner_length = 0;
-            Expr* inner = parse_expr(context, t, &inner_length);
-            t += inner_length;
-
-            if (inner == null) {
-                *length = t - t_start;
-                return null;
-            }
-
-            if (!expect_single_token(context, t, token_bracket_round_close, "after parenthesized subexpression")) {
-                *length = t - t_start;
-                return null;
-            }
-            t += 1;
-
-            shunting_yard_push_expr(context, yard, inner);
-
-            mode = expr_mode_binary;
-            could_parse = true;
-
-        } else if (t->kind == token_bracket_square_open && mode == expr_mode_value) {
-            // Compound literal
-            if (mode == expr_mode_value) {
-                u32 type_length = 0;
-                u32 type_index = parse_type(context, t, &type_length);
-                t += type_length;
-
-                if (type_index == U32_MAX) {
-                    *length = t - t_start;
-                    return null;
-                }
-
-                if (!expect_single_token(context, t, token_bracket_curly_open, "after type of compound literal")) {
-                    *length = t - t_start;
-                    return null;
-                }
-                t += 1;
-
-                Expr_List* expr_list = null;
-                Expr_List* expr_list_head = null;
-                u32 expr_count = 0;
-
-                while (t->kind != token_bracket_curly_close) {
-                    u32 sub_expr_length = 0;
-                    Expr* sub_expr = parse_expr(context, t, &sub_expr_length);
-                    t += sub_expr_length;
-
-                    if (sub_expr == null) {
+                    if (inner == null) {
                         *length = t - t_start;
                         return null;
                     }
 
-                    if (t->kind != token_bracket_curly_close) {
-                        if (t->kind != token_comma) {
-                            printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
-                            print_token(context->string_table, t);
-                            printf(" (Line %u)\n", (u64) t->pos.line);
+                    if (!expect_single_token(context, t, token_bracket_round_close, "after parenthesized subexpression")) {
+                        *length = t - t_start;
+                        return null;
+                    }
+                    t += 1;
+
+                    shunting_yard_push_expr(context, yard, inner);
+
+                    expect_value = false;
+                    could_parse = true;
+                } break;
+
+                // Array literal
+                case token_bracket_square_open: {
+                    u32 type_length = 0;
+                    u32 type_index = parse_type(context, t, &type_length);
+                    t += type_length;
+
+                    if (type_index == U32_MAX) {
+                        *length = t - t_start;
+                        return null;
+                    }
+
+                    if (!expect_single_token(context, t, token_bracket_curly_open, "after type of compound literal")) {
+                        *length = t - t_start;
+                        return null;
+                    }
+                    t += 1;
+
+                    Expr_List* expr_list = null;
+                    Expr_List* expr_list_head = null;
+                    u32 expr_count = 0;
+
+                    while (t->kind != token_bracket_curly_close) {
+                        u32 sub_expr_length = 0;
+                        Expr* sub_expr = parse_expr(context, t, &sub_expr_length);
+                        t += sub_expr_length;
+
+                        if (sub_expr == null) {
                             *length = t - t_start;
                             return null;
                         }
-                        t += 1;
+
+                        if (t->kind != token_bracket_curly_close) {
+                            if (t->kind != token_comma) {
+                                printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
+                                print_token(context->string_table, t);
+                                printf(" (Line %u)\n", (u64) t->pos.line);
+                                *length = t - t_start;
+                                return null;
+                            }
+                            t += 1;
+                        }
+
+                        Expr_List* list_item = arena_new(&context->arena, Expr_List);
+                        list_item->expr = sub_expr;
+
+                        if (expr_list_head == null) {
+                            expr_list_head = list_item;
+                        } else {
+                            expr_list->next = list_item;
+                        }
+                        expr_list = list_item;
+
+                        expr_count += 1;
                     }
-
-                    Expr_List* list_item = arena_new(&context->arena, Expr_List);
-                    list_item->expr = sub_expr;
-
-                    if (expr_list_head == null) {
-                        expr_list_head = list_item;
-                    } else {
-                        expr_list->next = list_item;
+                    
+                    if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
+                        *length = t - t_start;
+                        return null;
                     }
-                    expr_list = list_item;
+                    t += 1;
 
-                    expr_count += 1;
-                }
-                
-                if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
-                    *length = t - t_start;
-                    return null;
-                }
-                t += 1;
+                    Expr* expr = arena_new(&context->arena, Expr);
+                    expr->kind = expr_compound_literal;
+                    expr->type_index = type_index;
+                    expr->compound_literal.content = expr_list_head;
+                    expr->compound_literal.count = expr_count;
+                    expr->pos = t->pos;
 
-                Expr* expr = arena_new(&context->arena, Expr);
-                expr->kind = expr_compound_literal;
-                expr->type_index = type_index;
-                expr->compound_literal.content = expr_list_head;
-                expr->compound_literal.count = expr_count;
-                expr->pos = t->pos;
+                    shunting_yard_push_expr(context, yard, expr);
 
-                shunting_yard_push_expr(context, yard, expr);
-
-                could_parse = true;
-                mode = expr_mode_binary;
-
-            // Subscript
-            } else if (mode == expr_mode_binary) {
-                unimplemented(); // TODO
-            }
-
-        // End of expression
-        } else if (
-            mode == expr_mode_binary && (
-                t->kind == token_semicolon ||
-                t->kind == token_comma ||
-                t->kind == ')' || t->kind == ']' || t->kind == '}' ||
-                t->kind == token_assign ||
-                t->kind == token_keyword_var ||
-                t->kind == token_keyword_fn
-            )
-        ) {
-            break;
-
-        } else {
-            if (mode == expr_mode_value) {
-                switch (t->kind) {
-                    case token_and: {
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->kind = expr_address_of;
-                        expr->pos = t->pos;
-
-                        shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->address_from);
-
-                        t += 1;
-                        could_parse = true;
-                    } break;
-
-                    case token_mul: {
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->kind = expr_dereference;
-                        expr->pos = t->pos;
-
-                        shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->dereference_from);
-
-                        t += 1;
-                        could_parse = true;
-
-                    } break;
-                }
-
-            } else if (mode == expr_mode_binary) {
-                Binary_Op op = binary_op_invalid;
-                switch (t->kind) {
-                    case token_add:                op = binary_add; break;
-                    case token_sub:                op = binary_sub; break;
-                    case token_mul:                op = binary_mul; break;
-                    case token_div:                op = binary_div; break;
-                    case token_greater:            op = binary_gt; break;
-                    case token_greater_or_equal:   op = binary_gteq; break;
-                    case token_less:               op = binary_lt; break;
-                    case token_less_or_equal:      op = binary_lteq; break;
-                    case token_equal:              op = binary_eq; break;
-                }
-
-                if (op != binary_op_invalid) {
-                    shunting_yard_push_op(context, yard, op);
                     could_parse = true;
-                    mode = expr_mode_value;
-                }
+                    expect_value = false;
+                } break;
 
-                t += 1;
+                case token_and: {
+                    Expr* expr = arena_new(&context->arena, Expr);
+                    expr->kind = expr_address_of;
+                    expr->pos = t->pos;
+
+                    shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->address_from);
+
+                    t += 1;
+                    could_parse = true;
+                    expect_value = true;
+                } break;
+
+                case token_mul: {
+                    Expr* expr = arena_new(&context->arena, Expr);
+                    expr->kind = expr_dereference;
+                    expr->pos = t->pos;
+
+                    shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->dereference_from);
+
+                    t += 1;
+                    could_parse = true;
+                    expect_value = true;
+                } break;
+
+                default: {
+                    t += 1;
+                } break;
+            }
+        } else {
+            switch (t->kind) {
+                case token_bracket_square_open: {
+                    unimplemented(); // TODO array subscript
+                } break;
+
+                // End of expression
+                case token_semicolon:
+                case token_comma:
+                case ')': case ']': case '}':
+                case token_assign:
+                case token_keyword_var:
+                case token_keyword_fn:
+                {
+                    reached_end = true;
+                } break;
+
+                default: {
+                    Binary_Op op = binary_op_invalid;
+                    switch (t->kind) {
+                        case token_add:                op = binary_add; break;
+                        case token_sub:                op = binary_sub; break;
+                        case token_mul:                op = binary_mul; break;
+                        case token_div:                op = binary_div; break;
+                        case token_greater:            op = binary_gt; break;
+                        case token_greater_or_equal:   op = binary_gteq; break;
+                        case token_less:               op = binary_lt; break;
+                        case token_less_or_equal:      op = binary_lteq; break;
+                        case token_equal:              op = binary_eq; break;
+                    }
+
+                    if (op != binary_op_invalid) {
+                        shunting_yard_push_op(context, yard, op);
+                        could_parse = true;
+                        expect_value = true;
+                    }
+
+                    t += 1;
+                } break;
             }
         }
 
+        if (reached_end) break;
+
         if (!could_parse) {
             printf("Expected ");
-            switch (mode) {
-                case expr_mode_value:  printf("a value or a unary operator"); break;
-                case expr_mode_binary: printf("a binary operator or a postfix operator (array subscript or member access)"); break;
+            if (expect_value) {
+                printf("a value or a unary operator");
+            } else {
+                printf("a binary operator or a postfix operator (array subscript or member access)");
             }
-            printf(" but got: ");
+            printf(" but got ");
             print_token(context->string_table, t);
             printf(" (Line %u)\n", (u64) t->pos.line);
             *length = t - t_start;
