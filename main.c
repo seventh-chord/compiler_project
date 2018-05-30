@@ -2499,48 +2499,61 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
 
     // Control flow - if
     } else if (t->kind == token_keyword_if) {
-        stmt->kind = stmt_conditional;
+        Stmt* if_stmt = stmt;
 
-        t += 1;
+        while (1) {
+            if_stmt->kind = stmt_conditional;
 
-        if (!expect_single_token(context, t, '(', "before condition")) return null;
-        t += 1;
-
-        u32 condition_length = 0;
-        stmt->conditional.condition = parse_expr(context, t, &condition_length);
-        t += condition_length;
-        if (stmt->conditional.condition == null) return null;
-
-        if (!expect_single_token(context, t, ')', "after condition")) return null;
-        t += 1;
-
-        u32 block_length = 0;
-        stmt->conditional.then = parse_basic_block(context, t, &block_length);
-        t += block_length;
-        if (stmt->conditional.then == null) return null;
-
-        if (t->kind == token_keyword_else) {
             t += 1;
 
-            switch (t->kind) {
-                case token_bracket_curly_open: {
-                    u32 block_length = 0;
-                    stmt->conditional.else_then = parse_basic_block(context, t, &block_length);
-                    t += block_length;
-                    if (stmt->conditional.else_then == null) return null;
-                } break;
+            if (!expect_single_token(context, t, '(', "before condition")) return null;
+            t += 1;
 
-                case token_keyword_if: {
-                    unimplemented(); // TODO if else
-                } break;
+            u32 condition_length = 0;
+            if_stmt->conditional.condition = parse_expr(context, t, &condition_length);
+            t += condition_length;
+            if (if_stmt->conditional.condition == null) return null;
 
-                default: {
-                    printf("Expected another if-statmenet or a basic block after else, but got ");
-                    print_token(context->string_table, t);
-                    printf(" (Line %u)\n", t->pos.line);
-                    return null;
-                } break;
+            if (!expect_single_token(context, t, ')', "after condition")) return null;
+            t += 1;
+
+            u32 block_length = 0;
+            if_stmt->conditional.then = parse_basic_block(context, t, &block_length);
+            t += block_length;
+            if (if_stmt->conditional.then == null) return null;
+
+            bool parse_another_if = false;
+            if (t->kind == token_keyword_else) {
+                t += 1;
+
+                switch (t->kind) {
+                    case token_bracket_curly_open: {
+                        u32 block_length = 0;
+                        if_stmt->conditional.else_then = parse_basic_block(context, t, &block_length);
+                        t += block_length;
+                        if (if_stmt->conditional.else_then == null) return null;
+                    } break;
+
+                    case token_keyword_if: {
+                        parse_another_if = true;
+
+                        Stmt* next_if_stmt = arena_new(&context->arena, Stmt);
+                        next_if_stmt->next = arena_new(&context->arena, Stmt); // Sentinel
+
+                        if_stmt->conditional.else_then = next_if_stmt;
+                        if_stmt = next_if_stmt;
+                    } break;
+
+                    default: {
+                        printf("Expected another if-statmenet or a basic block after else, but got ");
+                        print_token(context->string_table, t);
+                        printf(" (Line %u)\n", t->pos.line);
+                        return null;
+                    } break;
+                }
             }
+
+            if(!parse_another_if) break;
         }
 
     // Control flow - for

@@ -10,11 +10,11 @@ fn main() -> u8 {
     var message_a: [3]u8 = [3]u8 { 72, 105, 10 };
     var message_b: [3]u8 = [3]u8 { 89, 111, 10 };
 
-    var message: *u8 = &message_b;;
+    var message: *u8;
     if (3*3 > 3 + 3 + 3) {
-        message = &message_a;
-    } else {
         message = &message_b;
+    } else if (3 > 2) {
+        message = &message_a;
     }
 
     {
@@ -95,16 +95,14 @@ fn main() -> u8 {
 #}
 
 #   .pdata so we can crash properly, or whatever that is for
-#   conditionals
-#   global variables
-#   constants
+#   loops
+#   global variables and constants (.data and .bss (?))
+#   type inference
 #   structs, unions, enums
-#   parsing '&foo[1]' properly (it parses as '(&foo)[1]' at the moment)
 #   size_of, align_of, type_of
-#   bitwise operators (<< >> | & ~ ^)
+#   more operators      <<   >>   |   &   ~   ||   &&
 #   hex literals
 #   debug info
 #   growing the stack? stack guards?
-#   type inference
 #   constant evaluation / elimination
 #   peephole optimizer
