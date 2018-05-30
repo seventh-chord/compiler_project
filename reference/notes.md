@@ -78,6 +78,13 @@ Just ModRM:             R and B used. B used for ModRM rm.
 ModRM and SIB:          R, X and B used. B used for SIB base.
 Extendable opcode:      B used. Opcode tables show when this is relevant.
 
+# Flags
+CF  Carry flag
+PF  Parity flag
+ZF  Zero flag
+SF  Sign flag
+OF  Overflow flag
+
 # Stack
 'rsp' points to the stack
 No segment selectors are used in x64, the manual mentions them because it was written for x86

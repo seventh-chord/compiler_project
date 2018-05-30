@@ -14,6 +14,7 @@
 #define U8_MAX 0xff
 #define U16_MAX 0xffff
 #define U32_MAX 0xffffffff
+#define U64_MAX 0xffffffffffffffff
 
 #define I8_MAX 127
 #define I8_MIN -128
@@ -680,21 +681,38 @@ typedef struct Token {
         token_comma     = ',',
         token_colon     = ':',
 
+        token_add = '+',
+        token_sub = '-',
+        token_mul = '*', // also used for pointers
+        token_div = '/',
+
+        token_and = '&',
+
+        token_greater = '>',
+        token_less = '<',
+        token_assign = '=',
+
         token_SEPARATOR = 128, // Values before this use literal ascii character codes, to simplify some parsing
+
+        token_greater_or_equal, // ">="
+        token_less_or_equal, // "<="
+        token_equal, // "=="
+        token_arrow, // "->"
+
 
         token_identifier,
         token_literal,
         token_string,
 
-        token_operator,
-
+        token_keyword_fn,
         token_keyword_extern,
         token_keyword_var,
-        token_keyword_fn,
-        token_keyword_null,
         token_keyword_if,
         token_keyword_else,
         token_keyword_for,
+        token_keyword_null,
+        token_keyword_true,
+        token_keyword_false,
     } kind;
 
     union {
@@ -706,24 +724,6 @@ typedef struct Token {
             u8* bytes; // null-terminated
             u64 length;
         } string;
-
-        enum {
-            token_operator_add,
-            token_operator_sub,
-            token_operator_mul, // also used for pointers
-            token_operator_div,
-
-            token_operator_greater,
-            token_operator_greater_or_equal,
-            token_operator_less,
-            token_operator_less_or_equal,
-            token_operator_equal,
-
-            token_operator_assign,
-
-            token_operator_arrow,
-            token_operator_and,
-        } operator;
 
         i32 bracket_offset_to_matching;
     };
@@ -757,21 +757,24 @@ typedef enum Primitive {
     primitive_i32,
     primitive_i64,
 
+    primitive_bool,
+
     PRIMITIVE_COUNT,
 } Primitive;
 
 void init_primitive_names(u32* names, u8** string_table) {
     names[primitive_unsolidified_int] = string_table_intern(string_table, "<int>", 5);
 
-    names[primitive_void] = string_table_intern(string_table, "void", 4);
-    names[primitive_u8]   = string_table_intern(string_table, "u8",   2);
-    names[primitive_u16]  = string_table_intern(string_table, "u16",  3);
-    names[primitive_u32]  = string_table_intern(string_table, "u32",  3);
-    names[primitive_u64]  = string_table_intern(string_table, "u64",  3);
-    names[primitive_i8]   = string_table_intern(string_table, "i8",   2);
-    names[primitive_i16]  = string_table_intern(string_table, "i16",  3);
-    names[primitive_i32]  = string_table_intern(string_table, "i32",  3);
-    names[primitive_i64]  = string_table_intern(string_table, "i64",  3);
+    names[primitive_void] = string_table_intern_cstr(string_table, "void");
+    names[primitive_u8]   = string_table_intern_cstr(string_table, "u8");
+    names[primitive_u16]  = string_table_intern_cstr(string_table, "u16");
+    names[primitive_u32]  = string_table_intern_cstr(string_table, "u32");
+    names[primitive_u64]  = string_table_intern_cstr(string_table, "u64");
+    names[primitive_i8]   = string_table_intern_cstr(string_table, "i8");
+    names[primitive_i16]  = string_table_intern_cstr(string_table, "i16");
+    names[primitive_i32]  = string_table_intern_cstr(string_table, "i32");
+    names[primitive_i64]  = string_table_intern_cstr(string_table, "i64");
+    names[primitive_bool] = string_table_intern_cstr(string_table, "bool");
 }
 
 u8* primitive_name(Primitive primitive) {
@@ -791,6 +794,8 @@ u8* primitive_name(Primitive primitive) {
         case primitive_i32: return "i32";
         case primitive_i64: return "i64";
 
+        case primitive_bool: return "bool";
+
         default: assert(false);
     }
 
@@ -809,9 +814,10 @@ u8 primitive_size_of(Primitive primitive) {
         case primitive_i16: return 2;
         case primitive_i32: return 4;
         case primitive_i64: return 8;
+        case primitive_bool: return 1;
         case primitive_void: return 0;
         case primitive_pointer: return POINTER_SIZE;
-        case primitive_invalid: return 0;
+        case primitive_invalid: assert(false);
         case primitive_unsolidified_int: return 0;
         case primitive_array: panic("You should be using type_size_of!"); return 0;
         default: assert(false); return 0;
@@ -830,11 +836,77 @@ bool primitive_is_compound(Primitive primitive) {
         case primitive_i16: return false;
         case primitive_i32: return false;
         case primitive_i64: return false;
+        case primitive_bool: return false;
         case primitive_void: return false;
         case primitive_pointer: return false;
-        case primitive_invalid: return false;
+        case primitive_invalid: assert(false);
         case primitive_unsolidified_int: return false;
+
         default: assert(false); return false;
+    }
+}
+
+bool primitive_is_integer(Primitive primitive) {
+    switch (primitive) {
+        case primitive_void:
+        case primitive_pointer:
+        case primitive_array:
+        case primitive_unsolidified_int:
+        case primitive_bool:
+        {
+            return false;
+        } break;
+
+        case primitive_u8:
+        case primitive_u16:
+        case primitive_u32:
+        case primitive_u64:
+        case primitive_i8:
+        case primitive_i16:
+        case primitive_i32:
+        case primitive_i64:
+        {
+            return true;
+        } break;
+
+        case primitive_invalid:
+        default:
+        {
+            assert(false);
+            return false;
+        } break;
+    }
+}
+
+bool primitive_is_signed(Primitive primitive) {
+    switch (primitive) {
+        case primitive_u8:
+        case primitive_u16:
+        case primitive_u32:
+        case primitive_u64:
+        case primitive_void:
+        case primitive_pointer:
+        case primitive_array:
+        case primitive_unsolidified_int:
+        case primitive_bool:
+        {
+            return false;
+        } break;
+
+        case primitive_i8:
+        case primitive_i16:
+        case primitive_i32:
+        case primitive_i64:
+        {
+            return true;
+        } break;
+
+        case primitive_invalid:
+        default:
+        {
+            assert(false);
+            return false;
+        } break;
     }
 }
 
@@ -858,16 +930,19 @@ u64 size_mask(u8 size) {
 
 
 typedef enum Binary_Op {
-    binary_op_invalid,
+    binary_op_invalid = 0,
+
     binary_add,
     binary_sub,
     binary_mul,
     binary_div,
-    binary_equal,
-    binary_greater,
-    binary_greater_or_equal,
-    binary_less,
-    binary_less_or_equal,
+
+    binary_eq,
+    binary_gt,
+    binary_gteq,
+    binary_lt,
+    binary_lteq,
+
     BINARY_OP_COUNT,
 } Binary_Op;
 
@@ -876,11 +951,11 @@ u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
     [binary_div] = 2,
     [binary_add] = 1,
     [binary_sub] = 1,
-    [binary_equal] = 0,
-    [binary_greater] = 0,
-    [binary_greater_or_equal] = 0,
-    [binary_less] = 0,
-    [binary_less_or_equal] = 0,
+    [binary_eq] = 0,
+    [binary_gt] = 0,
+    [binary_gteq] = 0,
+    [binary_lt] = 0,
+    [binary_lteq] = 0,
 };
 
 bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
@@ -888,11 +963,23 @@ bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
     [binary_div] = true,
     [binary_mul] = false,
     [binary_add] = false,
-    [binary_equal] = false,
-    [binary_greater] = false,
-    [binary_greater_or_equal] = false,
-    [binary_less] = false,
-    [binary_less_or_equal] = false,
+    [binary_eq] = false,
+    [binary_gt] = false,
+    [binary_gteq] = false,
+    [binary_lt] = false,
+    [binary_lteq] = false,
+};
+
+u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
+    [binary_add] = "+",
+    [binary_sub] = "-",
+    [binary_mul] = "*",
+    [binary_div] = "/",
+    [binary_eq] = "==",
+    [binary_gt] = ">",
+    [binary_gteq] = ">=",
+    [binary_lt] = "<",
+    [binary_lteq] = "<=",
 };
 
 
@@ -932,6 +1019,7 @@ struct Expr {
             enum {
                 expr_literal_integer,
                 expr_literal_pointer,
+                expr_literal_bool,
             } kind;
         } literal;
 
@@ -980,6 +1068,7 @@ struct Stmt {
         stmt_assignment,
 
         stmt_block,
+        stmt_conditional,
     } kind;
 
     union {
@@ -988,6 +1077,7 @@ struct Stmt {
         struct { Expr* left; Expr* right; } assignment;
 
         struct { Stmt* inner; } block;
+        struct { Expr* condition; Stmt* then; Stmt* else_then; } conditional;
     };
 
     File_Pos pos;
@@ -1017,6 +1107,7 @@ typedef enum Op_Kind {
 
     op_call,
     op_cast,
+    op_jump,
     
     // 'binary'
     op_set,
@@ -1025,6 +1116,11 @@ typedef enum Op_Kind {
     op_mul,
     op_div,
     op_address_of,
+    op_eq,
+    op_gt,
+    op_gteq,
+    op_lt,
+    op_lteq,
 } Op_Kind;
 
 typedef struct Op_Call_Param {
@@ -1032,23 +1128,12 @@ typedef struct Op_Call_Param {
     u8 size;
 } Op_Call_Param;
 
-// TODO optimize
-// For some 'Op's (especially op_call), we need a lot of data to specify the operation.
-// Other operations, suchs as binary operations, can probably be specified in 8/16 bytes.
-// Maybe having a multiple-op setup would make sense, where the parts of a operation are split
-// into more pieces. This would give more efficient memory usage if we have many small but
-// only a few large ops.
-// With this in mind, can we do "variable sized" structs, i.e. we overwrite the later part
-// of the struct with the start of the next struct in cases where only the first parts of
-// the struct are needed? This might be a cleaner approach.
-// Regardless, this kind of optimization can only be done once we have a really clear idea of
-// what needs to go into an 'Op'.
 typedef struct Op {
     u8 kind;
-    u8 primitive;
-        
-    // NB (Morten, 07.04.18) In general, we rely on 'Op's being well formed. We have some assertions
-    // to ensure that e.g. 'Local's are valid.
+
+    // We take this kind of primitive in, but might produce another primitive as a result. Also, some 'Op's
+    // just ignore this.
+    u8 primitive; 
 
     union {
         u32 temporary;
@@ -1068,6 +1153,11 @@ typedef struct Op {
             Local local;
             u8 old_primitive;
         } cast;
+
+        struct {
+            Local condition;
+            i64 jump;
+        } jump;
 
         struct {
             Local other;
@@ -1137,6 +1227,12 @@ typedef struct Call_Fixup {
     u32 func_index;
 } Call_Fixup;
 
+typedef struct Jump_Fixup {
+    u64 skip_ops;
+    i32* jump_size_location; // write actual jump size into here
+    u64 jump_start;
+} Jump_Fixup;
+
 
 
 typedef struct Func {
@@ -1185,14 +1281,14 @@ typedef struct Func {
 } Func;
 
 
-typedef enum Reg {
+typedef enum X64_Reg {
     reg_rax, reg_rcx, reg_rdx, reg_rbx,
     reg_rsp, reg_rbp, reg_rsi, reg_rdi,
     reg_r8,  reg_r9,  reg_r10, reg_r11,
     reg_r12, reg_r13, reg_r14, reg_r15,
     REG_COUNT,
     reg_invalid = U8_MAX,
-} Reg;
+} X64_Reg;
 
 u8* reg_names[REG_COUNT] = {
     "rax", "rcx", "rdx", "rbx",
@@ -1200,6 +1296,14 @@ u8* reg_names[REG_COUNT] = {
     "r8",  "r9",  "r10", "r11",
     "r12", "r13", "r14", "r15"
 };
+
+typedef enum X64_Condition {
+    x64_condition_eq,
+    x64_condition_gt,
+    x64_condition_gteq,
+    x64_condition_lt,
+    x64_condition_lteq,
+} X64_Condition;
 
 //#define PRINT_GENERATED_INSTRUCTIONS
 
@@ -1235,6 +1339,7 @@ typedef struct Context {
 
     Library_Import* imports; // stretchy-buffer
     Call_Fixup* call_fixups; // stretchy-buffer
+    Jump_Fixup* jump_fixups; // stretchy-buffer
 } Context;
 
 
@@ -1392,6 +1497,7 @@ void print_type(Context* context, u32 type_index) {
             case primitive_i16: printf("i16"); break;
             case primitive_i32: printf("i32"); break;
             case primitive_i64: printf("i64"); break;
+            case primitive_bool: printf("bool"); break;
 
             default: assert(false);
         }
@@ -1416,28 +1522,22 @@ void print_token(u8* string_table, Token* t) {
             printf("\"%z\"", t->string.length, t->string.bytes);
         } break;
 
-        case token_operator: {
-            switch (t->operator) {
-                case token_operator_add:              printf("+"); break;
-                case token_operator_sub:              printf("-"); break;
-                case token_operator_mul:              printf("*"); break;
-                case token_operator_div:              printf("/"); break;
-                case token_operator_greater:          printf(">"); break;
-                case token_operator_greater_or_equal: printf(">="); break;
-                case token_operator_less:             printf("<"); break;
-                case token_operator_less_or_equal:    printf("<="); break;
-                case token_operator_equal:            printf("=="); break;
-                case token_operator_assign:           printf("="); break;
-                case token_operator_arrow:            printf("->"); break;
-            }
-        } break;
-
         case token_end_of_stream: s = "end of file"; break;
 
-        case token_semicolon: s = ";"; break;
-        case token_comma:     s = ","; break;
-        case token_colon:     s = ":"; break;
-
+        case token_add:                  s = "+"; break;
+        case token_sub:                  s = "-"; break;
+        case token_mul:                  s = "*"; break;
+        case token_div:                  s = "/"; break;
+        case token_greater:              s = ">"; break;
+        case token_greater_or_equal:     s = ">="; break;
+        case token_less:                 s = "<"; break;
+        case token_less_or_equal:        s = "<="; break;
+        case token_equal:                s = "=="; break;
+        case token_assign:               s = "="; break;
+        case token_arrow:                s = "->"; break;
+        case token_semicolon:            s = ";"; break;
+        case token_comma:                s = ","; break;
+        case token_colon:                s = ":"; break;
         case token_bracket_round_open:   s = "("; break;
         case token_bracket_round_close:  s = ")"; break;
         case token_bracket_square_open:  s = "["; break;
@@ -1445,13 +1545,15 @@ void print_token(u8* string_table, Token* t) {
         case token_bracket_curly_open:   s = "{"; break;
         case token_bracket_curly_close:  s = "}"; break;
 
+        case token_keyword_fn:      s = "keyword fn"; break;
         case token_keyword_extern:  s = "keyword extern"; break;
         case token_keyword_var:     s = "keyword var"; break;
-        case token_keyword_fn:      s = "keyword fn"; break;
-        case token_keyword_null:    s = "keyword null"; break;
         case token_keyword_if:      s = "keyword if"; break;
         case token_keyword_else:    s = "keyword else"; break;
         case token_keyword_for:     s = "keyword for"; break;
+        case token_keyword_true:    s = "keyword true"; break;
+        case token_keyword_false:   s = "keyword false"; break;
+        case token_keyword_null:    s = "keyword null"; break;
 
         default: assert(false);
     }
@@ -1486,6 +1588,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                         printf("%x", expr->literal.value);
                     }
                 } break;
+                case expr_literal_bool: {
+                    assert(expr->literal.value == true || expr->literal.value == false);
+                    printf(expr->literal.value? "true" : "false");
+                } break;
                 default: assert(false);
             }
         } break;
@@ -1505,20 +1611,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         case expr_binary: {
             printf("(");
             print_expr(context, func, expr->binary.left);
-            switch (expr->binary.op) {
-                case binary_add: printf(" + "); break;
-                case binary_sub: printf(" - "); break;
-                case binary_mul: printf(" * "); break;
-                case binary_div: printf(" / "); break;
-
-                case binary_equal:              printf(" == "); break;
-                case binary_greater:            printf(" > "); break;
-                case binary_greater_or_equal:   printf(" >= "); break;
-                case binary_less:               printf(" < "); break;
-                case binary_less_or_equal:      printf(" <= "); break;
-
-                default: assert(false);
-            }
+            printf(" %s ", BINARY_OP_SYMBOL[expr->binary.op]);
             print_expr(context, func, expr->binary.right);
             printf(")");
         } break;
@@ -1571,7 +1664,9 @@ void print_expr(Context* context, Func* func, Expr* expr) {
     }
 }
 
-void print_stmt(Context* context, Func* func, Stmt* stmt) {
+void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
+    for (u32 i = 0; i < indent_level; i += 1) printf("    ");
+
     switch (stmt->kind) {
         case stmt_assignment: {
             print_expr(context, func, stmt->assignment.left);
@@ -1599,10 +1694,36 @@ void print_stmt(Context* context, Func* func, Stmt* stmt) {
         } break;
 
         case stmt_block: {
-            unimplemented();
+            printf("{\n");
+
+            print_stmts(context, func, stmt->block.inner, indent_level + 1);
+
+            for (u32 i = 0; i < indent_level; i += 1) printf("    ");
+            printf("}");
+        } break;
+
+        case stmt_conditional: {
+            printf("if (");
+            print_expr(context, func, stmt->conditional.condition);
+            printf(") {\n");
+
+            print_stmts(context, func, stmt->conditional.then, indent_level + 1);
+
+            for (u32 i = 0; i < indent_level; i += 1) printf("    ");
+            printf("}");
+
+            if (stmt->conditional.else_then != null) {
+                unimplemented();
+            }
         } break;
 
         default: assert(false);
+    }
+
+    printf("\n");
+
+    if (stmt->next->kind != stmt_end) {
+        print_stmts(context, func, stmt->next, indent_level);
     }
 }
 
@@ -1639,19 +1760,21 @@ void print_op(Context* context, Func* func, Op* op) {
             printf("reset $%u", (u64) op->temporary);
         } break;
 
-        case op_set:
-        case op_add:
-        case op_sub:
-        case op_mul:
-        case op_div:
+        case op_set: case op_add: case op_sub: case op_mul: case op_div:
+        case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
         {
             u8* op_name;
             switch (op->kind) {
-                case op_set: op_name = "set"; break;
-                case op_add: op_name = "add"; break;
-                case op_sub: op_name = "sub"; break;
-                case op_mul: op_name = "mul"; break;
-                case op_div: op_name = "div"; break;
+                case op_set:  op_name = "set"; break;
+                case op_add:  op_name = "add"; break;
+                case op_sub:  op_name = "sub"; break;
+                case op_mul:  op_name = "mul"; break;
+                case op_div:  op_name = "div"; break;
+                case op_eq:   op_name = "eq"; break;
+                case op_gt:   op_name = "gt"; break;
+                case op_gteq: op_name = "gteq"; break;
+                case op_lt:   op_name = "lt"; break;
+                case op_lteq: op_name = "lteq"; break;
                 default: assert(false);
             }
 
@@ -1695,6 +1818,12 @@ void print_op(Context* context, Func* func, Op* op) {
             printf("cast ");
             print_local(context, func, op->cast.local);
             printf(" (from %s to %s)", primitive_name(op->cast.old_primitive), primitive_name(op->primitive));
+        } break;
+
+        case op_jump: {
+            printf("jump if ");
+            print_local(context, func, op->jump.condition);
+            printf(" by %i", op->jump.jump);
         } break;
 
         default: assert(false);
@@ -1751,11 +1880,7 @@ u32 parse_type(Context* context, Token* t, u32* length) {
             u64 array_size = t->literal_value;
             t += 1;
 
-            if (t->kind != token_bracket_square_close) {
-                printf("Expected closing square bracket ] after array size, but got ");
-                print_token(context->string_table, t);
-                printf(" (Line %u)\n", t->pos.line);
-
+            if (!expect_single_token(context, t, token_bracket_square_close, "after array size")) {
                 *length = t - t_start + 1;
                 return U32_MAX;
             }
@@ -1767,7 +1892,7 @@ u32 parse_type(Context* context, Token* t, u32* length) {
                 array_size = array_size >> 8;
             }
 
-        } else if (t->kind == token_operator && t->operator == token_operator_mul) {
+        } else if (t->kind == token_mul) {
             buf_push(context->type_buf, primitive_pointer);
             t += 1;
 
@@ -1890,6 +2015,61 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
+bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
+    u8* token_name = null;
+    switch (kind) {
+        case token_bracket_round_open:   token_name = "opening parenthesis '('"; break;
+        case token_bracket_round_close:  token_name = "closing parenthesis ')'"; break;
+        case token_bracket_square_open:  token_name = "opening square bracket '['"; break;
+        case token_bracket_square_close: token_name = "closing square bracket ']'"; break;
+        case token_bracket_curly_open:   token_name = "opening curly brace '{'"; break;
+        case token_bracket_curly_close:  token_name = "closing curly brace '}'"; break;
+
+        case token_semicolon: token_name = "semicolon ';'"; break;
+        case token_comma:     token_name = "comma ','"; break;
+        case token_colon:     token_name = "colon ':'"; break;
+
+        case token_add: token_name = "+"; break;
+        case token_sub: token_name = "-"; break;
+        case token_mul: token_name = "*"; break;
+        case token_div: token_name = "/"; break;
+        case token_and: token_name = "&"; break;
+
+        case token_greater:             token_name = ">"; break;
+        case token_greater_or_equal:    token_name = ">="; break;
+        case token_less:                token_name = "<"; break;
+        case token_less_or_equal:       token_name = "<="; break;
+        case token_assign:              token_name = "="; break;
+        case token_equal:               token_name = "=="; break;
+        case token_arrow:               token_name = "->"; break;
+
+        case token_keyword_extern: token_name = "extern"; break;
+        case token_keyword_var:    token_name = "var"; break;
+        case token_keyword_fn:     token_name = "fn"; break;
+        case token_keyword_null:   token_name = "null"; break;
+        case token_keyword_if:     token_name = "if"; break;
+        case token_keyword_else:   token_name = "else"; break;
+        case token_keyword_for:    token_name = "for"; break;
+        case token_keyword_true:   token_name = "true"; break;
+        case token_keyword_false:  token_name = "false"; break;
+
+        // These don't realy make sense, they require special parsing
+        case token_identifier: unimplemented(); break;
+        case token_literal:    unimplemented(); break;
+        case token_string:     unimplemented(); break;
+        default: assert(false);
+    }
+
+    if (t->kind != kind) {
+        printf("Expected %s %s, but got ", token_name, location);
+        print_token(context->string_table, t);
+        printf(" (Line %u)\n", (u64) t->pos.line);
+        return false;
+    } else {
+        return true;
+    }
+}
+
 Expr* parse_expr(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
@@ -1932,7 +2112,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                     if (t->kind != token_bracket_round_close) {
                         if (t->kind != token_comma) {
-                            printf("Expected comma , or closing parenthesis ) after parameter in call, but got ");
+                            printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
                             print_token(context->string_table, t);
                             printf(" (Line %u)\n", (u64) t->pos.line);
                             *length = t - t_start;
@@ -1954,10 +2134,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     param_count += 1;
                 }
 
-                if (t->kind != token_bracket_round_close) {
-                    printf("Expected a closing parenthesis ) after function call, but got ");
-                    print_token(context->string_table, t);
-                    printf(" (Line %u)\n", (u64) t->pos.line);
+                if (!expect_single_token(context, t, token_bracket_round_close, "after function call")) {
                     *length = t - t_start;
                     return null;
                 }
@@ -1989,24 +2166,31 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 could_parse = true;
             }
 
-        } else if (t->kind == token_literal && mode == expr_mode_value) {
-            Expr* expr = arena_new(&context->arena, Expr);
-            expr->kind = expr_literal;
-            expr->literal.value = t->literal_value;
-            expr->literal.kind = expr_literal_integer;
-
-            shunting_yard_push_expr(context, yard, expr);
-
-            t += 1;
-            mode = expr_mode_binary;
-            could_parse = true;
-
-        } else if (t->kind == token_keyword_null && mode == expr_mode_value) {
+        } else if ((t->kind == token_literal || t->kind == token_keyword_null || t->kind == token_keyword_true || t->kind == token_keyword_false) && mode == expr_mode_value) {
             Expr* expr = arena_new(&context->arena, Expr);
             expr->kind = expr_literal;
             expr->literal.value = 0;
             expr->literal.kind = expr_literal_pointer;
             expr->pos = t->pos;
+
+            switch (t->kind) {
+                case token_literal: {
+                    expr->literal.value = t->literal_value;
+                    expr->literal.kind = expr_literal_integer;
+                } break;
+                case token_keyword_null: {
+                    expr->literal.value = 0;
+                    expr->literal.kind = expr_literal_pointer;
+                } break;
+                case token_keyword_false: {
+                    expr->literal.value = 0;
+                    expr->literal.kind = expr_literal_bool;
+                } break;
+                case token_keyword_true: {
+                    expr->literal.value = 1;
+                    expr->literal.kind = expr_literal_bool;
+                } break;
+            }
 
             shunting_yard_push_expr(context, yard, expr);
 
@@ -2026,10 +2210,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 return null;
             }
 
-            if (t->kind != token_bracket_round_close) {
-                printf("Expected a closing parenthesis ) after parenthesized subexpression, but got ");
-                print_token(context->string_table, t);
-                printf(" (Line %u)\n", (u64) t->pos.line);
+            if (!expect_single_token(context, t, token_bracket_round_close, "after parenthesized subexpression")) {
                 *length = t - t_start;
                 return null;
             }
@@ -2052,10 +2233,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     return null;
                 }
 
-                if (t->kind != token_bracket_curly_open) {
-                    printf("Expected open curly brace { after type of compound literal, but got ");
-                    print_token(context->string_table, t);
-                    printf(" (Line %u)\n", (u64) t->pos.line);
+                if (!expect_single_token(context, t, token_bracket_curly_open, "after type of compound literal")) {
                     *length = t - t_start;
                     return null;
                 }
@@ -2077,7 +2255,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                     if (t->kind != token_bracket_curly_close) {
                         if (t->kind != token_comma) {
-                            printf("Expected comma , or closing brace } after value in compound literal, but got ");
+                            printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
                             print_token(context->string_table, t);
                             printf(" (Line %u)\n", (u64) t->pos.line);
                             *length = t - t_start;
@@ -2099,10 +2277,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expr_count += 1;
                 }
                 
-                if (t->kind != token_bracket_curly_close) {
-                    printf("Expected open curly brace } to close compound literal, but got ");
-                    print_token(context->string_table, t);
-                    printf(" (Line %u)\n", (u64) t->pos.line);
+                if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
                     *length = t - t_start;
                     return null;
                 }
@@ -2130,20 +2305,18 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
             mode == expr_mode_binary && (
                 t->kind == token_semicolon ||
                 t->kind == token_comma ||
-                t->kind == token_bracket_round_close ||
-                t->kind == token_bracket_square_close ||
-                t->kind == token_bracket_curly_close ||
-                (t->kind == token_operator && t->operator == token_operator_assign) ||
+                t->kind == ')' || t->kind == ']' || t->kind == '}' ||
+                t->kind == token_assign ||
                 t->kind == token_keyword_var ||
                 t->kind == token_keyword_fn
             )
         ) {
             break;
 
-        } else if (t->kind == token_operator) {
+        } else {
             if (mode == expr_mode_value) {
-                switch (t->operator) {
-                    case token_operator_and: {
+                switch (t->kind) {
+                    case token_and: {
                         Expr* expr = arena_new(&context->arena, Expr);
                         expr->kind = expr_address_of;
                         expr->pos = t->pos;
@@ -2154,7 +2327,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         could_parse = true;
                     } break;
 
-                    case token_operator_mul: {
+                    case token_mul: {
                         Expr* expr = arena_new(&context->arena, Expr);
                         expr->kind = expr_dereference;
                         expr->pos = t->pos;
@@ -2169,16 +2342,16 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
             } else if (mode == expr_mode_binary) {
                 Binary_Op op = binary_op_invalid;
-                switch (t->operator) {
-                    case token_operator_add:                op = binary_add; break;
-                    case token_operator_sub:                op = binary_sub; break;
-                    case token_operator_mul:                op = binary_mul; break;
-                    case token_operator_div:                op = binary_div; break;
-                    case token_operator_greater:            op = binary_greater; break;
-                    case token_operator_greater_or_equal:   op = binary_greater_or_equal; break;
-                    case token_operator_less:               op = binary_less;
-                    case token_operator_less_or_equal:      op = binary_less_or_equal; break;
-                    case token_operator_equal:              op = binary_equal; break;
+                switch (t->kind) {
+                    case token_add:                op = binary_add; break;
+                    case token_sub:                op = binary_sub; break;
+                    case token_mul:                op = binary_mul; break;
+                    case token_div:                op = binary_div; break;
+                    case token_greater:            op = binary_gt; break;
+                    case token_greater_or_equal:   op = binary_gteq; break;
+                    case token_less:               op = binary_lt; break;
+                    case token_less_or_equal:      op = binary_lteq; break;
+                    case token_equal:              op = binary_eq; break;
                 }
 
                 if (op != binary_op_invalid) {
@@ -2226,43 +2399,66 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
     Stmt* stmt = arena_new(&context->arena, Stmt);
     stmt->pos = t->pos;
 
-    enum { expect_nothing, expect_semicolon, expect_closing_bracket } expect = expect_nothing;
-
     // End of a block
     if (t->kind == token_bracket_curly_close) {
         stmt->kind = stmt_end;
 
     // Basic blocks
     } else if (t->kind == token_bracket_curly_open) {
-        expect = expect_closing_bracket;
         t += 1;
 
         u32 inner_length = 0;
         Stmt* inner_stmts = parse_stmts(context, t, &inner_length);
         t += inner_length;
 
-        if (inner_stmts == null) {
-            return null;
-        } else {
-            stmt->kind = stmt_block;
-            stmt->block.inner = inner_stmts;
-        }
+        if (inner_stmts == null) return null;
+
+        stmt->kind = stmt_block;
+        stmt->block.inner = inner_stmts;
+
+        if (!expect_single_token(context, t, token_bracket_curly_close, "after if")) return null;
+        t += 1;
 
     // Control flow - if
     } else if (t->kind == token_keyword_if) {
-        expect = expect_closing_bracket;
+        t += 1;
 
-        unimplemented(); // TODO
+        if (!expect_single_token(context, t, '(', "after if")) return null;
+        t += 1;
+
+        u32 condition_length = 0;
+        Expr* condition = parse_expr(context, t, &condition_length);
+        t += condition_length;
+
+        if (condition == null) return null;
+
+        if (!expect_single_token(context, t, ')', "after if")) return null;
+        t += 1;
+        if (!expect_single_token(context, t, '{', "after if")) return null;
+        t += 1;
+
+        u32 inner_length = 0;
+        Stmt* inner_stmts = parse_stmts(context, t, &inner_length);
+        t += inner_length;
+
+        if (!expect_single_token(context, t, '}', "after if")) return null;
+        t += 1;
+
+        stmt->kind = stmt_conditional;
+        stmt->conditional.condition = condition;
+        stmt->conditional.then = inner_stmts;
+
+        if (t->kind == token_keyword_else) {
+            t += 1;
+            unimplemented(); // TODO
+        }
 
     // Control flow - for
     } else if (t->kind == token_keyword_for) {
-        expect = expect_closing_bracket;
-
         unimplemented(); // TODO
 
     // Variable declaration
     } else if (t->kind == token_keyword_var) {
-        expect = expect_semicolon;
         t += 1;
 
         if (t->kind != token_identifier) {
@@ -2290,7 +2486,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
         t += type_length;
 
         Expr* expr = null;
-        if (t->kind == token_operator && t->operator == token_operator_assign) {
+        if (t->kind == token_assign) {
             t += 1;
 
             u32 right_length = 0;
@@ -2310,17 +2506,18 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
         stmt->declaration.var_index = var_index;
         stmt->declaration.right = expr;
 
+        if (!expect_single_token(context, t, token_semicolon, "after variable declaration")) return null;
+        t += 1;
+
     // Assignment or free standing expression
     } else {
-        expect = expect_semicolon;
-
         u32 left_length = 0;
         Expr* left = parse_expr(context, t, &left_length);
         t += left_length;
 
         if (left == null) return null;
 
-        if (t->kind == token_operator && t->operator == token_operator_assign) {
+        if (t->kind == token_assign) {
             t += 1;
 
             u32 right_length = 0;
@@ -2336,33 +2533,9 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
             stmt->kind = stmt_expr;
             stmt->expr = left;
         }
-    }
 
-    switch (expect) {
-        case expect_semicolon: {
-            if (t->kind != token_semicolon) {
-                printf("Expected semicolon after statement, but got ");
-                print_token(context->string_table, t);
-                printf(" (Line %u)\n", (u64) t->pos.line);
-                return null;
-            }
-
-            t += 1;
-        } break;
-
-        case expect_closing_bracket: {
-            if (t->kind != token_bracket_curly_close) {
-                printf("Expected closing curly bracket at end of block, but got ");
-                print_token(context->string_table, t);
-                printf("(Line %u)\n", (u64) t->pos.line);
-                return null;
-            }
-
-            t += 1;
-        } break;
-
-        case expect_nothing: break;
-        default: assert(false);
+        if (!expect_single_token(context, t, token_semicolon, "after statement")) return null;
+        t += 1;
     }
 
     // Try parsing more statements after this one
@@ -2520,7 +2693,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     t += parameter_length + 2;
 
     // Return type
-    if (t->kind == token_operator && t->operator == token_operator_arrow) {
+    if (t->kind == token_arrow) {
         t += 1;
 
         u32 output_type_length = 0;
@@ -2680,15 +2853,17 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    enum { KEYWORD_COUNT = 7 };
+    enum { KEYWORD_COUNT = 9 };
     u32 keyword_token_table[KEYWORD_COUNT][2] = {
+        { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
         { token_keyword_extern, string_table_intern_cstr(&context->string_table, "extern") },
         { token_keyword_var,    string_table_intern_cstr(&context->string_table, "var") },
-        { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
-        { token_keyword_null,   string_table_intern_cstr(&context->string_table, "null") },
         { token_keyword_if,     string_table_intern_cstr(&context->string_table, "if") },
         { token_keyword_else,   string_table_intern_cstr(&context->string_table, "else") },
         { token_keyword_for,    string_table_intern_cstr(&context->string_table, "for") },
+        { token_keyword_null,   string_table_intern_cstr(&context->string_table, "null") },
+        { token_keyword_true,   string_table_intern_cstr(&context->string_table, "true") },
+        { token_keyword_false,  string_table_intern_cstr(&context->string_table, "false") },
     };
 
     init_primitive_names(context->primitive_names, &context->string_table);
@@ -2807,36 +2982,36 @@ bool build_ast(Context* context, u8* path) {
             u8 a = file[i];
             u8 b = i + 1 < file_length? file[i + 1] : 0;
 
-            int operator;
+            int kind;
 
             if (a == '-' && b == '>') {
-                operator = token_operator_arrow;
+                kind = token_arrow;
                 i += 2;
             } else if (a == '<' && b == '=') {
-                operator = token_operator_less_or_equal;
+                kind = token_less_or_equal;
                 i += 2;
             } else if (a == '>' && b == '=') {
-                operator = token_operator_greater_or_equal;
+                kind = token_greater_or_equal;
                 i += 2;
             } else if (a == '=' && b == '=') {
-                operator = token_operator_equal;
+                kind = token_equal;
                 i += 2;
             } else {
                 switch (a) {
-                    case '+': operator = token_operator_add; break;
-                    case '-': operator = token_operator_sub; break;
-                    case '*': operator = token_operator_mul; break;
-                    case '/': operator = token_operator_div; break;
-                    case '&': operator = token_operator_and; break;
-                    case '>': operator = token_operator_greater; break;
-                    case '<': operator = token_operator_less; break;
-                    case '=': operator = token_operator_assign; break;
+                    case '+': kind = token_add; break;
+                    case '-': kind = token_sub; break;
+                    case '*': kind = token_mul; break;
+                    case '/': kind = token_div; break;
+                    case '&': kind = token_and; break;
+                    case '>': kind = token_greater; break;
+                    case '<': kind = token_less; break;
+                    case '=': kind = token_assign; break;
                     default: assert(false);
                 }
                 i += 1;
             }
 
-            buf_push(tokens, ((Token) { token_operator, .operator = operator, .pos = file_pos }));
+            buf_push(tokens, ((Token) { kind, .pos = file_pos }));
         } break;
 
         case '{': case '}':
@@ -3114,13 +3289,19 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                     }
                 } break;
 
+                case expr_literal_bool: {
+                    assert(expr->literal.value == true || expr->literal.value == false);
+                    expr->type_index = primitive_bool;
+                } break;
+
                 default: assert(false);
             }
 
         } break;
 
         case expr_compound_literal: {
-            // The syntax requires you to give a type when creating a compound literal
+            // The syntax requires you to give a type when creating a compound literal, so we just
+            // have to check that the members inside the literal are correct.
 
             Primitive primitive = context->type_buf[expr->type_index];
             if (primitive == primitive_array) {
@@ -3209,13 +3390,26 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
         } break;
 
         case expr_binary: {
+            bool is_comparasion = false;
+            switch (expr->binary.op) {
+                case binary_eq:
+                case binary_gt:
+                case binary_gteq:
+                case binary_lt:
+                case binary_lteq:
+                {
+                    is_comparasion = true;
+                    solidify_to = primitive_u64;
+                } break;
+            }
+
             if (!typecheck_expr(context, func, scope, expr->binary.left, solidify_to))  return false;
             if (!typecheck_expr(context, func, scope, expr->binary.right, solidify_to)) return false;
 
             assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
             assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
 
-            // We take one shot at matching the types to each other by chaning what we try solidifying to
+            // We take one shot at matching the types to each other by changing what we try solidifying to
             if (!type_cmp(context, expr->binary.left->type_index, expr->binary.right->type_index)) {
                 bool left_strong = context->type_buf[expr->binary.left->type_index] != solidify_to;
                 bool right_strong = context->type_buf[expr->binary.right->type_index] != solidify_to;
@@ -3232,33 +3426,49 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
             Primitive left_primitive = context->type_buf[expr->binary.left->type_index];
             Primitive right_primitive = context->type_buf[expr->binary.right->type_index];
 
-            bool matching_integers =
-                left_primitive == right_primitive &&
-                left_primitive >= primitive_u8 && left_primitive <= primitive_i64;
+            if (is_comparasion) {
+                expr->type_index = primitive_bool;
 
-            if (matching_integers) {
-                expr->type_index = expr->binary.left->type_index;
-            } else switch (expr->binary.op) {
-                case binary_add: {
-                    if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
-                        expr->type_index = expr->binary.left->type_index;
-                    }
+                bool valid;
+                if (expr->binary.op == binary_eq) {
+                    valid = left_primitive == right_primitive && !primitive_is_compound(left_primitive);
+                } else {
+                    valid = left_primitive == right_primitive && primitive_is_integer(left_primitive);
+                }
 
-                    if (left_primitive == primitive_u64 && right_primitive == primitive_pointer) {
-                        expr->type_index = expr->binary.right->type_index;
-                    }
-                } break;
+                if (!valid) {
+                    printf("Can't compare ");
+                    print_type(context, expr->binary.left->type_index);
+                    printf(" with ");
+                    print_type(context, expr->binary.right->type_index);
+                    printf(" using operator %s (Line %u)\n", BINARY_OP_SYMBOL[expr->binary.op], (u64) expr->pos.line);
+                    return false;
+                }
+            } else {
+                if (left_primitive == right_primitive && primitive_is_integer(left_primitive)) {
+                    expr->type_index = expr->binary.left->type_index;
+                } else switch (expr->binary.op) {
+                    case binary_add: {
+                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                            expr->type_index = expr->binary.left->type_index;
+                        }
 
-                case binary_sub: {
-                    if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
-                        expr->type_index = expr->binary.left->type_index;
-                    }
-                } break;
+                        if (left_primitive == primitive_u64 && right_primitive == primitive_pointer) {
+                            expr->type_index = expr->binary.right->type_index;
+                        }
+                    } break;
 
-                case binary_mul: {} break;
-                case binary_div: {} break;
+                    case binary_sub: {
+                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                            expr->type_index = expr->binary.left->type_index;
+                        }
+                    } break;
 
-                default: assert(false);
+                    case binary_mul: {} break;
+                    case binary_div: {} break;
+
+                    default: assert(false);
+                }
             }
 
             if (expr->type_index == primitive_invalid) {
@@ -3462,7 +3672,29 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
         case stmt_block: {
             Scope* child_scope = scope_push(context, scope);
             for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
-                typecheck_stmt(context, func, child_scope, inner);
+                if (!typecheck_stmt(context, func, child_scope, inner)) return false;
+            }
+        } break;
+
+        case stmt_conditional: {
+            if (!typecheck_expr(context, func, scope, stmt->conditional.condition, primitive_bool)) return false;
+
+            Primitive condition_primitive = context->type_buf[stmt->conditional.condition->type_index];
+            if (condition_primitive != primitive_bool) {
+                printf("Expected bool but got ");
+                print_type(context, stmt->conditional.condition->type_index);
+                printf(" in 'if'-statement (Line %u)\n", stmt->conditional.condition->pos.line);
+                return false;
+            }
+
+            Scope* then_scope = scope_push(context, scope);
+            for (Stmt* inner = stmt->conditional.then; inner->kind != stmt_end; inner = inner->next) {
+                if (!typecheck_stmt(context, func, then_scope, inner)) return false;
+            }
+
+            if (stmt->conditional.else_then != null) {
+                Scope* else_scope = scope_push(context, scope);
+                unimplemented();
             }
         } break;
 
@@ -3638,7 +3870,7 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
 }
 
 void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_address) {
-    Primitive primitive = context->type_buf[expr->type_index];
+    Primitive target_primitive = context->type_buf[expr->type_index];
     assert(assign_to.kind != local_literal);
 
     switch (expr->kind) {
@@ -3661,11 +3893,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 op.binary.target = assign_to;
                 buf_push(context->tmp_ops, op);
             } else {
-                assert(!primitive_is_compound(primitive));
+                assert(!primitive_is_compound(target_primitive));
 
                 Op op = {0};
                 op.kind = op_set;
-                op.primitive = primitive;
+                op.primitive = target_primitive;
                 op.binary.source = source;
                 op.binary.target = assign_to;
                 buf_push(context->tmp_ops, op);
@@ -3675,9 +3907,9 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_compound_literal: {
             assert(!get_address);
             assert(assign_to.as_reference);
-            assert(primitive_is_compound(primitive));
+            assert(primitive_is_compound(target_primitive));
 
-            if (primitive == primitive_array) {
+            if (target_primitive == primitive_array) {
                 u64 array_length = *((u64*) &context->type_buf[expr->type_index + 1]);
                 assert(array_length == expr->compound_literal.count);
 
@@ -3723,6 +3955,12 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_binary: {
             assert(!get_address);
 
+            if (assign_to.kind == local_temporary) {
+                u64 left_size = type_size_of(context, expr->binary.left->type_index);
+                Tmp* tmp = &context->tmp_tmps[assign_to.value];
+                tmp->size = max(left_size, tmp->size);
+            }
+
             linearize_expr(context, expr->binary.left, assign_to, false);
 
             u64 right_size = type_size_of(context, expr->binary.right->type_index);
@@ -3730,16 +3968,47 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             linearize_expr(context, expr->binary.right, right_local, false);
 
             Op op = {0};
+
             switch (expr->binary.op) {
-                case binary_add: op.kind = op_add; break;
-                case binary_sub: op.kind = op_sub; break;
-                case binary_mul: op.kind = op_mul; break;
-                case binary_div: op.kind = op_div; break;
+                case binary_add:  op.kind = op_add;  break;
+                case binary_sub:  op.kind = op_sub;  break;
+                case binary_mul:  op.kind = op_mul;  break;
+                case binary_div:  op.kind = op_div;  break;
+                case binary_eq:   op.kind = op_eq;   break;
+                case binary_gt:   op.kind = op_gt;   break;
+                case binary_gteq: op.kind = op_gteq; break;
+                case binary_lt:   op.kind = op_lt;   break;
+                case binary_lteq: op.kind = op_lteq; break;
                 default: assert(false);
             }
-            op.primitive = primitive;
+
             op.binary.target = assign_to;
             op.binary.source = right_local;
+
+            switch (expr->binary.op) {
+                case binary_add:
+                case binary_sub:
+                case binary_mul:
+                case binary_div:
+                {
+                    op.primitive = target_primitive;
+                } break;
+
+                case binary_eq:
+                case binary_gt:
+                case binary_gteq:
+                case binary_lt:
+                case binary_lteq:
+                {
+                    Primitive left_primitive  = context->type_buf[expr->binary.left->type_index];
+                    Primitive right_primitive = context->type_buf[expr->binary.right->type_index];
+                    assert(left_primitive == right_primitive);
+                    op.primitive = left_primitive;
+                } break;
+
+                default: assert(false);
+            }
+
             buf_push(context->tmp_ops, op);
 
             intermediate_deallocate_temporary(context, right_local);
@@ -3779,12 +4048,18 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_cast: {
             assert(!get_address);
 
+            if (assign_to.kind == local_temporary) {
+                u64 left_size = type_size_of(context, expr->cast_from->type_index);
+                Tmp* tmp = &context->tmp_tmps[assign_to.value];
+                tmp->size = max(left_size, tmp->size);
+            }
+
             linearize_expr(context, expr->cast_from, assign_to, false);
 
             if (!type_cmp(context, expr->type_index, expr->cast_from->type_index)) {
                 Op op = {0};
                 op.kind = op_cast;
-                op.primitive = primitive;
+                op.primitive = target_primitive;
                 op.cast.local = assign_to;
                 op.cast.old_primitive = context->type_buf[expr->cast_from->type_index];
                 buf_push(context->tmp_ops, op);
@@ -3861,7 +4136,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             buf_push(context->tmp_ops, op);
 
             if (!get_address) {
-                if (primitive_is_compound(primitive)) {
+                if (primitive_is_compound(target_primitive)) {
                     assert(assign_to.as_reference);
                 }
 
@@ -3988,11 +4263,11 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
     switch (stmt->kind) {
         case stmt_assignment: {
-            linearize_assignment(context, stmt->assignment.left, stmt->assignment.right); break;
+            linearize_assignment(context, stmt->assignment.left, stmt->assignment.right);
         } break;
 
         case stmt_expr: {
-            linearize_expr(context, stmt->expr, (Local) {0}, false); break;
+            linearize_expr(context, stmt->expr, (Local) {0}, false);
         } break;
 
         case stmt_declaration: {
@@ -4014,6 +4289,32 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             }
         } break;
 
+        case stmt_conditional: {
+            Local bool_local = intermediate_allocate_temporary(context, 1);
+            linearize_expr(context, stmt->conditional.condition, bool_local, false);
+
+            Op* jump_op = buf_end(context->tmp_ops);
+            buf_push(context->tmp_ops, ((Op) {0}));
+            jump_op->kind = op_jump;
+            jump_op->jump.condition = bool_local;
+
+            u64 start_length = buf_length(context->tmp_ops);
+
+            intermediate_deallocate_temporary(context, bool_local);
+
+            for (Stmt* inner = stmt->conditional.then; inner->kind != stmt_end; inner = inner->next) {
+                linearize_stmt(context, func, inner);
+            }
+
+            u64 end_length = buf_length(context->tmp_ops);
+            u64 jump = end_length - start_length;
+            jump_op->jump.jump = (i64) jump;
+
+            if (stmt->conditional.else_then != null) {
+                unimplemented();
+            }
+        } break;
+
         default: assert(false);
     }
 }
@@ -4029,8 +4330,9 @@ void build_intermediate(Context* context) {
 
         for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
             linearize_stmt(context, func, stmt);
-            buf_foreach (Tmp, tmp, context->tmp_tmps) assert(!tmp->currently_allocated);
         }
+
+        buf_foreach (Tmp, tmp, context->tmp_tmps) assert(!tmp->currently_allocated);
 
         buf_push(context->tmp_ops, ((Op) { op_end_of_function }));
 
@@ -4096,7 +4398,6 @@ u8* eval_get_local(Eval_Stack_Frame* frame, Local local, bool allow_literal) {
 void eval_ops(Context* context) {
     arena_stack_push(&context->stack);
 
-
     buf_foreach (Func, func, context->funcs) {
         if (func->kind != func_kind_normal) {
             continue;
@@ -4127,7 +4428,6 @@ void eval_ops(Context* context) {
 
         func->body.mem_layout.total_bytes = offset;
     }
-
 
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
     assert(main_func_index != STRING_TABLE_NO_MATCH);
@@ -4188,6 +4488,7 @@ void eval_ops(Context* context) {
                         case primitive_void:
                         case primitive_array:
                         case primitive_unsolidified_int:
+                        case primitive_bool:
                         {
                             assert(false);
                         } break;
@@ -4217,6 +4518,67 @@ void eval_ops(Context* context) {
                         case primitive_i64:
                         {
                             unimplemented();
+                        } break;
+
+                        default: assert(false);
+                    }
+                } break;
+
+                case op_eq: {
+                    assert(!primitive_is_compound(op->primitive));
+                    u8* target_pointer = eval_get_local(frame, op->binary.target, false);
+                    u8* source_pointer = eval_get_local(frame, op->binary.source, true);
+                    u8 size = primitive_size_of(op->primitive);
+                    bool equal = mem_cmp(target_pointer, source_pointer, size);
+                    *target_pointer = equal? 1 : 0;
+                } break;
+
+                case op_gt:
+                case op_gteq:
+                case op_lt:
+                case op_lteq:
+                {
+                    u8* target_pointer = eval_get_local(frame, op->binary.target, false);
+                    u8* source_pointer = eval_get_local(frame, op->binary.source, true);
+
+                    u8 operand_size = primitive_size_of(op->primitive);
+                    u64 mask = size_mask(operand_size);
+
+                    switch (op->primitive) {
+                        case primitive_invalid:
+                        case primitive_void:
+                        case primitive_array:
+                        case primitive_unsolidified_int:
+                        case primitive_bool:
+                        {
+                            assert(false);
+                        } break;
+
+                        case primitive_u8:
+                        case primitive_u16:
+                        case primitive_u32:
+                        case primitive_u64:
+                        {
+                            u64 target = *((u64*) target_pointer) & mask;
+                            u64 source = *((u64*) source_pointer) & mask;
+
+                            u8 result;
+                            switch (op->kind) {
+                                case op_gt:   result = target > source;  break;
+                                case op_gteq: result = target >= source; break;
+                                case op_lt:   result = target < source;  break;
+                                case op_lteq: result = target <= source; break;
+                                default: assert(false);
+                            }
+                            *target_pointer = result;
+                        } break;
+
+                        case primitive_i8:
+                        case primitive_i16:
+                        case primitive_i32:
+                        case primitive_i64:
+                        {
+                            unimplemented(); // TODO signed arithmetic
                         } break;
 
                         default: assert(false);
@@ -4270,6 +4632,7 @@ void eval_ops(Context* context) {
                         case primitive_invalid:
                         case primitive_void:
                         case primitive_unsolidified_int:
+                        case primitive_bool:
                         {
                             panic("Invalid cast to %s\n", primitive_name(op->primitive));
                         } break;
@@ -4296,6 +4659,13 @@ void eval_ops(Context* context) {
                     }
                 } break;
 
+                case op_jump: {
+                    u8 condition = *eval_get_local(frame, op->jump.condition, true);
+                    if (!condition) {
+                        frame->current_op += op->jump.jump;
+                    }
+                } break;
+
                 default: assert(false);
             }
         }
@@ -4319,7 +4689,7 @@ void eval_ops(Context* context) {
     }
 
     {
-        printf("Evaluated intermediate bytecode:\n");
+        printf("\nEvaluated intermediate bytecode:\n");
         u8* name = string_table_access(context->string_table, frame->func->name);
         printf("  fn %s:\n", name);
 
@@ -4355,41 +4725,52 @@ enum {
     MODRM_MOD_MASK = 0xc0,
 };
 
-typedef enum Arithmetic {
-    arithmetic_xor,
-    arithmetic_add,
-    arithmetic_sub,
-    ARITHMETIC_COUNT,
-} Arithmetic;
+typedef enum X64_Instruction_Binary {
+    instruction_xor,
+    instruction_add,
+    instruction_sub,
+    instruction_cmp,
+    BINARY_INSTRUCTION_COUNT,
+} X64_Instruction_Binary;
 
-u8 ARITHMETIC_OPCODES_BYTE[ARITHMETIC_COUNT] = {
-    [arithmetic_xor] = 0x32,
-    [arithmetic_add] = 0x02,
-    [arithmetic_sub] = 0x2a,
+u8 BINARY_INSTRUCTION_OPCODES_BYTE[BINARY_INSTRUCTION_COUNT] = {
+    [instruction_xor] = 0x32,
+    [instruction_add] = 0x02,
+    [instruction_sub] = 0x2a,
+    [instruction_cmp] = 0x3a,
 };
-u8 ARITHMETIC_OPCODES_INT[ARITHMETIC_COUNT] = {
-    [arithmetic_xor] = 0x33,
-    [arithmetic_add] = 0x03,
-    [arithmetic_sub] = 0x2b,
+u8 BINARY_INSTRUCTION_OPCODES_INT[BINARY_INSTRUCTION_COUNT] = {
+    [instruction_xor] = 0x33,
+    [instruction_add] = 0x03,
+    [instruction_sub] = 0x2b,
+    [instruction_cmp] = 0x3b,
 };
-u8* ARITHMETIC_OP_NAMES[ARITHMETIC_COUNT] = {
-    [arithmetic_xor] = "xor",
-    [arithmetic_add] = "add",
-    [arithmetic_sub] = "sub",
+u8* BINARY_INSTRUCTION_OP_NAMES[BINARY_INSTRUCTION_COUNT] = {
+    [instruction_xor] = "xor",
+    [instruction_add] = "add",
+    [instruction_sub] = "sub",
+    [instruction_cmp] = "cmp",
 };
 
-void instruction_int3(u8** b) {
-    buf_push(*b, 0xcc);
-}
+typedef enum X64_Instruction_Unary {
+    instruction_mul,
+    instruction_div,
+    instruction_not,
+    UNARY_INSTRUCTION_COUNT,
+} X64_Instruction_Unary;
 
-void instruction_nop(u8** b) {
-    buf_push(*b, 0x90);
-}
+u8 UNARY_INSTRUCTION_REG[UNARY_INSTRUCTION_COUNT] = {
+    [instruction_mul] = 4,
+    [instruction_div] = 6,
+    [instruction_not] = 2,
+};
+u8* UNARY_INSTRUCTION_OP_NAMES[UNARY_INSTRUCTION_COUNT] = {
+    [instruction_mul] = "mul",
+    [instruction_div] = "div",
+    [instruction_not] = "not",
+};
 
-//#define missing_instruction(x) instruction_nop(x)
-#define missing_instruction(x) unimplemented()
-
-void instruction_arithmetic_reg_reg(u8** b, Arithmetic arithmetic, Reg a_reg, Reg b_reg, u8 bytes) {
+void instruction_general_reg_reg(u8** b, X64_Instruction_Binary instruction, X64_Reg a_reg, X64_Reg b_reg, u8 bytes) {
     bool use_small_op = false;
     u8 rex = REX_BASE;
     u8 modrm = 0xc0;
@@ -4422,35 +4803,29 @@ void instruction_arithmetic_reg_reg(u8** b, Arithmetic arithmetic, Reg a_reg, Re
     }
 
     if (use_small_op) {
-        buf_push(*b, ARITHMETIC_OPCODES_BYTE[arithmetic]);
+        buf_push(*b, BINARY_INSTRUCTION_OPCODES_BYTE[instruction]);
     } else {
-        buf_push(*b, ARITHMETIC_OPCODES_INT[arithmetic]);
+        buf_push(*b, BINARY_INSTRUCTION_OPCODES_INT[instruction]);
     }
 
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u %s %s\n", ARITHMETIC_OP_NAMES[arithmetic], (u64) bytes*8, reg_names[a_reg], reg_names[b_reg]);
+    printf("%s%u %s %s\n", BINARY_INSTRUCTION_OP_NAMES[instruction], (u64) bytes*8, reg_names[a_reg], reg_names[b_reg]);
     #endif
 }
 
-// Multiplies/divides reg_rax by reg, storing the result in reg_rax.
-// Higher order bits (for mul) or remainder (for div) are stored in reg_rdx or the second byte of reg_rax (for 8-bit mul)
-void instruction_mul_or_div_reg(u8** b, bool mul, Reg reg, u8 bytes) {
+void instruction_general_reg(u8** b, X64_Instruction_Unary instruction, X64_Reg reg, u8 bytes) {
     u8 rex = REX_BASE;
-    u8 opcode = 0xf7;
+    u8 modrm = 0xc0;
 
-    u8 modrm;
-    if (mul) {
-        modrm = 0xe0;
-    } else {
-        modrm = 0xf0;
-    }
+    modrm |= ((UNARY_INSTRUCTION_REG[instruction] << MODRM_REG_OFFSET) & MODRM_REG_MASK);
 
     modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
     if (reg >= reg_r8) rex |= REX_B;
     assert(reg < 16);
 
+    u8 opcode = 0xf7;
     switch (bytes) {
         case 1: opcode -= 1; break;
         case 2: buf_push(*b, 0x66); break;
@@ -4466,8 +4841,161 @@ void instruction_mul_or_div_reg(u8** b, bool mul, Reg reg, u8 bytes) {
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u rax, %s\n", mul? "mul" : "div", (u64) bytes*8, reg_names[reg]);
+    printf("%s%u rax, %s\n", UNARY_INSTRUCTION_OP_NAMES[instruction], (u64) bytes*8, reg_names[reg]);
     #endif
+}
+
+void instruction_xor_reg_imm(u8** b, X64_Reg reg, u32 immediate, u8 bytes) {
+    immediate = immediate & size_mask(bytes);
+
+    u8 rex = REX_BASE;
+    u8 modrm = 0xf0;
+
+    modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+    if (reg >= reg_r8) rex |= REX_B;
+    assert(reg < 16);
+
+    u8 opcode = 0x81;
+    switch (bytes) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(*b, 0x66); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, opcode);
+    buf_push(*b, modrm);
+    str_push_integer(b, min(bytes, sizeof(u32)), immediate);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("xor%u %s, %x\n", (u64) bytes*8, reg_names[reg], immediate);
+    #endif
+
+}
+
+void instruction_zero_extend_8_to_64(u8** b, X64_Reg reg) {
+    u8 modrm =
+        0xc0 |
+        ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
+        ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+
+    u8 rex = REX_BASE | REX_W | (reg >= reg_r8? (REX_R | REX_B) : 0);
+
+    buf_push(*b, rex);
+    buf_push(*b, 0x0f);
+    buf_push(*b, 0xb6);
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    u8* reg_name = reg_names[reg];
+    printf("movzx %s %s (8 -> 64)\n", reg_name);
+    #endif
+}
+
+void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) {
+    u8 opcode;
+    if (sign) {
+        switch (condition) {
+            case x64_condition_eq:   opcode = 0x94; break;
+            case x64_condition_gt:   opcode = 0x9f; break;
+            case x64_condition_gteq: opcode = 0x9d; break;
+            case x64_condition_lt:   opcode = 0x9c; break;
+            case x64_condition_lteq: opcode = 0x9e; break;
+            default: assert(false);
+        }
+    } else {
+        switch (condition) {
+            case x64_condition_eq:   opcode = 0x94; break;
+            case x64_condition_gt:   opcode = 0x97; break;
+            case x64_condition_gteq: opcode = 0x93; break;
+            case x64_condition_lt:   opcode = 0x92; break;
+            case x64_condition_lteq: opcode = 0x96; break;
+            default: assert(false);
+        }
+    }
+
+    u8 rex = REX_BASE;
+    u8 modrm = 0xc0;
+
+    modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+    if (reg >= reg_r8) rex |= REX_B;
+    assert(reg < 16);
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, 0x0f);
+    buf_push(*b, opcode);
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    u8* condition_name;
+    if (sign) {
+        switch (condition) {
+            case x64_condition_eq:   condition_name = "e";  break;
+            case x64_condition_gt:   condition_name = "g";  break;
+            case x64_condition_gteq: condition_name = "ge"; break;
+            case x64_condition_lt:   condition_name = "l";  break;
+            case x64_condition_lteq: condition_name = "le"; break;
+            default: assert(false);
+        }
+    } else {
+        switch (condition) {
+            case x64_condition_eq:   condition_name = "e"; break;
+            case x64_condition_gt:   condition_name = "a"; break;
+            case x64_condition_gteq: condition_name = "ae"; break;
+            case x64_condition_lt:   condition_name = "b"; break;
+            case x64_condition_lteq: condition_name = "be"; break;
+            default: assert(false);
+        }
+    }
+    printf("set%s %s\n", condition_name, reg_names[reg]);
+    #endif
+}
+
+void instruction_int3(u8** b) {
+    buf_push(*b, 0xcc);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("int 3\n");
+    #endif
+}
+
+void instruction_nop(u8** b) {
+    buf_push(*b, 0x90);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("nop\n");
+    #endif
+}
+
+i8* instruction_jmp_rcx_zero(u8** b) {
+    buf_push(*b, 0xe3);
+    buf_push(*b, 0x00);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("jrcxz ??\n", (i64) jump_by);
+    #endif
+
+    return (i8*) (buf_end(*b) - 1);
+}
+
+i32* instruction_jmp_i32(u8** b) {
+    buf_push(*b, 0xe9);
+    buf_push(*b, 0x00);
+    buf_push(*b, 0x00);
+    buf_push(*b, 0x00);
+    buf_push(*b, 0x00);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("jmp ??\n");
+    #endif
+
+    return (i32*) (buf_end(*b) - 4);
 }
 
 Mem_Item* get_stack_item(Func* func, Local local) {
@@ -4481,7 +5009,7 @@ Mem_Item* get_stack_item(Func* func, Local local) {
     return item;
 }
 
-void instruction_lea_stack_to_reg(u8** b, Func* func, Local local, Reg reg) {
+void instruction_lea_stack_to_reg(u8** b, Func* func, Local local, X64_Reg reg) {
     Mem_Item* item = get_stack_item(func, local);
     u32 offset = item->offset;
 
@@ -4515,7 +5043,7 @@ typedef enum Mov_Mode {
     mov_from,
 } Mov_Mode;
 
-void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_reg, u8 bytes) {
+void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Reg pointer_reg, X64_Reg value_reg, u8 bytes) {
     u8 rex = REX_BASE | REX_W;
     u8 opcode;
 
@@ -4547,7 +5075,7 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_r
     assert(value_reg < 16);
 
     modrm |= (pointer_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
-    if (pointer_reg >= reg_r8) rex |= REX_R;
+    if (pointer_reg >= reg_r8) rex |= REX_B;
     assert(pointer_reg < 16);
 
     if (pointer_reg == reg_rsp || pointer_reg == reg_rbp || pointer_reg == reg_r12 || pointer_reg == reg_r13) {
@@ -4572,7 +5100,7 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, Reg pointer_reg, Reg value_r
 }
 
 // Moves to/from '[rsp + offset]'
-void instruction_mov_stack_manual(u8** b, Mov_Mode mode, Reg reg, u32 offset, u8 bytes) {
+void instruction_mov_stack_manual(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 bytes) {
     u8 rex = REX_BASE | REX_W;
     u8 modrm = 0;
     u8 opcode;
@@ -4626,13 +5154,13 @@ void instruction_mov_stack_manual(u8** b, Mov_Mode mode, Reg reg, u32 offset, u8
     #endif
 }
 
-void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, Reg reg, Local local, u8 bytes) {
+void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, X64_Reg reg, Local local, u8 bytes) {
     Mem_Item* item = get_stack_item(func, local);
     u32 offset = item->offset;
     instruction_mov_stack_manual(b, mode, reg, offset, bytes);
 }
 
-void instruction_mov_imm_to_reg(u8** b, u64 value, Reg reg, u8 bytes) {
+void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Reg reg, u8 bytes) {
     u8 rex = REX_BASE;
     u8 opcode;
 
@@ -4671,7 +5199,7 @@ void instruction_mov_imm_to_reg(u8** b, u64 value, Reg reg, u8 bytes) {
     #endif
 }
 
-void instruction_load_local(u8** b, Func* func, Reg reg, Local local, u8 bytes) {
+void instruction_load_local(u8** b, Func* func, X64_Reg reg, Local local, u8 bytes) {
     if (local.kind == local_literal) {
         assert(!local.as_reference);
         instruction_mov_imm_to_reg(b, local.value, reg, bytes);
@@ -4685,8 +5213,6 @@ void instruction_load_local(u8** b, Func* func, Reg reg, Local local, u8 bytes) 
 
 
 void machinecode_for_op(Context* context, Func* func, Op* op) {
-    u8 primitive_size = primitive_size_of(op->primitive);
-
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("; ");
     print_op(context, func, op);
@@ -4695,6 +5221,8 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
 
     switch (op->kind) {
         case op_set: {
+            u8 primitive_size = primitive_size_of(op->primitive);
+
             instruction_load_local(&context->bytecode, func, reg_rax, op->binary.source, primitive_size);
 
             if (op->binary.target.as_reference) {
@@ -4718,12 +5246,7 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
         case op_add:
         case op_sub:
         {
-            int kind;
-            switch (op->kind) {
-                case op_add: kind = arithmetic_add; break;
-                case op_sub: kind = arithmetic_sub; break;
-                default: assert(false);
-            }
+            u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) {
                 instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
@@ -4734,7 +5257,13 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
 
             instruction_load_local(&context->bytecode, func, reg_rdx, op->binary.source, primitive_size);
 
-            instruction_arithmetic_reg_reg(&context->bytecode, kind, reg_rax, reg_rdx, primitive_size);
+            int kind;
+            switch (op->kind) {
+                case op_add: kind = instruction_add; break;
+                case op_sub: kind = instruction_sub; break;
+                default: assert(false);
+            }
+            instruction_general_reg_reg(&context->bytecode, kind, reg_rax, reg_rdx, primitive_size);
 
             if (op->binary.target.as_reference) {
                 instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
@@ -4746,15 +5275,61 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
         case op_mul:
         case op_div:
         {
+            u8 primitive_size = primitive_size_of(op->primitive);
+
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
             instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
             instruction_load_local(&context->bytecode, func, reg_rcx, op->binary.source, primitive_size);
 
-            bool mul = op->kind == op_mul;
-            instruction_mul_or_div_reg(&context->bytecode, mul, reg_rcx, primitive_size);
+            X64_Instruction_Unary kind;
+            switch (op->kind) {
+                case op_mul: kind = instruction_mul; break;
+                case op_div: kind = instruction_div; break;
+                default: assert(false);
+            }
+            instruction_general_reg(&context->bytecode, kind, reg_rcx, primitive_size);
 
             instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+        } break;
+
+        case op_eq:
+        case op_gt:
+        case op_gteq:
+        case op_lt:
+        case op_lteq:
+        {
+            u8 primitive_size = primitive_size_of(op->primitive);
+
+            if (op->binary.target.as_reference) {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_pointer(&context->bytecode, mov_from, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
+            }
+
+            instruction_load_local(&context->bytecode, func, reg_rdx, op->binary.source, primitive_size);
+
+            bool sign = primitive_is_signed(op->primitive); 
+            X64_Condition condition;
+            switch (op->kind) {
+                case op_eq:   condition = x64_condition_eq;     break;
+                case op_gt:   condition = x64_condition_gt;     break;
+                case op_gteq: condition = x64_condition_gteq;   break;
+                case op_lt:   condition = x64_condition_lt;     break;
+                case op_lteq: condition = x64_condition_lteq;   break;
+                default: assert(false);
+            }
+
+            instruction_general_reg_reg(&context->bytecode, instruction_cmp, reg_rax, reg_rdx, primitive_size);
+            instruction_setcc(&context->bytecode, condition, sign, reg_rax);
+
+            if (op->binary.target.as_reference) {
+                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+            }
+
         } break;
 
         case op_call: {
@@ -4827,20 +5402,46 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
 
             if (op->primitive != primitive_void) {
                 if (op->call.target.as_reference) unimplemented(); // TODO
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->call.target, primitive_size);
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->call.target, primitive_size_of(op->primitive));
             }
         } break;
 
         case op_cast: {
-            // TODO zero-extend for signed types!
+            if (primitive_is_signed(op->primitive) || primitive_is_signed(op->cast.old_primitive)) {
+                // TODO zero-extend for signed types!
+                unimplemented();
+            }
 
-            u8 new_size = primitive_size;
+            u8 new_size = primitive_size_of(op->primitive);
             u8 old_size = primitive_size_of(op->cast.old_primitive);
 
             if (new_size > old_size) {
                 if (op->cast.local.as_reference) unimplemented(); // TODO
                 instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->cast.local, old_size);
                 instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->cast.local, new_size);
+            }
+        } break;
+
+        case op_jump: {
+            instruction_load_local(&context->bytecode, func, reg_rcx, op->jump.condition, 1);
+            instruction_xor_reg_imm(&context->bytecode, reg_rcx, 1, 1);
+            instruction_zero_extend_8_to_64(&context->bytecode, reg_rcx);
+            i8* small_jump_size = instruction_jmp_rcx_zero(&context->bytecode);
+            u64 small_jump_from = buf_length(context->bytecode);
+            i32* big_jump_size = instruction_jmp_i32(&context->bytecode);
+            u64 small_jump_to = buf_length(context->bytecode);
+            u64 big_jump_from = small_jump_to;
+
+            *small_jump_size = (i8) (small_jump_to - small_jump_from);
+
+            if (op->jump.jump < 0) {
+                unimplemented(); // TODO reverse jumps require something else than the simple fixup scheme
+            } else {
+                Jump_Fixup fixup = {0};
+                fixup.skip_ops = op->jump.jump;
+                fixup.jump_size_location = big_jump_size;
+                fixup.jump_start = big_jump_from;
+                buf_push(context->jump_fixups, fixup);
             }
         } break;
 
@@ -4998,9 +5599,33 @@ void build_machinecode(Context* context) {
 
         // Write out operations
         for (u32 i = 0; i < func->body.op_count; i += 1) {
+            bool any_fixups_to_apply = false;
+            buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
+                if (fixup->skip_ops == U64_MAX) continue;
+
+                fixup->skip_ops -= 1;
+                any_fixups_to_apply |= fixup->skip_ops == 0;
+            }
+
             Op* op = &func->body.ops[i];
             machinecode_for_op(context, func, op);
+
+            if (any_fixups_to_apply) {
+                buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
+                    if (fixup->skip_ops != 0) continue;
+
+                    fixup->skip_ops = U64_MAX;
+                    u64 start = fixup->jump_start;
+                    u64 end = buf_length(context->bytecode);
+                    i64 jump = (i64) (end - start);
+                    assert(jump > 0 && jump < I32_MAX);
+                    *fixup->jump_size_location = (i32) jump;
+                }
+            }
         }
+
+        buf_foreach (Jump_Fixup, fixup, context->jump_fixups) assert(fixup->skip_ops == U64_MAX);
+        buf_clear(context->jump_fixups);
 
         // Pass output
         if (func->signature.has_output) {
@@ -5020,7 +5645,7 @@ void build_machinecode(Context* context) {
                 instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, output_local, operand_size);
             }
         } else {
-            instruction_arithmetic_reg_reg(&context->bytecode, arithmetic_xor, reg_rax, reg_rax, POINTER_SIZE);
+            instruction_general_reg_reg(&context->bytecode, instruction_xor, reg_rax, reg_rax, POINTER_SIZE);
         }
 
         // Reset stack
@@ -5834,7 +6459,7 @@ void print_executable_info(u8* path) {
 }
 
 void print_verbose_info(Context* context) {
-    printf("%u functions:\n", (u64) buf_length(context->funcs));
+    printf("\n%u functions:\n", (u64) buf_length(context->funcs));
     buf_foreach (Func, func, context->funcs) {
         u8* name = string_table_access(context->string_table, func->name);
         printf("  fn %s\n", name);
@@ -5854,11 +6479,7 @@ void print_verbose_info(Context* context) {
             printf("\n");
 
             printf("    Statements:\n");
-            for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
-                printf("      ");
-                print_stmt(context, func, stmt);
-                printf("\n");
-            }
+            print_stmts(context, func, func->body.first_stmt, 2);
         } else if (func->kind == func_kind_imported) {
             printf("    (Imported)\n");
         } else {
@@ -5874,11 +6495,11 @@ void main() {
     i64 start_time = perf_time();
 
     Context context = {0};
-    if (!build_ast(&context, "W:/asm2/code.txt")) return;
+    if (!build_ast(&context, "W:/asm2/code2.txt")) return;
     if (!typecheck(&context)) return;
-    //print_verbose_info(&context);
+    print_verbose_info(&context);
     build_intermediate(&context);
-    //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
+    eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
     if (!write_executable("out.exe", &context)) return;
 
@@ -5893,7 +6514,7 @@ void main() {
         printf("%u intermediate ops, %u bytes of machine code\n", total_ops, buf_length(context.bytecode));
     }
 
-    printf("Running generated executable:\n");
+    printf("\nRunning generated executable:\n");
     STARTUPINFO startup_info = {0};
     startup_info.size = sizeof(STARTUPINFO);
     PROCESSINFO process_info = {0};

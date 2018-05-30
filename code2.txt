@@ -1,0 +1,7 @@
+
+fn main() -> u8 {
+    output = 1;
+    if (true) {
+        output = 2;
+    }
+}
