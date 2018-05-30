@@ -12,9 +12,9 @@ fn main() -> u8 {
 
     var message: *u8 = &message_b;
     
-    #if (3*3 < 3 + 3) {
-    #    message = &message_a;
-    #} 
+    if (3*3 >= 3 + 3 + 3) {
+        message = &message_a;
+    } 
 
     var written: u32 = 0;
     var handle: u64 = GetStdHandle(4294967285);

@@ -607,19 +607,44 @@ void printf_integer(u64 value, u8 base) {
 
 // IO stuff
 
-bool read_entire_file(u8* file_name, u8** contents, u32* length) {
+typedef enum IO_Result {
+    io_ok = 0,
+
+    io_error,
+    io_not_found,
+    io_already_open,
+} IO_Result;
+
+u8* io_result_message(IO_Result result) {
+    switch (result) {
+        case io_ok:             return "Ok";
+        case io_error:          return "IO Error";
+        case io_not_found:      return "File not found";
+        case io_already_open:   return "File is open in another program";
+
+        default: {
+            assert(false);
+            return null;
+        }
+    }
+}
+
+IO_Result read_entire_file(u8* file_name, u8** contents, u32* length) {
     Handle file = CreateFileA(file_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
     if (file == INVALID_HANDLE_VALUE) {
         u32 error_code = GetLastError();
-        //printf("Couldn't open file \"%s\" for reading: %x\n", file_name, error_code);
-        return false;
+        switch (error_code) {
+            case 2:  return io_not_found;
+            default: return io_error;
+        }
     }
 
     i64 file_size;
     if (!GetFileSizeEx(file, &file_size)) {
         u32 error_code = GetLastError();
-        //printf("Couldn't get file size for \"%s\": %x\n", file_name, error_code);
-        return false;
+        switch (error_code) {
+            default: return io_error;
+        }
     }
 
     *contents = alloc(file_size);
@@ -627,39 +652,44 @@ bool read_entire_file(u8* file_name, u8** contents, u32* length) {
     u32 read = 0;
     i32 success = ReadFile(file, *contents, file_size, &read, null);
     if (!success || read != file_size) {
-        u32 error_code = GetLastError();
-        //printf("Couldn't read from \"%s\": %x\n", file_name, error_code);
         free(*contents);
         *contents = null;
-        return false;
+
+        u32 error_code = GetLastError();
+        switch (error_code) {
+            default: return io_error;
+        }
     }
 
     *length = file_size;
 
     CloseHandle(file);
 
-    return true;
+    return io_ok;
 }
 
-bool write_entire_file(u8* file_name, u8* contents, u32 length) {
+IO_Result write_entire_file(u8* file_name, u8* contents, u32 length) {
     Handle file = CreateFileA(file_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
     if (file == INVALID_HANDLE_VALUE) {
         u32 error_code = GetLastError();
-        //printf("Couldn't create/open file \"%s\" for writing: %x\n", file_name, error_code);
-        return false;
+        switch (error_code) {
+            case 32: return io_already_open;
+            default: return io_error;
+        }
     }
 
     u32 written = 0;
     i32 success = WriteFile(file, contents, length, &written, null);
     if (!success || written != length) {
         u32 error_code = GetLastError();
-        //printf("Couldn't write to file \"%s\": %x", file_name, error_code);
-        return false;
+        switch (error_code) {
+            default: return io_error;
+        }
     }
 
     CloseHandle(file);
 
-    return true;
+    return io_ok;
 }
 
 
@@ -2846,8 +2876,10 @@ bool parse_extern(Context* context, Token* t, u32* length) {
 bool build_ast(Context* context, u8* path) {
     u8* file;
     u32 file_length;
-    if (!read_entire_file(path, &file, &file_length)) {
-        printf("Couldn't load %s\n", path);
+
+    IO_Result read_result = read_entire_file(path, &file, &file_length);
+    if (read_result != io_ok) {
+        printf("Couldn't load \"%s\": %s\n", path, io_result_message(read_result));
         return false;
     }
 
@@ -3088,7 +3120,7 @@ bool build_ast(Context* context, u8* path) {
             for (; i < file_length; i += 1) {
                 if (file[i] == '\n' || file[i] == '\r') {
                     valid = false;
-                    printf("Strings can not span multiple lines (Line %u)\n", (u64) file_pos.line);
+                    printf("Strings can't span multiple lines (Line %u)\n", (u64) file_pos.line);
                     break;
                 }
 
@@ -3186,7 +3218,7 @@ bool build_ast(Context* context, u8* path) {
             } else if (func->kind != func_kind_normal) {
                 u8* name = string_table_access(context->string_table, func->name);
                 printf(
-                    "Function %s does not have a body. Functions without bodies can only be inside 'extern' blocks (Line %u)\n",
+                    "Function %s doesn't have a body. Functions without bodies can only be inside 'extern' blocks (Line %u)\n",
                     name, (u64) t->pos.line
                 );
                 valid = false;
@@ -3372,7 +3404,7 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                         );
                     } else {
                         printf(
-                            "Can't use variable %s on line %u, as it is not in scope\n",
+                            "Can't use variable %s on line %u, as it isn't in scope\n",
                             var_name, use_line
                         );
                     }
@@ -5871,8 +5903,10 @@ bool parse_library(Context* context, Library_Import* import) {
 
     u8* file;
     u32 file_length;
-    if (!read_entire_file(path, &file, &file_length)) {
-        printf("Couldn't open \"%s\"\n", path);
+
+    IO_Result read_result = read_entire_file(path, &file, &file_length);
+    if (read_result != io_ok) {
+        printf("Couldn't open \"%s\": %s\n", path, io_result_message(read_result));
         return false;
     }
 
@@ -5991,7 +6025,7 @@ bool parse_library(Context* context, Library_Import* import) {
     for (u32 i = 0; i < buf_length(import->function_names); i += 1) {
         if (import->function_hints[i] == U32_MAX) {
             u8* name = string_table_access(context->string_table, import->function_names[i]);
-            printf("Could not find %s in \"%s\"\n", name, path);
+            printf("Couldn't find %s in \"%s\"\n", name, path);
             return false;
         }
     }
@@ -6282,9 +6316,11 @@ bool write_executable(u8* path, Context* context) {
     mem_copy(pdata,    output_file + pdata_file_start, pdata_length);
     mem_copy(idata,    output_file + idata_file_start, idata_length);
 
-    bool success = write_entire_file(path, output_file, file_image_size);
-    // TODO proper error handling for file write failure
-    assert(success);
+    IO_Result result = write_entire_file(path, output_file, file_image_size);
+    if (result != io_ok) {
+        printf("Couldn't write \"%s\": %s\n", path, io_result_message(result));
+        return false;
+    }
 
     buf_free(idata);
 
@@ -6299,8 +6335,9 @@ void print_executable_info(u8* path) {
 
     u8* file;
     u32 file_length;
-    if (!read_entire_file(path, &file, &file_length)) {
-        printf("Couldn't load %s\n", path);
+    IO_Result result = read_entire_file(path, &file, &file_length);
+    if (result != io_ok) {
+        printf("Couldn't load \"%s\": %s\n", path, io_result_message(result));
         return;
     }
 
@@ -6495,11 +6532,11 @@ void main() {
     i64 start_time = perf_time();
 
     Context context = {0};
-    if (!build_ast(&context, "W:/asm2/code2.txt")) return;
+    if (!build_ast(&context, "W:/asm2/code.txt")) return;
     if (!typecheck(&context)) return;
     print_verbose_info(&context);
     build_intermediate(&context);
-    eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
+    //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
     if (!write_executable("out.exe", &context)) return;
 
