@@ -2014,6 +2014,31 @@ void shunting_yard_push_prefix_for_next_expr(Shunting_Yard* yard, Expr* prefix, 
     yard->prefix_insert_slot = slot;
 }
 
+void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* index) {
+    assert(yard->prefix == null);
+    assert(yard->expr_queue_index > 0);
+
+    Expr** array = &yard->expr_queue[yard->expr_queue_index - 1];
+
+    while (1) {
+        bool done = false;
+        switch ((*array)->kind) {
+            case expr_address_of:  array = &((*array)->address_from);      break;
+            case expr_dereference: array = &((*array)->dereference_from);  break;
+            default: done = true; break;
+        }
+        if (done) break;
+    }
+
+    Expr* expr = arena_new(&context->arena, Expr);
+    expr->kind = expr_subscript;
+    expr->subscript.array = *array;
+    expr->subscript.index = index;
+    expr->pos = expr->subscript.array->pos;
+
+    *array = expr;
+}
+
 void shunting_yard_push_expr(Context* context, Shunting_Yard* yard, Expr* new_expr) {
     if (yard->prefix != null) {
         *yard->prefix_insert_slot = new_expr;
@@ -2144,8 +2169,9 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expect_value = false;
                     t += 1;
 
-                    // Function call
+                    // Function call or cast
                     if (t->kind == token_bracket_round_open) {
+                        File_Pos start_pos = t->pos;
                         t += 1;
 
                         Expr_List* param_list = null;
@@ -2192,15 +2218,51 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         }
                         t += 1;
 
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->kind = expr_call;
-                        expr->call.unresolved_name = name_index;
-                        expr->flags |= EXPR_FLAG_UNRESOLVED;
-                        expr->call.params = param_list_head;
-                        expr->call.param_count = param_count;
 
-                        shunting_yard_push_expr(context, yard, expr);
-                        could_parse = true;
+                        Primitive cast_to_primitive = primitive_invalid;
+                        for (u32 i = 0; i < PRIMITIVE_COUNT; i += 1) {
+                            if (name_index == context->primitive_names[i]) {
+                                cast_to_primitive = i;
+                                break;
+                            }
+                        }
+
+                        if (cast_to_primitive != primitive_invalid) {
+                            if (param_count != 1) {
+                                printf(
+                                    "Expected 1 parameter for cast to %s, but got %u (Line %u)\n",
+                                    primitive_name(cast_to_primitive), (u64) param_count, (u64) start_pos.line
+                                );
+                                *length = t - t_start;
+                                return null;
+                            }
+
+                            if (!(cast_to_primitive >= primitive_u8 && cast_to_primitive <= primitive_i64)) {
+                                printf("Can't cast to %s (Line %u)\n", primitive_name(cast_to_primitive), (u64) start_pos.line);
+                                *length = t - t_start;
+                                return null;
+                            }
+
+                            Expr* expr = arena_new(&context->arena, Expr);
+                            expr->pos = start_pos;
+                            expr->kind = expr_cast;
+                            expr->cast_from = param_list_head->expr;
+                            expr->type_index = cast_to_primitive;
+
+                            shunting_yard_push_expr(context, yard, expr);
+                            could_parse = true;
+                        } else {
+                            Expr* expr = arena_new(&context->arena, Expr);
+                            expr->pos = start_pos;
+                            expr->kind = expr_call;
+                            expr->call.unresolved_name = name_index;
+                            expr->flags |= EXPR_FLAG_UNRESOLVED;
+                            expr->call.params = param_list_head;
+                            expr->call.param_count = param_count;
+
+                            shunting_yard_push_expr(context, yard, expr);
+                            could_parse = true;
+                        }
                     
                     // Structure literal
                     } else if (t->kind == token_bracket_curly_open) {
@@ -2386,7 +2448,27 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
         } else {
             switch (t->kind) {
                 case token_bracket_square_open: {
-                    unimplemented(); // TODO array subscript
+                    t += 1;
+
+                    u32 index_length = 0;
+                    Expr* index = parse_expr(context, t, &index_length);
+                    t += index_length;
+
+                    if (index == null) {
+                        *length = t - t_start;
+                        return null;
+                    }
+
+                    if (!expect_single_token(context, t, token_bracket_square_close, "after subscript index")) {
+                        *length = t - t_start;
+                        return null;
+                    }
+                    t += 1;
+
+                    shunting_yard_push_subscript(context, yard, index);
+
+                    expect_value = false;
+                    could_parse = true;
                 } break;
 
                 // End of expression
@@ -4023,17 +4105,6 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 u32 child_type_index = expr->type_index + 1 + sizeof(u64);
                 u64 stride = type_size_of(context, child_type_index);
 
-                /*
-                Local element_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
-                element_pointer.as_reference = false;
-
-                Op op = {0};
-                op.kind = op_set;
-                op.primitive = primitive_pointer;
-                op.binary.source = (Local) { assign_to.kind, false, assign_to.value };
-                op.binary.target = element_pointer;
-                buf_push(context->tmp_ops, op);
-                */
                 Local element_pointer = assign_to;
 
                 bool first = true;
@@ -4041,12 +4112,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     element_pointer.as_reference = false;
 
                     if (!first) {
-                        Op op = {0};
-                        op.kind = op_add;
-                        op.primitive = primitive_pointer;
-                        op.binary.source = (Local) { local_literal, false, stride };
-                        op.binary.target = element_pointer;
-                        buf_push(context->tmp_ops, op);
+                        buf_push(context->tmp_ops, ((Op) {
+                            .kind = op_add,
+                            .primitive = primitive_pointer,
+                            .binary = { (Local) { local_literal, false, stride }, element_pointer }
+                        }));
                     }
                     first = false;
 
@@ -4055,7 +4125,14 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     linearize_expr(context, node->expr, element_pointer, false);
                 }
 
-                //intermediate_deallocate_temporary(context, element_pointer);
+                u64 negative_offset = stride * (expr->compound_literal.count - 1);
+
+                element_pointer.as_reference = false;
+                buf_push(context->tmp_ops, ((Op) {
+                    .kind = op_sub,
+                    .primitive = primitive_pointer,
+                    .binary = { (Local) { local_literal, false, negative_offset }, element_pointer },
+                }));
             } else {
                 assert(false);
             }
@@ -4618,7 +4695,7 @@ u8* eval_get_local(Eval_Stack_Frame* frame, Local local, bool allow_literal) {
 
     u8* pointer = frame->local_data + item->offset;
     if (local.as_reference) {
-        assert(item->size == POINTER_SIZE);
+        assert(item->size >= POINTER_SIZE);
         pointer = (void*) *((u64*) pointer);
     }
 
@@ -4845,7 +4922,7 @@ void eval_ops(Context* context) {
                         u32 var_index = callee->signature.params[p].var_index;
                         Local into_variable = { local_variable, false, var_index };
 
-                        u8* our = eval_get_local(frame, param, false);
+                        u8* our = eval_get_local(frame, param, true);
                         u8* their = eval_get_local(next_frame, into_variable, false);
                         mem_copy(our, their, param_size);
                     }
@@ -5625,8 +5702,12 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
             #endif
 
             if (op->primitive != primitive_void) {
-                if (op->call.target.as_reference) unimplemented(); // TODO
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->call.target, primitive_size_of(op->primitive));
+                if (op->call.target.as_reference) {
+                    instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->call.target, POINTER_SIZE);
+                    instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size_of(op->primitive));
+                } else {
+                    instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->call.target, primitive_size_of(op->primitive));
+                }
             }
         } break;
 
@@ -6732,7 +6813,7 @@ void main() {
     Context context = {0};
     if (!build_ast(&context, "W:/asm2/code.txt")) return;
     if (!typecheck(&context)) return;
-    print_verbose_info(&context);
+    //print_verbose_info(&context);
     build_intermediate(&context);
     //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
