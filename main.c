@@ -1646,10 +1646,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             print_type(context, expr->type_index);
             printf(" { ");
             bool first = true;
-            for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
+            for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
                 if (!first) printf(", ");
                 first = false;
-                print_expr(context, func, list->expr);
+                print_expr(context, func, node->expr);
             }
             printf(" }");
         } break;
@@ -1674,10 +1674,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
 
             printf("(");
             bool first = true;
-            for (Expr_List* list = expr->call.params; list != null; list = list->next) {
+            for (Expr_List* node = expr->call.params; node != null; node = node->next) {
                 if (!first) printf(", ");
                 first = false;
-                print_expr(context, func, list->expr);
+                print_expr(context, func, node->expr);
             }
             printf(")");
         } break;
@@ -3424,8 +3424,8 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                     return false;
                 }
 
-                for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
-                    Expr* child = list->expr;
+                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
+                    Expr* child = node->expr;
                     if (!typecheck_expr(context, func, scope, child, expected_child_type_index)) {
                         return false;
                     }
@@ -4023,6 +4023,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 u32 child_type_index = expr->type_index + 1 + sizeof(u64);
                 u64 stride = type_size_of(context, child_type_index);
 
+                /*
                 Local element_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
                 element_pointer.as_reference = false;
 
@@ -4032,9 +4033,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 op.binary.source = (Local) { assign_to.kind, false, assign_to.value };
                 op.binary.target = element_pointer;
                 buf_push(context->tmp_ops, op);
+                */
+                Local element_pointer = assign_to;
 
                 bool first = true;
-                for (Expr_List* list = expr->compound_literal.content; list != null; list = list->next) {
+                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
                     element_pointer.as_reference = false;
 
                     if (!first) {
@@ -4049,10 +4052,10 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
                     element_pointer.as_reference = true;
 
-                    linearize_expr(context, list->expr, element_pointer, false);
+                    linearize_expr(context, node->expr, element_pointer, false);
                 }
 
-                intermediate_deallocate_temporary(context, element_pointer);
+                //intermediate_deallocate_temporary(context, element_pointer);
             } else {
                 assert(false);
             }
@@ -4070,9 +4073,23 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             linearize_expr(context, expr->binary.left, assign_to, false);
 
-            u64 right_size = type_size_of(context, expr->binary.right->type_index);
-            Local right_local = intermediate_allocate_temporary(context, right_size);
-            linearize_expr(context, expr->binary.right, right_local, false);
+            Local right_local;
+            switch (expr->binary.right->kind) {
+                case expr_literal: {
+                    right_local = (Local) { local_literal, false, expr->binary.right->literal.value};
+                } break;
+
+                case expr_variable: {
+                    right_local = (Local) { local_variable, false, expr->binary.right->variable.index };
+                } break;
+
+                default: {
+                    u64 right_size = type_size_of(context, expr->binary.right->type_index);
+                    right_local = intermediate_allocate_temporary(context, right_size);
+                    linearize_expr(context, expr->binary.right, right_local, false);
+                } break;
+            }
+
 
             Op op = {0};
 
@@ -4118,7 +4135,9 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             buf_push(context->tmp_ops, op);
 
-            intermediate_deallocate_temporary(context, right_local);
+            if (right_local.kind == local_temporary) {
+                intermediate_deallocate_temporary(context, right_local);
+            }
         } break;
 
         case expr_call: {
@@ -4127,12 +4146,27 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             Op_Call_Param* call_params = (Op_Call_Param*) arena_alloc(&context->arena, sizeof(Op_Call_Param) * expr->call.param_count);
 
             u32 p = 0;
-            for (Expr_List* param_expr = expr->call.params; param_expr != null; param_expr = param_expr->next) {
-                u64 param_size = type_size_of(context, param_expr->expr->type_index);
+            for (Expr_List* node = expr->call.params; node != null; node = node->next) {
+                Expr* expr = node->expr;
+
+                u64 param_size = type_size_of(context, expr->type_index);
                 if (param_size > 8) unimplemented(); // TODO by-reference semantics
 
-                Local local = intermediate_allocate_temporary(context, param_size);
-                linearize_expr(context, param_expr->expr, local, false);
+                Local local;
+                switch (expr->kind) {
+                    case expr_literal: {
+                        local = (Local) { local_literal, false, expr->literal.value};
+                    } break;
+
+                    case expr_variable: {
+                        local = (Local) { local_variable, false, expr->variable.index };
+                    } break;
+
+                    default: {
+                        local = intermediate_allocate_temporary(context, param_size);
+                        linearize_expr(context, expr, local, false);
+                    } break;
+                }
 
                 call_params[p].size = param_size;
                 call_params[p].local = local;
@@ -4148,7 +4182,9 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             buf_push(context->tmp_ops, op);
 
             for (u32 i = 0; i < expr->call.param_count; i += 1) {
-                intermediate_deallocate_temporary(context, call_params[i].local);
+                if (call_params[i].local.kind == local_temporary) {
+                    intermediate_deallocate_temporary(context, call_params[i].local);
+                }
             }
         } break;
 
@@ -4259,6 +4295,50 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
     }
 }
 
+bool linearize_assignment_needs_temporary(Expr* expr, u32 var_index) {
+    switch (expr->kind) {
+        case expr_variable: {
+            return !(expr->flags & EXPR_FLAG_UNRESOLVED) && expr->variable.index == var_index;
+        } break;
+
+        case expr_compound_literal: {
+            for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
+                if (linearize_assignment_needs_temporary(node->expr, var_index)) return true;
+            }
+        } break;
+
+        case expr_binary: {
+            return linearize_assignment_needs_temporary(expr->binary.left, var_index) ||
+                   linearize_assignment_needs_temporary(expr->binary.right, var_index);
+        } break;
+
+        case expr_call: {
+            for (Expr_List* node = expr->call.params; node != null; node = node->next) {
+                if (linearize_assignment_needs_temporary(node->expr, var_index)) return true;
+            }
+        } break;
+
+        case expr_cast: {
+            return linearize_assignment_needs_temporary(expr->cast_from, var_index);
+        } break;
+
+        case expr_address_of: {
+            return linearize_assignment_needs_temporary(expr->address_from, var_index);
+        } break;
+
+        case expr_dereference: {
+            return linearize_assignment_needs_temporary(expr->dereference_from, var_index);
+        } break;
+
+        case expr_subscript: {
+            return linearize_assignment_needs_temporary(expr->subscript.array, var_index) ||
+                   linearize_assignment_needs_temporary(expr->subscript.index, var_index);
+        } break;
+    }
+
+    return false;
+}
+
 void linearize_assignment(Context* context, Expr* left, Expr* right) {
     assert(left->flags & EXPR_FLAG_ASSIGNABLE);
 
@@ -4273,11 +4353,10 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
             if (use_pointer_to_right) {
                 pointer_to_right_data_local = intermediate_allocate_temporary(context, POINTER_SIZE);
 
-                Op op = {0};
-                op.kind = op_address_of;
-                op.binary.source = right_data_local;
-                op.binary.target = pointer_to_right_data_local;
-                buf_push(context->tmp_ops, op);
+                buf_push(context->tmp_ops, ((Op) {
+                    .kind = op_address_of,
+                    .binary = { right_data_local, pointer_to_right_data_local }
+                }));
 
                 pointer_to_right_data_local.as_reference = true;
                 right_local = pointer_to_right_data_local;
@@ -4301,42 +4380,68 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
         } break;
 
         case expr_variable: {
+            assert(!(left->flags & EXPR_FLAG_UNRESOLVED));
+
             Primitive left_primitive = context->type_buf[left->type_index];
             u64 operand_size = type_size_of(context, left->type_index);
 
+            bool needs_temporary = linearize_assignment_needs_temporary(right, left->variable.index);
+
             if (primitive_is_compound(left_primitive)) {
                 if (left_primitive == primitive_array) {
-                    Local temporary_local = intermediate_allocate_temporary(context, operand_size);
-                    Local pointer_to_temporary_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
+                    if (needs_temporary) {
+                        Local tmp_local = intermediate_allocate_temporary(context, operand_size);
+                        Local pointer_to_tmp_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
 
-                    buf_push(context->tmp_ops, ((Op) {
-                        .kind = op_address_of,
-                        .binary = {
-                            .source = temporary_local,
-                            .target = pointer_to_temporary_local,
-                        },
-                    }));
-                    pointer_to_temporary_local.as_reference = true;
+                        buf_push(context->tmp_ops, ((Op) {
+                            .kind = op_address_of,
+                            .binary = { tmp_local, pointer_to_tmp_local },
+                        }));
 
-                    linearize_expr(context, right, pointer_to_temporary_local, false);
+                        {
+                            Local tmp_pointer  = intermediate_allocate_temporary(context, POINTER_SIZE);
+                            buf_push(context->tmp_ops, ((Op) {
+                                .kind = op_set,
+                                .primitive = primitive_pointer,
+                                .binary = { pointer_to_tmp_local, tmp_pointer },
+                            }));
+                            tmp_pointer.as_reference = true;
+                            linearize_expr(context, right, tmp_pointer, false);
+                            intermediate_deallocate_temporary(context, tmp_pointer);
+                        }
 
-                    Local variable_local = { local_variable, false, left->variable.index };
-                    Local pointer_to_variable_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
+                        Local variable_local = { local_variable, false, left->variable.index };
+                        Local pointer_to_variable_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
 
-                    buf_push(context->tmp_ops, ((Op) {
-                        .kind = op_address_of,
-                        .binary = {
-                            .source = variable_local,
-                            .target = pointer_to_variable_local,
-                        },
-                    }));
-                    pointer_to_variable_local.as_reference = true;
+                        buf_push(context->tmp_ops, ((Op) {
+                            .kind = op_address_of,
+                            .binary = {
+                                .source = variable_local,
+                                .target = pointer_to_variable_local,
+                            },
+                        }));
 
-                    intermediate_write_compound_set(context, pointer_to_temporary_local, pointer_to_variable_local, left->type_index);
+                        pointer_to_tmp_local.as_reference = true;
+                        pointer_to_variable_local.as_reference = true;
+                        intermediate_write_compound_set(context, pointer_to_tmp_local, pointer_to_variable_local, left->type_index);
 
-                    intermediate_deallocate_temporary(context, temporary_local);
-                    intermediate_deallocate_temporary(context, pointer_to_temporary_local);
-                    intermediate_deallocate_temporary(context, pointer_to_variable_local);
+                        intermediate_deallocate_temporary(context, tmp_local);
+                        intermediate_deallocate_temporary(context, pointer_to_tmp_local);
+                        intermediate_deallocate_temporary(context, pointer_to_variable_local);
+                    } else {
+                        Local variable_local = { local_variable, false, left->variable.index };
+                        Local pointer_to_variable_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
+
+                        buf_push(context->tmp_ops, ((Op) {
+                            .kind = op_address_of,
+                            .binary = { variable_local, pointer_to_variable_local },
+                        }));
+                        pointer_to_variable_local.as_reference = true;
+
+                        linearize_expr(context, right, pointer_to_variable_local, false);
+
+                        intermediate_deallocate_temporary(context, pointer_to_variable_local);
+                    }
                 } else {
                     assert(false);
                 }
@@ -4344,13 +4449,16 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
             } else {
                 assert(operand_size <= POINTER_SIZE);
 
-                Local temporary_local = intermediate_allocate_temporary(context, operand_size);
                 Local variable_local = { local_variable, false, left->variable.index };
 
-                linearize_expr(context, right, temporary_local, false);
-                intermediate_write_compound_set(context, temporary_local, variable_local, left->type_index);
-
-                intermediate_deallocate_temporary(context, temporary_local);
+                if (needs_temporary) {
+                    Local tmp_local = intermediate_allocate_temporary(context, operand_size);
+                    linearize_expr(context, right, tmp_local, false);
+                    intermediate_write_compound_set(context, tmp_local, variable_local, left->type_index);
+                    intermediate_deallocate_temporary(context, tmp_local);
+                } else {
+                    linearize_expr(context, right, variable_local, false);
+                }
             }
         } break;
 
@@ -5470,13 +5578,7 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
                     default: reg = reg_rax; break;
                 }
 
-                if (local.kind == local_literal) {
-                    unimplemented(); // TODO
-                } else if (local.as_reference) {
-                    unimplemented(); // TODO
-                } else {
-                    instruction_mov_stack(&context->bytecode, func, mov_from, reg, local, size);
-                }
+                instruction_load_local(&context->bytecode, func, reg, local, size);
 
                 if (p >= 4) {
                     u32 offset = POINTER_SIZE * p;
@@ -6621,7 +6723,6 @@ void print_verbose_info(Context* context) {
         }
     }
 }
-
 
 void main() {
     //print_executable_info("build/tiny.exe");
