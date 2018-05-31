@@ -2,25 +2,6 @@
 
 if not exist build mkdir build
 
-REM cl /nologo /c /WX^
-REM     /GS- /Gs9999999^
-REM     /Od^
-REM     /Zi^
-REM     /Fd"build\tiny.pdb"^
-REM     /Fo"build\tiny.obj"^
-REM     tiny.c^
-REM  &&^
-REM link /nologo^
-REM     /nodefaultlib /subsystem:console^
-REM     /stack:0x100000,0x100000^
-REM     /debug^
-REM     /incremental:no^
-REM     /entry:main^
-REM     /out:"build\tiny.exe"^
-REM     build\tiny.obj kernel32.lib^
-REM  &&^
-REM build\tiny.exe
-
 set DEBUG_VAR="NODEBUG"
 if "%1"=="debug" set DEBUG_VAR="DEBUG"
 

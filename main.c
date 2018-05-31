@@ -44,9 +44,9 @@ void printf_flush();
 #define trap_or_exit()   (ExitProcess(-1))
 #endif
 
-#define assert(x)        ((x)? (null) : (printf("assert(%s) failed, %s:%u\n", #x, __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null))
-#define panic(x, ...)    (printf("Panic at %s:%u: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
-#define unimplemented()  (printf("Reached unimplemented code at %s:%u\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
+#define assert(x)        ((x)? (null) : (printf("(%s:%u) assert(%s)\n", __FILE__, (u64) __LINE__, #x), printf_flush(), trap_or_exit(), null))
+#define panic(x, ...)    (printf("(%s:%u) Panic: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
+#define unimplemented()  (printf("(%s:%u) Reached unimplemented code\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
 
 void main();
 void program_entry() {
@@ -1098,7 +1098,8 @@ struct Stmt {
         stmt_assignment,
 
         stmt_block,
-        stmt_conditional,
+        stmt_if,
+        stmt_loop,
     } kind;
 
     union {
@@ -1123,6 +1124,11 @@ struct Stmt {
             Stmt* then;
             Stmt* else_then;
         } conditional;
+
+        struct {
+            Expr* condition;
+            Stmt* body;
+        } loop;
     };
 
     File_Pos pos;
@@ -1202,7 +1208,7 @@ typedef struct Op {
         struct {
             bool conditional;
             Local condition;
-            i64 jump;
+            u32 to_op;
         } jump;
 
         struct {
@@ -1211,6 +1217,8 @@ typedef struct Op {
             u32 var_index;
         } member;
     };
+
+    u32 bytecode_start;
 } Op;
 
 typedef struct Tmp {
@@ -1274,9 +1282,8 @@ typedef struct Call_Fixup {
 } Call_Fixup;
 
 typedef struct Jump_Fixup {
-    u64 skip_ops;
-    i32* jump_size_location; // write actual jump size into here
-    u64 jump_start;
+    u32 from_op, to_op;
+    u64 text_location; // 'i32' at this location
 } Jump_Fixup;
 
 
@@ -1748,7 +1755,7 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             printf("}");
         } break;
 
-        case stmt_conditional: {
+        case stmt_if: {
             printf("if (");
             print_expr(context, func, stmt->conditional.condition);
             printf(") {\n");
@@ -1766,6 +1773,21 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
                 for (u32 i = 0; i < indent_level; i += 1) printf("    ");
                 printf("}");
             }
+        } break;
+
+        case stmt_loop: {
+            if (stmt->loop.condition != null) {
+                printf("for (");
+                print_expr(context, func, stmt->loop.condition);
+                printf(") {\n");
+            } else {
+                printf("for {\n");
+            }
+
+            print_stmts(context, func, stmt->loop.body, indent_level + 1);
+
+            for (u32 i = 0; i < indent_level; i += 1) printf("    ");
+            printf("}");
         } break;
 
         default: assert(false);
@@ -1872,9 +1894,12 @@ void print_op(Context* context, Func* func, Op* op) {
         } break;
 
         case op_jump: {
-            printf("jump if ");
-            print_local(context, func, op->jump.condition);
-            printf(" by %i", op->jump.jump);
+            printf("jump");
+            if (op->jump.conditional) {
+                printf("if ");
+                print_local(context, func, op->jump.condition);
+            }
+            printf(" to %u", (u64) op->jump.to_op);
         } break;
 
         default: assert(false);
@@ -1909,6 +1934,61 @@ Primitive parse_primitive_name(Context* context, u32 name_index) {
     }
 
     return primitive_invalid;
+}
+
+bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
+    u8* token_name = null;
+    switch (kind) {
+        case token_bracket_round_open:   token_name = "opening parenthesis '('"; break;
+        case token_bracket_round_close:  token_name = "closing parenthesis ')'"; break;
+        case token_bracket_square_open:  token_name = "opening square bracket '['"; break;
+        case token_bracket_square_close: token_name = "closing square bracket ']'"; break;
+        case token_bracket_curly_open:   token_name = "opening curly brace '{'"; break;
+        case token_bracket_curly_close:  token_name = "closing curly brace '}'"; break;
+
+        case token_semicolon: token_name = "semicolon ';'"; break;
+        case token_comma:     token_name = "comma ','"; break;
+        case token_colon:     token_name = "colon ':'"; break;
+
+        case token_add: token_name = "+"; break;
+        case token_sub: token_name = "-"; break;
+        case token_mul: token_name = "*"; break;
+        case token_div: token_name = "/"; break;
+        case token_and: token_name = "&"; break;
+
+        case token_greater:             token_name = ">"; break;
+        case token_greater_or_equal:    token_name = ">="; break;
+        case token_less:                token_name = "<"; break;
+        case token_less_or_equal:       token_name = "<="; break;
+        case token_assign:              token_name = "="; break;
+        case token_equal:               token_name = "=="; break;
+        case token_arrow:               token_name = "->"; break;
+
+        case token_keyword_extern: token_name = "extern"; break;
+        case token_keyword_var:    token_name = "var"; break;
+        case token_keyword_fn:     token_name = "fn"; break;
+        case token_keyword_null:   token_name = "null"; break;
+        case token_keyword_if:     token_name = "if"; break;
+        case token_keyword_else:   token_name = "else"; break;
+        case token_keyword_for:    token_name = "for"; break;
+        case token_keyword_true:   token_name = "true"; break;
+        case token_keyword_false:  token_name = "false"; break;
+
+        // These don't realy make sense, they require special parsing
+        case token_identifier: unimplemented(); break;
+        case token_literal:    unimplemented(); break;
+        case token_string:     unimplemented(); break;
+        default: assert(false);
+    }
+
+    if (t->kind != kind) {
+        printf("Expected %s %s, but got ", token_name, location);
+        print_token(context->string_table, t);
+        printf(" (Line %u)\n", (u64) t->pos.line);
+        return false;
+    } else {
+        return true;
+    }
 }
 
 u32 parse_type(Context* context, Token* t, u32* length) {
@@ -2089,61 +2169,6 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
     assert(yard->op_queue_index < yard->op_queue_size);
     yard->op_queue[yard->op_queue_index] = new_op;
     yard->op_queue_index += 1;
-}
-
-bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
-    u8* token_name = null;
-    switch (kind) {
-        case token_bracket_round_open:   token_name = "opening parenthesis '('"; break;
-        case token_bracket_round_close:  token_name = "closing parenthesis ')'"; break;
-        case token_bracket_square_open:  token_name = "opening square bracket '['"; break;
-        case token_bracket_square_close: token_name = "closing square bracket ']'"; break;
-        case token_bracket_curly_open:   token_name = "opening curly brace '{'"; break;
-        case token_bracket_curly_close:  token_name = "closing curly brace '}'"; break;
-
-        case token_semicolon: token_name = "semicolon ';'"; break;
-        case token_comma:     token_name = "comma ','"; break;
-        case token_colon:     token_name = "colon ':'"; break;
-
-        case token_add: token_name = "+"; break;
-        case token_sub: token_name = "-"; break;
-        case token_mul: token_name = "*"; break;
-        case token_div: token_name = "/"; break;
-        case token_and: token_name = "&"; break;
-
-        case token_greater:             token_name = ">"; break;
-        case token_greater_or_equal:    token_name = ">="; break;
-        case token_less:                token_name = "<"; break;
-        case token_less_or_equal:       token_name = "<="; break;
-        case token_assign:              token_name = "="; break;
-        case token_equal:               token_name = "=="; break;
-        case token_arrow:               token_name = "->"; break;
-
-        case token_keyword_extern: token_name = "extern"; break;
-        case token_keyword_var:    token_name = "var"; break;
-        case token_keyword_fn:     token_name = "fn"; break;
-        case token_keyword_null:   token_name = "null"; break;
-        case token_keyword_if:     token_name = "if"; break;
-        case token_keyword_else:   token_name = "else"; break;
-        case token_keyword_for:    token_name = "for"; break;
-        case token_keyword_true:   token_name = "true"; break;
-        case token_keyword_false:  token_name = "false"; break;
-
-        // These don't realy make sense, they require special parsing
-        case token_identifier: unimplemented(); break;
-        case token_literal:    unimplemented(); break;
-        case token_string:     unimplemented(); break;
-        default: assert(false);
-    }
-
-    if (t->kind != kind) {
-        printf("Expected %s %s, but got ", token_name, location);
-        print_token(context->string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
-        return false;
-    } else {
-        return true;
-    }
 }
 
 Expr* parse_expr(Context* context, Token* t, u32* length) {
@@ -2584,7 +2609,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
         Stmt* if_stmt = stmt;
 
         while (1) {
-            if_stmt->kind = stmt_conditional;
+            if_stmt->kind = stmt_if;
 
             t += 1;
 
@@ -2640,7 +2665,51 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
 
     // Control flow - for
     } else if (t->kind == token_keyword_for) {
-        unimplemented(); // TODO
+        t += 1;
+
+        switch (t->kind) {
+            // Infinite loop
+            case '{': {
+                u32 body_length = 0;
+                Stmt* body = parse_basic_block(context, t, &body_length);
+                t += body_length;
+                if (body == null) return null;
+
+                stmt->kind = stmt_loop;
+                stmt->loop.condition = null;
+                stmt->loop.body = body;
+            } break;
+
+            case '(': {
+                t += 1;
+
+                u32 first_length = 0;
+                Expr* first = parse_expr(context, t, &first_length);
+                t += first_length;
+                if (first == null) return null;
+                
+                // TODO for-each and c-style loops
+
+                if (!expect_single_token(context, t, ')', "after loop condition")) return null;
+                t += 1;
+
+                u32 body_length = 0;
+                Stmt* body = parse_basic_block(context, t, &body_length);
+                t += body_length;
+                if (body == null) return null;
+
+                stmt->kind = stmt_loop;
+                stmt->loop.condition = first;
+                stmt->loop.body = body;
+            } break;
+
+            default: {
+                printf("Expected opening parenthesis '(' or curly brace '{' after for, but got ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", t->pos.line);
+                return null;
+            } break;
+        }
 
     // Variable declaration
     } else if (t->kind == token_keyword_var) {
@@ -3863,7 +3932,7 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
             }
         } break;
 
-        case stmt_conditional: {
+        case stmt_if: {
             if (!typecheck_expr(context, func, scope, stmt->conditional.condition, primitive_bool)) return false;
 
             Primitive condition_primitive = context->type_buf[stmt->conditional.condition->type_index];
@@ -3884,6 +3953,25 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
                 for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
                     if (!typecheck_stmt(context, func, else_scope, inner)) return false;
                 }
+            }
+        } break;
+
+        case stmt_loop: {
+            if (stmt->loop.condition != null) {
+                if (!typecheck_expr(context, func, scope, stmt->loop.condition, primitive_bool)) return false;
+
+                Primitive condition_primitive = context->type_buf[stmt->loop.condition->type_index];
+                if (condition_primitive != primitive_bool) {
+                    printf("Expected bool but got ");
+                    print_type(context, stmt->loop.condition->type_index);
+                    printf(" in 'for'-loop (Line %u)\n", stmt->loop.condition->pos.line);
+                    return false;
+                }
+            }
+
+            Scope* body_scope = scope_push(context, scope);
+            for (Stmt* inner = stmt->loop.body; inner->kind != stmt_end; inner = inner->next) {
+                if (!typecheck_stmt(context, func, body_scope, inner)) return false;
             }
         } break;
 
@@ -4581,7 +4669,7 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             }
         } break;
 
-        case stmt_conditional: {
+        case stmt_if: {
             Local bool_local = intermediate_allocate_temporary(context, 1);
             linearize_expr(context, stmt->conditional.condition, bool_local, false);
 
@@ -4591,34 +4679,62 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             if_jump_op->jump.conditional = true;
             if_jump_op->jump.condition = bool_local;
 
-            u64 start_length = buf_length(context->tmp_ops);
-
             intermediate_deallocate_temporary(context, bool_local);
 
             for (Stmt* inner = stmt->conditional.then; inner->kind != stmt_end; inner = inner->next) {
                 linearize_stmt(context, func, inner);
-            }
+            } 
 
-
-            u64 end_length = buf_length(context->tmp_ops);
-            if_jump_op->jump.jump = (i64) (end_length - start_length);
+            if_jump_op->jump.to_op = buf_length(context->tmp_ops);
 
             if (stmt->conditional.else_then != null) {
-                if_jump_op->jump.jump += 1; // Also jump past else_jump_op
+                if_jump_op->jump.to_op += 1; // Also jump past else_jump_op
 
                 Op* else_jump_op = buf_end(context->tmp_ops);
                 buf_push(context->tmp_ops, ((Op) {0}));
                 else_jump_op->kind = op_jump;
                 else_jump_op->jump.conditional = false;
 
-                u64 start_length = buf_length(context->tmp_ops);
-
                 for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
                     linearize_stmt(context, func, inner);
                 }
 
-                u64 end_length = buf_length(context->tmp_ops);
-                else_jump_op->jump.jump = (i64) (end_length - start_length);
+                else_jump_op->jump.to_op = buf_length(context->tmp_ops);
+            }
+        } break;
+
+        case stmt_loop: {
+            u64 loop_start = buf_length(context->tmp_ops);
+
+            u32* loop_end;
+            if (stmt->loop.condition != null) {
+                Local bool_local = intermediate_allocate_temporary(context, 1);
+                linearize_expr(context, stmt->conditional.condition, bool_local, false);
+
+                buf_push(context->tmp_ops, ((Op) {
+                    op_jump,
+                    .jump = { .conditional = true, .condition = bool_local },
+                }));
+
+                loop_end = &(buf_end(context->tmp_ops) - 1)->jump.to_op;
+
+                intermediate_deallocate_temporary(context, bool_local);
+            }
+
+            for (Stmt* inner = stmt->loop.body; inner->kind != stmt_end; inner = inner->next) {
+                linearize_stmt(context, func, inner);
+            }
+
+            buf_push(context->tmp_ops, ((Op) {
+                op_jump,
+                .jump = {
+                    .conditional = false,
+                    .to_op = loop_start,
+                },
+            }));
+
+            if (stmt->loop.condition != null) {
+                *loop_end = buf_length(context->tmp_ops);
             }
         } break;
 
@@ -4658,7 +4774,7 @@ void build_intermediate(Context* context) {
         u8* name = string_table_access(context->string_table, func->name);
         printf("%s has %u operations:\n", name, (u64) func->body.op_count);
         for (u32 i = 0; i < func->body.op_count; i += 1) {
-            printf("  ");
+            printf(" (%u) ", (u64) i);
             print_op(context, func, &func->body.ops[i]);
             printf("\n");
         }
@@ -4969,7 +5085,7 @@ void eval_ops(Context* context) {
                 case op_jump: {
                     u8 condition = *eval_get_local(frame, op->jump.condition, true);
                     if (!op->jump.conditional || !condition) {
-                        frame->current_op += op->jump.jump;
+                        frame->current_op = &frame->func->body.ops[op->jump.to_op];
                     }
                 } break;
 
@@ -5199,7 +5315,7 @@ void instruction_zero_extend_8_to_64(u8** b, X64_Reg reg) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8* reg_name = reg_names[reg];
-    printf("movzx %s %s (8 -> 64)\n", reg_name);
+    printf("movzx %s %s (8 -> 64)\n", reg_name, reg_name);
     #endif
 }
 
@@ -5280,29 +5396,31 @@ void instruction_nop(u8** b) {
     #endif
 }
 
-i8* instruction_jmp_rcx_zero(u8** b) {
+// Returns offset into *b where an i8 should be written
+u64 instruction_jmp_rcx_zero(u8** b) {
     buf_push(*b, 0xe3);
     buf_push(*b, 0x00);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("jrcxz ??\n", (i64) jump_by);
+    printf("jrcxz ??\n");
     #endif
 
-    return (i8*) (buf_end(*b) - 1);
+    return buf_length(*b) - sizeof(i8);
 }
 
-i32* instruction_jmp_i32(u8** b) {
+// Returns offset into *b where an i32 should be written
+u64 instruction_jmp_i32(u8** b) {
     buf_push(*b, 0xe9);
-    buf_push(*b, 0x00);
-    buf_push(*b, 0x00);
-    buf_push(*b, 0x00);
-    buf_push(*b, 0x00);
+    buf_push(*b, 0xef);
+    buf_push(*b, 0xbe);
+    buf_push(*b, 0xad);
+    buf_push(*b, 0xde);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("jmp ??\n");
     #endif
 
-    return (i32*) (buf_end(*b) - 4);
+    return buf_length(*b) - sizeof(i32);
 }
 
 Mem_Item* get_stack_item(Func* func, Local local) {
@@ -5519,7 +5637,10 @@ void instruction_load_local(u8** b, Func* func, X64_Reg reg, Local local, u8 byt
 }
 
 
-void machinecode_for_op(Context* context, Func* func, Op* op) {
+void machinecode_for_op(Context* context, Func* func, u32 op_index) {
+    Op* op = &func->body.ops[op_index];
+    op->bytecode_start = buf_length(context->bytecode);
+
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("; ");
     print_op(context, func, op);
@@ -5728,33 +5849,33 @@ void machinecode_for_op(Context* context, Func* func, Op* op) {
         } break;
 
         case op_jump: {
-            i32* big_jump_size;
-            u64 big_jump_from;
+            u64 big_jump_text_location;
 
             if (op->jump.conditional) {
                 instruction_load_local(&context->bytecode, func, reg_rcx, op->jump.condition, 1);
                 instruction_xor_reg_imm(&context->bytecode, reg_rcx, 1, 1);
                 instruction_zero_extend_8_to_64(&context->bytecode, reg_rcx);
-                i8* small_jump_size = instruction_jmp_rcx_zero(&context->bytecode);
+                u64 small_jump_text_location = instruction_jmp_rcx_zero(&context->bytecode);
                 u64 small_jump_from = buf_length(context->bytecode);
-                big_jump_size = instruction_jmp_i32(&context->bytecode);
+                big_jump_text_location = instruction_jmp_i32(&context->bytecode);
                 u64 small_jump_to = buf_length(context->bytecode);
-                big_jump_from = small_jump_to;
-                *small_jump_size = (i8) (small_jump_to - small_jump_from);
+
+                u8 small_jump_size = small_jump_to - small_jump_from;
+                assert(small_jump_size < I8_MAX);
+                context->bytecode[small_jump_text_location] = small_jump_size;
             } else {
-                big_jump_size = instruction_jmp_i32(&context->bytecode);
-                big_jump_from = buf_length(context->bytecode);
+                big_jump_text_location = instruction_jmp_i32(&context->bytecode);
             }
 
-            if (op->jump.jump < 0) {
-                unimplemented(); // TODO reverse jumps require something else than the simple fixup scheme
-            } else {
-                Jump_Fixup fixup = {0};
-                fixup.skip_ops = op->jump.jump;
-                fixup.jump_size_location = big_jump_size;
-                fixup.jump_start = big_jump_from;
-                buf_push(context->jump_fixups, fixup);
-            }
+            // NB The way we currently do 'Jump_Fixup's depends on the jmp being the last instruction
+            // generated for the given op (so rip is at the start of the next op afterwards). This could
+            // be changed trivially though.
+
+            Jump_Fixup fixup = {0};
+            fixup.from_op = op_index;
+            fixup.to_op = op->jump.to_op;
+            fixup.text_location = big_jump_text_location;
+            buf_push(context->jump_fixups, fixup);
         } break;
 
         case op_reset_temporary: break;
@@ -5911,32 +6032,28 @@ void build_machinecode(Context* context) {
 
         // Write out operations
         for (u32 i = 0; i < func->body.op_count; i += 1) {
-            bool any_fixups_to_apply = false;
-            buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
-                if (fixup->skip_ops == U64_MAX) continue;
+            machinecode_for_op(context, func, i);
+        }
+        assert(func->body.ops[func->body.op_count].kind == op_end_of_function);
+        func->body.ops[func->body.op_count].bytecode_start = buf_length(context->bytecode);
 
-                fixup->skip_ops -= 1;
-                any_fixups_to_apply |= fixup->skip_ops == 0;
-            }
+        buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
+            u64 from_instruction = func->body.ops[fixup->from_op + 1].bytecode_start;
+            u64 to_instruction   = func->body.ops[fixup->to_op].bytecode_start;
 
-            Op* op = &func->body.ops[i];
-            machinecode_for_op(context, func, op);
+            i32* jump = (i32*) (context->bytecode + fixup->text_location);
+            assert(*jump == 0xdeadbeef);
 
-            if (any_fixups_to_apply) {
-                buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
-                    if (fixup->skip_ops != 0) continue;
-
-                    fixup->skip_ops = U64_MAX;
-                    u64 start = fixup->jump_start;
-                    u64 end = buf_length(context->bytecode);
-                    i64 jump = (i64) (end - start);
-                    assert(jump > 0 && jump < I32_MAX);
-                    *fixup->jump_size_location = (i32) jump;
-                }
+            if (from_instruction > to_instruction) {
+                u64 diff = from_instruction - to_instruction;
+                assert(diff <= I32_MAX);
+                *jump = -((i32) diff);
+            } else {
+                u64 diff = to_instruction - from_instruction;
+                assert(diff < I32_MAX);
+                *jump = (i32) diff;
             }
         }
-
-        buf_foreach (Jump_Fixup, fixup, context->jump_fixups) assert(fixup->skip_ops == U64_MAX);
         buf_clear(context->jump_fixups);
 
         // Pass output
