@@ -509,6 +509,19 @@ void printf(u8* string, ...) {
                     printf_integer(value, 10);
                 } break;
 
+                // Format numbers as 1st, 2nd, 3rd, 4th, etc...
+                case 'n': {
+                    u64 value = va_arg(args, u64);
+                    printf_integer(value, 10);
+
+                    switch (value) {
+                        case 1:  buf_push(printf_buf, 's'); buf_push(printf_buf, 't'); break;
+                        case 2:  buf_push(printf_buf, 'n'); buf_push(printf_buf, 'd'); break;
+                        case 3:  buf_push(printf_buf, 'r'); buf_push(printf_buf, 'd'); break;
+                        default: buf_push(printf_buf, 't'); buf_push(printf_buf, 'h'); break;
+                    }
+                } break;
+
                 case 'c': {
                     u8 value = va_arg(args, u8);
 
@@ -820,7 +833,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 
 typedef struct Var {
     u32 name;
-    u32 type_index;
+    u32 type_index; // We set this to 0 to indicate that we want to infer the type
     File_Pos declaration_pos;
 } Var;
 
@@ -846,6 +859,8 @@ typedef enum Primitive {
 
     PRIMITIVE_COUNT,
 } Primitive;
+
+Primitive DEFAULT_INTEGER_TYPE = primitive_i64;
 
 void init_primitive_names(u32* names, u8** string_table) {
     names[primitive_unsolidified_int] = string_table_intern(string_table, "<int>", 5);
@@ -2766,20 +2781,15 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
         u32 name_index = t->identifier_string_table_index;
         t += 1;
 
-        if (t->kind != token_colon) {
-            u8* name = string_table_access(context->string_table, name_index);
-            printf("Expected 'var %s: type', but got ", name);
-            print_token(context->string_table, t);
-            printf(" (Line %u)\n", t->pos.line);
-            return null;
+        u32 type_index = 0;
+        if (t->kind == token_colon) {
+            t += 1;
+
+            u32 type_length = 0;
+            type_index = parse_type(context, t, &type_length);
+            if (type_index == U32_MAX) return null;
+            t += type_length;
         }
-        t += 1;
-
-
-        u32 type_length = 0;
-        u32 type_index = parse_type(context, t, &type_length);
-        if (type_index == U32_MAX) return null;
-        t += type_length;
 
         Expr* expr = null;
         if (t->kind == token_assign) {
@@ -2789,6 +2799,12 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
             expr = parse_expr(context, t, &right_length); 
             if (expr == null) return null;
             t += right_length;
+        }
+
+        if (expr == null && type_index == null) {
+            u8* name = string_table_access(context->string_table, name_index);
+            printf("Declared variable '%s' without specifying type or initial value. Hence can't infer type (Line %u)\n", name, t->pos.line);
+            return null;
         }
 
         u32 var_index = buf_length(context->tmp_vars);
@@ -3884,7 +3900,7 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
             }
 
             if (expr->type_index == primitive_invalid) {
-                printf("Types don't match: ");
+                printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
                 print_type(context, expr->binary.left->type_index);
                 printf(" vs ");
                 print_type(context, expr->binary.right->type_index);
@@ -3930,7 +3946,7 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                 u32 actual_type_index = param_expr->expr->type_index;
                 if (!type_cmp(context, expected_type_index, actual_type_index)) {
                     u8* func_name = string_table_access(context->string_table, callee->name);
-                    printf("Invalid type for parameter %u to %s: Expected ", (u64) (p + 1), func_name);
+                    printf("Invalid type for %n parameter to %s: Expected ", (u64) (p + 1), func_name);
                     print_type(context, expected_type_index);
                     printf(" but got ");
                     print_type(context, actual_type_index);
@@ -4063,22 +4079,44 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
         } break;
 
         case stmt_declaration: {
-            if (stmt->declaration.right != null) {
-                u32 var_type_index = func->body.vars[stmt->declaration.var_index].type_index;
-                if (!typecheck_expr(context, func, scope, stmt->declaration.right, var_type_index)) {
-                    return false;
-                } else if (!type_cmp(context, var_type_index, stmt->declaration.right->type_index)) {
-                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                    print_type(context, var_type_index);
-                    printf(" but got ");
-                    print_type(context, stmt->declaration.right->type_index);
-                    printf(" (Line %u)\n", stmt->pos.line);
-                    return false;
+            u32 var_index = stmt->declaration.var_index;
+            Var* var = &func->body.vars[var_index];
+            Expr* right = stmt->declaration.right;
+
+            assert(var->type_index != 0 || stmt->declaration.right != null);
+
+            bool bad_types = false;
+
+            if (right != null) {
+                u32 solidify_to;
+                if (var->type_index == 0) {
+                    solidify_to = DEFAULT_INTEGER_TYPE;
+                } else {
+                    solidify_to = var->type_index;
+                }
+
+                if (!typecheck_expr(context, func, scope, right, solidify_to)) {
+                    bad_types = true;
+                } else {
+                    if (var->type_index == 0) {
+                        var->type_index = right->type_index;
+                    } else {
+                        if (!type_cmp(context, var->type_index, right->type_index)) {
+                            printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                            print_type(context, var->type_index);
+                            printf(" but got ");
+                            print_type(context, right->type_index);
+                            printf(" (Line %u)\n", stmt->pos.line);
+                            bad_types = true;
+                        }
+                    }
                 }
             }
 
             assert(!scope->map[stmt->declaration.var_index]);
             scope->map[stmt->declaration.var_index] = true;
+
+            if (bad_types) return false;
         } break;
 
         case stmt_block: {

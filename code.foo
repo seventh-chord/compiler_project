@@ -7,8 +7,8 @@ extern "kernel32.lib" {
 }
 
 fn main() -> u8 {
-    let hi: *u8 = "_i\n";
-    let ho: *u8 = "Ho\n";
+    let hi = "_i\n";
+    let ho = "Ho\n";
 
     *(hi + 0) = seventy_two(); # NB: This is not that nice, as strings are stored in .data
 
@@ -34,25 +34,25 @@ fn main() -> u8 {
 }
 
 fn four() -> u8 {
-    let big_boy: [4][4]u64 = [4][4]u64 {
+    let big_boy = [4][4]u64 {
         [4]u64 { 0, 0, 0, 0 },
         [4]u64 { 0, 0, 0, 0 },
         [4]u64 { 0, 0, 2, 0 },
         [4]u64 { 0, 0, 0, 0 },
     };
 
-    let empty: [4]u64 = [4]u64 { 0, 0, 0, 0 };
+    let empty = [4]u64 { 0, 0, 0, 0 };
 
-    let small_boy: *[4]u64 = &empty;
+    let small_boy = &empty;
     *small_boy = big_boy[2];
 
-    let nice: u64 = big_boy[2][2];
+    let nice = big_boy[2][2];
     output = u8(nice) + u8(empty[2]);
 }
 
 fn swanky() -> u8 {
-    let x: u8 = 14;
-    let array: [3]u8 = [3]u8 { 2, 1, 3 };
+    let x = u8(14);
+    let array = [3]u8 { 2, 1, 3 };
     array = [3]u8 {
         0, 0,
         array[1] + x
@@ -61,7 +61,7 @@ fn swanky() -> u8 {
 }
 
 fn third(array: *[3]u8) -> u8 {
-    let barray: [3]u8 = *array;
+    let barray = *array;
     output = barray[2];
 }
 
@@ -70,7 +70,7 @@ fn scary_third(array: *u8) -> u8 {
 }
 
 fn remove_fifteen(p: *u8) {
-    let fifteen: u8 = swanky();
+    let fifteen = swanky();
     *p = *p - fifteen;
 }
 
@@ -89,14 +89,14 @@ fn foo(a: u8) -> u8 {
 }
 
 fn seventy_two() -> u8 {
-    let four: u8 = four();
-    let x: u8 = bar(1, 0) + foo(four*3 - 3*(1 + 2));
+    let four = four();
+    let x = bar(1, 0) + foo(four*3 - 3*(1 + 2));
 
     x = 2*(20 + 10) - x*2;
 
-    let y: u8 = x - 2 + 3;
-    let z: u8 = y + 2 + 3;
-    let w: u8 = z;
+    let y = x - 2 + 3;
+    let z = y + 2 + 3;
+    let w = z;
     w = 1 + w;
     output = w + 45 + (255 + 1);
 }
