@@ -1094,6 +1094,7 @@ struct Expr_List {
 typedef enum Expr_Kind {
     expr_variable,
     expr_literal,
+    expr_string_literal,
     expr_compound_literal,
     expr_binary,
     expr_call,
@@ -1118,6 +1119,11 @@ struct Expr {
                 expr_literal_bool,
             } kind;
         } literal;
+
+        struct {
+            u8* bytes; // null-terminated
+            u64 length;
+        } string;
 
         struct {
             Expr_List* content; // *[*Expr]
@@ -1224,6 +1230,7 @@ typedef enum Op_Kind {
     op_call,
     op_cast,
     op_jump,
+    op_load_data,
     
     // 'binary'
     op_set,
@@ -1248,6 +1255,7 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_call] = "call",
     [op_cast] = "cast",
     [op_jump] = "jump",
+    [op_load_data] = "load_data",
     [op_set] = "set",
     [op_add] = "add",
     [op_sub] = "sub",
@@ -1305,6 +1313,11 @@ typedef struct Op {
             Local offset;
             u32 var_index;
         } member;
+
+        struct {
+            Local local;
+            u32 bytecode_data_offset;
+        } load_data;
     };
 
     u32 bytecode_start;
@@ -1477,11 +1490,12 @@ typedef struct Context {
     // simplifies refering directly to primitives: A type index of 'primitive_i64' points
     // to 'primitive_i64'
     u8* type_buf; // stretchy-buffer of chained 'Primitive's
+    u32 string_type; // *u8
 
     // Low level representation
-    u8* bytecode;
-    u8* bytecode_data;
-    Fixup* fixups;
+    u8* bytecode; // stretchy-buffer
+    u8* bytecode_data; // stretchy-buffer
+    Fixup* fixups; // stretchy-buffer
 
     Library_Import* imports; // stretchy-buffer
     Call_Fixup* call_fixups; // stretchy-buffer
@@ -1542,7 +1556,7 @@ bool type_cmp(Context* context, u32 a, u32 b) {
         if (!a_ptr && !b_ptr) {
             break;
         } else if (a_ptr && b_ptr) {
-            // NB this is a bit of a hack to make '[N]Foo == 'Foo
+            // NB this is a bit of a hack to make *[N]Foo == *Foo
             Primitive a_primitive = context->type_buf[a];
             Primitive b_primitive = context->type_buf[b];
             if (a_primitive == primitive_array && b_primitive != primitive_array) {
@@ -1717,6 +1731,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 print_expr(context, func, node->expr);
             }
             printf(" }");
+        } break;
+
+        case expr_string_literal: {
+            printf("\"%z\"", expr->string.length, expr->string.bytes);
         } break;
 
         case expr_binary: {
@@ -2330,6 +2348,21 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         } break;
                         default: assert(false);
                     }
+
+                    shunting_yard_push_expr(context, yard, expr);
+
+                    t += 1;
+                    could_parse = true;
+                    expect_value = false;
+                } break;
+
+                case token_string: {
+                    Expr* expr = arena_new(&context->arena, Expr);
+                    expr->type_index = context->string_type;
+                    expr->kind = expr_string_literal;
+                    expr->string.bytes = t->string.bytes;
+                    expr->string.length = t->string.length;
+                    expr->pos = t->pos;
 
                     shunting_yard_push_expr(context, yard, expr);
 
@@ -3138,6 +3171,10 @@ bool build_ast(Context* context, u8* path) {
         buf_push(context->type_buf, t);
     }
 
+    context->string_type = buf_length(context->type_buf);
+    buf_push(context->type_buf, primitive_pointer);
+    buf_push(context->type_buf, primitive_u8);
+
     // Lex
     arena_stack_push(&context->stack); // pop at end of lexing
 
@@ -3438,17 +3475,47 @@ bool build_ast(Context* context, u8* path) {
             i += 1;
 
             u8* arena_pointer = null;
-            if (length > 0) {
-                arena_pointer = arena_alloc(&context->arena, length + 1);
-                arena_pointer[length] = 0;
-                mem_copy(start, arena_pointer, length);
+            arena_pointer = arena_alloc(&context->arena, length + 1);
+            
+            u32 collapsed_length = length;
+            u32 j = 0, i = 0;
+            while (i < length) {
+                if (start[i] == '\\') {
+                    collapsed_length -= 1;
+
+                    u8 c = U8_MAX;
+                    switch (start[i + 1]) {
+                        case 'n': c = 0x0a; break;
+                        case 'r': c = 0x0d; break;
+                        case 't': c = 0x09; break;
+                        case '0': c = 0x00; break;
+                    }
+
+                    if (c == U8_MAX) {
+                        printf("Invalid escape sequence: '\\%c' (Line %u)\n", start[i + 1], (u64) file_pos.line);
+                        valid = false;
+                        break;
+                    }
+
+                    arena_pointer[j] = c;
+                    j += 1;
+                    i += 2;
+                } else {
+                    arena_pointer[j] = start[i];
+                    i += 1;
+                    j += 1;
+                }
             }
 
-            buf_push(tokens, ((Token) {
-                token_string,
-                .string.bytes = arena_pointer,
-                .string.length = length,
-            }));
+            if (valid) {
+                arena_pointer[collapsed_length] = 0;
+
+                buf_push(tokens, ((Token) {
+                    token_string,
+                    .string.bytes = arena_pointer,
+                    .string.length = collapsed_length,
+                }));
+            }
         } break;
 
         case '#': {
@@ -3634,6 +3701,10 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                 default: assert(false);
             }
 
+        } break;
+
+        case expr_string_literal: {
+            assert(expr->type_index == context->string_type);
         } break;
 
         case expr_compound_literal: {
@@ -4259,6 +4330,19 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 op.binary.target = assign_to;
                 buf_push(context->tmp_ops, op);
             }
+        } break;
+
+        case expr_string_literal: {
+            u64 bytecode_data_offset = buf_length(context->bytecode_data);
+            str_push_str(&context->bytecode_data, expr->string.bytes, expr->string.length + 1);
+
+            assert(bytecode_data_offset <= U32_MAX);
+
+            Op op = {0};
+            op.kind = op_load_data;
+            op.load_data.local = assign_to;
+            op.load_data.bytecode_data_offset = (u32) bytecode_data_offset;
+            buf_push(context->tmp_ops, op);
         } break;
 
         case expr_compound_literal: {
@@ -5527,7 +5611,7 @@ Mem_Item* get_stack_item(Func* func, Local local) {
     return item;
 }
 
-void instruction_lea_stack_to_reg(u8** b, Func* func, Local local, X64_Reg reg) {
+void instruction_lea_stack(u8** b, Func* func, Local local, X64_Reg reg) {
     Mem_Item* item = get_stack_item(func, local);
     u32 offset = item->offset;
 
@@ -5553,6 +5637,26 @@ void instruction_lea_stack_to_reg(u8** b, Func* func, Local local, X64_Reg reg) 
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("lea %s, [rsp + %u]\n", reg_names[reg], (u64) offset);
+    #endif
+}
+
+void instruction_lea_data(Context* context, u32 data_offset, X64_Reg reg) {
+    buf_push(context->bytecode, 0x48);
+    buf_push(context->bytecode, 0x8d);
+    buf_push(context->bytecode, 0x05);
+    buf_push(context->bytecode, 0xde);
+    buf_push(context->bytecode, 0xad);
+    buf_push(context->bytecode, 0xbe);
+    buf_push(context->bytecode, 0xef);
+
+    Fixup fixup = {0};
+    fixup.kind = fixup_data;
+    fixup.text_location = buf_length(context->bytecode) - sizeof(u32);
+    fixup.data_offset = data_offset;
+    buf_push(context->fixups, fixup);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("lea %s, [.data + %u]\n", reg_names[reg], (u64) data_offset);
     #endif
 }
 
@@ -5769,7 +5873,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->binary.source.as_reference) unimplemented(); // TODO
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_lea_stack_to_reg(&context->bytecode, func, op->binary.source, reg_rax);
+            instruction_lea_stack(&context->bytecode, func, op->binary.source, reg_rax);
             instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, POINTER_SIZE);
         } break;
 
@@ -5990,7 +6094,20 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             buf_push(context->jump_fixups, fixup);
         } break;
 
+        case op_load_data: {
+            instruction_lea_data(context, op->load_data.bytecode_data_offset, reg_rax);
+
+            Local local = op->load_data.local;
+            if (local.as_reference) {
+                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, local, POINTER_SIZE);
+                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, POINTER_SIZE);
+            } else {
+                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, local, POINTER_SIZE);
+            }
+        } break;
+
         case op_end_of_function: assert(false);
+
         default: assert(false);
     }
 }
@@ -6225,11 +6342,6 @@ void build_machinecode(Context* context) {
     }
 
     arena_stack_pop(&context->stack);
-
-    // TODO stuff doesn't work if we don't have any data.
-    // Why not?
-    // How will we use the data section later on??
-    str_push_str(&context->bytecode_data, "_i\n\0", 4);
 }
 
 typedef struct COFF_Header {
@@ -6547,14 +6659,17 @@ bool parse_library(Context* context, Library_Import* import) {
 }
 
 bool write_executable(u8* path, Context* context) {
-    enum { section_count = 4 }; // So we can use it as an array length
+    enum { MAX_SECTION_COUNT = 4 }; // So we can use it as an array length
+
+    u64 text_length = buf_length(context->bytecode);
+    u64 data_length = buf_length(context->bytecode_data);
+
+    u32 section_count = data_length == 0? 3 : 4;
+
     u64 in_file_alignment = 0x200;
     u64 in_memory_alignment = 0x1000;
     u64 dos_prepend_size = 200;
     u64 total_header_size = dos_prepend_size + sizeof(COFF_Header) + sizeof(Image_Header) + section_count*sizeof(Section_Header);
-
-    u64 text_length = buf_length(context->bytecode);
-    u64 data_length = buf_length(context->bytecode_data);
 
     // TODO pdata is completly messed up. It is supposed to be pointing to some
     // unwind info, which we deleted by accident. We have to figure out how to
@@ -6698,6 +6813,48 @@ bool write_executable(u8* path, Context* context) {
         }
     }
 
+    // Set up section headers
+    Section_Header section_headers[MAX_SECTION_COUNT] = {0};
+    u32 section_index = 0;
+
+    Section_Header* text_header = &section_headers[section_index];
+    section_index += 1;
+    mem_copy(".text", text_header->name, 5);
+    text_header->flags = SECTION_FLAGS_EXECUTE | SECTION_FLAGS_READ | SECTION_FLAGS_CODE;
+    text_header->virtual_size = text_length;
+    text_header->virtual_address = text_memory_start;
+    text_header->size_of_raw_data = round_to_next(text_length, in_file_alignment);
+    text_header->pointer_to_raw_data = text_file_start;
+
+    if (data_length > 0) {
+        Section_Header* data_header = &section_headers[section_index];
+        section_index += 1;
+        mem_copy(".data", data_header->name, 5);
+        data_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
+        data_header->virtual_size = data_length;
+        data_header->virtual_address = data_memory_start;
+        data_header->size_of_raw_data = round_to_next(data_length, in_file_alignment);
+        data_header->pointer_to_raw_data = data_file_start;
+    }
+
+    Section_Header* pdata_header = &section_headers[section_index];
+    section_index += 1;
+    mem_copy(".pdata", pdata_header->name, 6);
+    pdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
+    pdata_header->virtual_size = pdata_length;
+    pdata_header->virtual_address = pdata_memory_start;
+    pdata_header->size_of_raw_data = round_to_next(pdata_length, in_file_alignment);
+    pdata_header->pointer_to_raw_data = pdata_file_start;
+
+    Section_Header* idata_header = &section_headers[section_index];
+    section_index += 1;
+    mem_copy(".idata", idata_header->name, 6);
+    idata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
+    idata_header->virtual_size = idata_length;
+    idata_header->virtual_address = idata_memory_start;
+    idata_header->size_of_raw_data = round_to_next(idata_length, in_file_alignment);
+    idata_header->pointer_to_raw_data = idata_file_start;
+
     // Allocate space and fill in the image
     u8* output_file = alloc(file_image_size);
     mem_clear(output_file, file_image_size);
@@ -6724,7 +6881,6 @@ bool write_executable(u8* path, Context* context) {
 
     COFF_Header coff = {0};
     Image_Header image = {0};
-    Section_Header section_headers[section_count] = {0};
 
     mem_copy("PE\0\0", coff.signature, 4);
     coff.machine = COFF_MACHINE_AMD64;
@@ -6772,39 +6928,6 @@ bool write_executable(u8* path, Context* context) {
     image.data_directories[1].size = (buf_length(context->imports) + 1)*sizeof(Import_Entry);
     image.data_directories[3].virtual_address = pdata_memory_start;
     image.data_directories[3].size = pdata_length;
-
-    Section_Header* text_header = &section_headers[0];
-    mem_copy(".text", text_header->name, 5);
-    text_header->flags = SECTION_FLAGS_EXECUTE | SECTION_FLAGS_READ | SECTION_FLAGS_CODE;
-    text_header->virtual_size = text_length;
-    text_header->virtual_address = text_memory_start;
-    text_header->size_of_raw_data = round_to_next(text_length, in_file_alignment);
-    text_header->pointer_to_raw_data = text_file_start;
-
-    Section_Header* data_header = &section_headers[1];
-    mem_copy(".data", data_header->name, 5);
-    data_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
-    data_header->virtual_size = data_length;
-    data_header->virtual_address = data_memory_start;
-    data_header->size_of_raw_data = round_to_next(data_length, in_file_alignment);
-    data_header->pointer_to_raw_data = data_file_start;
-
-    Section_Header* pdata_header = &section_headers[2];
-    mem_copy(".pdata", pdata_header->name, 6);
-    pdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
-    pdata_header->virtual_size = pdata_length;
-    pdata_header->virtual_address = pdata_memory_start;
-    pdata_header->size_of_raw_data = round_to_next(pdata_length, in_file_alignment);
-    pdata_header->pointer_to_raw_data = pdata_file_start;
-
-    Section_Header* idata_header = &section_headers[3];
-    mem_copy(".idata", idata_header->name, 6);
-    idata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
-    idata_header->virtual_size = idata_length;
-    idata_header->virtual_address = idata_memory_start;
-    idata_header->size_of_raw_data = round_to_next(idata_length, in_file_alignment);
-    idata_header->pointer_to_raw_data = idata_file_start;
-
 
     // Write headers
     u64 header_offset = dos_prepend_size;
@@ -7038,7 +7161,7 @@ void main() {
     i64 start_time = perf_time();
 
     Context context = {0};
-    if (!build_ast(&context, "W:/asm2/code.txt")) return;
+    if (!build_ast(&context, "W:/asm2/code.foo")) return;
     if (!typecheck(&context)) return;
     print_verbose_info(&context);
     build_intermediate(&context);

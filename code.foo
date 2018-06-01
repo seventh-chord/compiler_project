@@ -7,10 +7,10 @@ extern "kernel32.lib" {
 }
 
 fn main() -> u8 {
-    let hi: [3]u8 = [3]u8 { 0, 105, 10 };
-    let ho: [3]u8 = [3]u8 { 72, 111, 10 };
+    let hi: *u8 = "_i\n";
+    let ho: *u8 = "Ho\n";
 
-    hi[0] = seventy_two();
+    *(hi + 0) = seventy_two(); # NB: This is not that nice, as strings are stored in .data
 
     {
         let written: u32 = 0;
@@ -19,15 +19,15 @@ fn main() -> u8 {
         let a: u8 = 10;
         for (a > 0) {
             if (a % 2 == 0) { # Who needs a modulus operator anyways?
-                WriteFile(handle, &hi, 2, &written, null);
+                WriteFile(handle, hi, 2, &written, null);
             } else {
-                WriteFile(handle, &ho, 2, &written, null);
+                WriteFile(handle, ho, 2, &written, null);
             }
 
             a = a - 1;
         }
 
-        WriteFile(handle, &hi + 2, 1, &written, null);
+        WriteFile(handle, hi + 2, 1, &written, null);
     }
 
     ExitProcess(0);
@@ -103,6 +103,7 @@ fn seventy_two() -> u8 {
 
 #   global variables and constants (.data and .bss (?))
 #   type inference
+#   slices
 #   structs, unions, enums
 #   size_of, align_of, type_of
 #   more operators      <<   >>   |   &   ~   ||   &&
