@@ -7,52 +7,52 @@ extern "kernel32.lib" {
 }
 
 fn main() -> u8 {
-    var message_a: [3]u8 = [3]u8 { 0, 105, 10 };
-    var message_b: [3]u8 = [3]u8 { 72, 111, 10 };
+    let hi: [3]u8 = [3]u8 { 0, 105, 10 };
+    let ho: [3]u8 = [3]u8 { 72, 111, 10 };
 
-    message_a[0] = seventy_two();
+    hi[0] = seventy_two();
 
     {
-        var written: u32 = 0;
-        var handle: u64 = GetStdHandle(4294967285);
+        let written: u32 = 0;
+        let handle: u64 = GetStdHandle(4294967285);
 
-        var a: u8 = 10;
+        let a: u8 = 10;
         for (a > 0) {
-            a = a - 1;
-
-            if ((a/2)*2 != a) { # Who needs a modulus operator anyways?
-                WriteFile(handle, &message_a, 2, &written, null);
+            if (a % 2 == 0) { # Who needs a modulus operator anyways?
+                WriteFile(handle, &hi, 2, &written, null);
             } else {
-                WriteFile(handle, &message_b, 2, &written, null);
+                WriteFile(handle, &ho, 2, &written, null);
             }
+
+            a = a - 1;
         }
 
-        WriteFile(handle, &message_a + 2, 1, &written, null);
+        WriteFile(handle, &hi + 2, 1, &written, null);
     }
 
     ExitProcess(0);
 }
 
 fn four() -> u8 {
-    var big_boy: [4][4]u64 = [4][4]u64 {
+    let big_boy: [4][4]u64 = [4][4]u64 {
         [4]u64 { 0, 0, 0, 0 },
         [4]u64 { 0, 0, 0, 0 },
         [4]u64 { 0, 0, 2, 0 },
         [4]u64 { 0, 0, 0, 0 },
     };
 
-    var empty: [4]u64 = [4]u64 { 0, 0, 0, 0 };
+    let empty: [4]u64 = [4]u64 { 0, 0, 0, 0 };
 
-    var small_boy: *[4]u64 = &empty;
+    let small_boy: *[4]u64 = &empty;
     *small_boy = big_boy[2];
 
-    var nice: u64 = big_boy[2][2];
+    let nice: u64 = big_boy[2][2];
     output = u8(nice) + u8(empty[2]);
 }
 
 fn swanky() -> u8 {
-    var x: u8 = 14;
-    var array: [3]u8 = [3]u8 { 2, 1, 3 };
+    let x: u8 = 14;
+    let array: [3]u8 = [3]u8 { 2, 1, 3 };
     array = [3]u8 {
         0, 0,
         array[1] + x
@@ -61,7 +61,7 @@ fn swanky() -> u8 {
 }
 
 fn third(array: *[3]u8) -> u8 {
-    var barray: [3]u8 = *array;
+    let barray: [3]u8 = *array;
     output = barray[2];
 }
 
@@ -70,33 +70,33 @@ fn scary_third(array: *u8) -> u8 {
 }
 
 fn remove_fifteen(p: *u8) {
-    var fifteen: u8 = swanky();
+    let fifteen: u8 = swanky();
     *p = *p - fifteen;
 }
 
 fn bar(a: u8, b: u8) -> u8 {
-    var dingus: u64 = 1;
+    let dingus: u64 = 1;
     dingus = dingus + u64(1 + u8(2));
 
     output = a + b*2 + u8(dingus);
 }
 
 fn foo(a: u8) -> u8 {
-    var five: u8 = 20;
+    let five: u8 = 20;
     remove_fifteen(&five);
 
     output = a*five + (255 + 1);
 }
 
 fn seventy_two() -> u8 {
-    var four: u8 = four();
-    var x: u8 = bar(1, 0) + foo(four*3 - 3*(1 + 2));
+    let four: u8 = four();
+    let x: u8 = bar(1, 0) + foo(four*3 - 3*(1 + 2));
 
     x = 2*(20 + 10) - x*2;
 
-    var y: u8 = x - 2 + 3;
-    var z: u8 = y + 2 + 3;
-    var w: u8 = z;
+    let y: u8 = x - 2 + 3;
+    let z: u8 = y + 2 + 3;
+    let w: u8 = z;
     w = 1 + w;
     output = w + 45 + (255 + 1);
 }

@@ -715,11 +715,12 @@ typedef struct Token {
         token_sub = '-',
         token_mul = '*', // also used for pointers
         token_div = '/',
+        token_mod = '%', // TODO
 
         token_and = '&',
-        token_not = '!', // Not in use yet
-        token_or  = '|', // Not in use yet
-        token_xor = '^', // Not in use yet
+        token_not = '!', // TODO
+        token_or  = '|', // TODO
+        token_xor = '^', // TODO
 
         token_greater = '>',
         token_less = '<',
@@ -733,6 +734,8 @@ typedef struct Token {
         token_not_equal, // "!="
         token_arrow, // "->"
 
+        token_shift_left, // "<<", TODO
+        token_shift_right, // ">>", TODO
 
         token_identifier,
         token_literal,
@@ -740,13 +743,15 @@ typedef struct Token {
 
         token_keyword_fn,
         token_keyword_extern,
-        token_keyword_var,
+        token_keyword_let,
         token_keyword_if,
         token_keyword_else,
         token_keyword_for,
         token_keyword_null,
         token_keyword_true,
         token_keyword_false,
+
+        TOKEN_KIND_COUNT,
     } kind;
 
     union {
@@ -764,6 +769,54 @@ typedef struct Token {
 
     File_Pos pos;
 } Token;
+
+u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
+    [token_identifier] = null,
+    [token_literal] = null,
+    [token_string] = null,
+
+    [token_end_of_stream]        = "end of file",
+    [token_add]                  = "+",
+    [token_sub]                  = "-",
+    [token_mul]                  = "*",
+    [token_div]                  = "/",
+    [token_mod]                  = "%",
+    [token_and]                  = "&",
+    [token_or]                   = "|",
+    [token_not]                  = "!",
+    [token_xor]                  = "^",
+    [token_greater]              = ">",
+    [token_greater_or_equal]     = ">=",
+    [token_less]                 = "<",
+    [token_less_or_equal]        = "<=",
+    [token_equal]                = "==",
+    [token_not_equal]            = "!=",
+    [token_assign]               = "=",
+    [token_arrow]                = "->",
+    [token_shift_left]           = "<<",
+    [token_shift_right]          = ">>",
+
+    [token_semicolon]            = "semicolon ';'",
+    [token_comma]                = "comma ','",
+    [token_colon]                = "colon ':'",
+
+    [token_bracket_round_open]   = "opening parenthesis '('",
+    [token_bracket_round_close]  = "closing parenthesis ')'",
+    [token_bracket_square_open]  = "opening square bracket '['",
+    [token_bracket_square_close] = "closing square bracket ']'",
+    [token_bracket_curly_open]   = "opening curly brace '{'",
+    [token_bracket_curly_close]  = "closing curly brace '}'",
+
+    [token_keyword_fn]           = "fn",
+    [token_keyword_extern]       = "extern",
+    [token_keyword_let]          = "let",
+    [token_keyword_if]           = "if",
+    [token_keyword_else]         = "else",
+    [token_keyword_for]          = "for",
+    [token_keyword_true]         = "true",
+    [token_keyword_false]        = "false",
+    [token_keyword_null]         = "null",
+};
 
 typedef struct Var {
     u32 name;
@@ -968,6 +1021,7 @@ typedef enum Binary_Op {
     binary_sub,
     binary_mul,
     binary_div,
+    binary_mod,
 
     binary_eq,
     binary_neq,
@@ -982,6 +1036,7 @@ typedef enum Binary_Op {
 u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
     [binary_mul] = 2,
     [binary_div] = 2,
+    [binary_mod] = 2,
 
     [binary_add] = 1,
     [binary_sub] = 1,
@@ -997,6 +1052,7 @@ u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
 bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
     [binary_sub] = true,
     [binary_div] = true,
+    [binary_mod] = true,
     [binary_mul] = false,
     [binary_add] = false,
     [binary_neq] = false,
@@ -1012,6 +1068,7 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [binary_sub] = "-",
     [binary_mul] = "*",
     [binary_div] = "/",
+    [binary_mod] = "%",
 
     [binary_neq]  = "!=",
     [binary_eq]   = "==",
@@ -1163,7 +1220,6 @@ bool local_cmp(Local* a, Local* b) {
 
 typedef enum Op_Kind {
     op_end_of_function = 0,
-    op_reset_temporary,
 
     op_call,
     op_cast,
@@ -1175,6 +1231,7 @@ typedef enum Op_Kind {
     op_sub,
     op_mul,
     op_div,
+    op_mod,
     op_address_of,
     op_neq,
     op_eq,
@@ -1188,7 +1245,6 @@ typedef enum Op_Kind {
 
 u8* OP_NAMES[OP_COUNT] = {
     [op_end_of_function] = "end_of_function",
-    [op_reset_temporary] = "reset_temporary",
     [op_call] = "call",
     [op_cast] = "cast",
     [op_jump] = "jump",
@@ -1197,6 +1253,7 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_sub] = "sub",
     [op_mul] = "mul",
     [op_div] = "div",
+    [op_mod] = "mod",
     [op_address_of] = "address_of",
     [op_neq] = "neq",
     [op_eq] = "eq",
@@ -1371,7 +1428,9 @@ typedef enum X64_Reg {
     reg_rsp, reg_rbp, reg_rsi, reg_rdi,
     reg_r8,  reg_r9,  reg_r10, reg_r11,
     reg_r12, reg_r13, reg_r14, reg_r15,
+
     REG_COUNT,
+
     reg_invalid = U8_MAX,
 } X64_Reg;
 
@@ -1593,52 +1652,6 @@ void print_type(Context* context, u32 type_index) {
     }
 }
 
-u8* token_kind_name(int kind) {
-    switch (kind) {
-        case token_identifier:  assert(false); return null;
-        case token_literal:     assert(false); return null;
-        case token_string:      assert(false); return null;
-
-        case token_end_of_stream:        return "end of file";
-        case token_add:                  return "+";
-        case token_sub:                  return "-";
-        case token_mul:                  return "*";
-        case token_div:                  return "/";
-        case token_and:                  return "&";
-        case token_or:                   return "|";
-        case token_not:                  return "!";
-        case token_xor:                  return "^";
-        case token_greater:              return ">";
-        case token_greater_or_equal:     return ">=";
-        case token_less:                 return "<";
-        case token_less_or_equal:        return "<=";
-        case token_equal:                return "==";
-        case token_not_equal:            return "!=";
-        case token_assign:               return "=";
-        case token_arrow:                return "->";
-        case token_semicolon:            return "semicolon ';'";
-        case token_comma:                return "comma ','";
-        case token_colon:                return "colon ':'";
-        case token_bracket_round_open:   return "opening parenthesis '('";
-        case token_bracket_round_close:  return "closing parenthesis ')'";
-        case token_bracket_square_open:  return "opening square bracket '['";
-        case token_bracket_square_close: return "closing square bracket ']'";
-        case token_bracket_curly_open:   return "opening curly brace '{'";
-        case token_bracket_curly_close:  return "closing curly brace '}'";
-        case token_keyword_fn:           return "fn";
-        case token_keyword_extern:       return "extern";
-        case token_keyword_var:          return "var";
-        case token_keyword_if:           return "if";
-        case token_keyword_else:         return "else";
-        case token_keyword_for:          return "for";
-        case token_keyword_true:         return "true";
-        case token_keyword_false:        return "false";
-        case token_keyword_null:         return "null";
-
-        default: assert(false); return null;
-    }
-}
-
 void print_token(u8* string_table, Token* t) {
     u8* s = null;
 
@@ -1656,7 +1669,7 @@ void print_token(u8* string_table, Token* t) {
         } break;
 
         default: {
-            printf(token_kind_name(t->kind));
+            printf(TOKEN_NAMES[t->kind]);
         } break;
     }
 }
@@ -1874,10 +1887,6 @@ void print_local(Context* context, Func* func, Local local) {
 
 void print_op(Context* context, Func* func, Op* op) {
     switch (op->kind) {
-        case op_reset_temporary: {
-            printf("reset $%u", (u64) op->temporary);
-        } break;
-
         case op_set: case op_add: case op_sub: case op_mul: case op_div:
         case op_neq: case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
         {
@@ -1967,7 +1976,7 @@ Primitive parse_primitive_name(Context* context, u32 name_index) {
 
 bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
     if (t->kind != kind) {
-        printf("Expected %s %s, but got ", token_kind_name(t->kind), location);
+        printf("Expected %s %s, but got ", TOKEN_NAMES[t->kind], location);
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
@@ -2490,7 +2499,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 case token_comma:
                 case ')': case ']': case '}':
                 case token_assign:
-                case token_keyword_var:
+                case token_keyword_let:
                 case token_keyword_fn:
                 {
                     reached_end = true;
@@ -2503,6 +2512,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         case token_sub:                op = binary_sub; break;
                         case token_mul:                op = binary_mul; break;
                         case token_div:                op = binary_div; break;
+                        case token_mod:                op = binary_mod; break;
                         case token_greater:            op = binary_gt; break;
                         case token_greater_or_equal:   op = binary_gteq; break;
                         case token_less:               op = binary_lt; break;
@@ -2513,6 +2523,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         case token_and:
                         case token_or:
                         case token_xor:
+                        case token_shift_left:
+                        case token_shift_right:
                         {
                             unimplemented(); // TODO bitwise operators
                         } break;
@@ -2709,7 +2721,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
         }
 
     // Variable declaration
-    } else if (t->kind == token_keyword_var) {
+    } else if (t->kind == token_keyword_let) {
         t += 1;
 
         if (t->kind != token_identifier) {
@@ -3110,7 +3122,7 @@ bool build_ast(Context* context, u8* path) {
     u32 keyword_token_table[KEYWORD_COUNT][2] = {
         { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
         { token_keyword_extern, string_table_intern_cstr(&context->string_table, "extern") },
-        { token_keyword_var,    string_table_intern_cstr(&context->string_table, "var") },
+        { token_keyword_let,    string_table_intern_cstr(&context->string_table, "let") },
         { token_keyword_if,     string_table_intern_cstr(&context->string_table, "if") },
         { token_keyword_else,   string_table_intern_cstr(&context->string_table, "else") },
         { token_keyword_for,    string_table_intern_cstr(&context->string_table, "for") },
@@ -3228,7 +3240,7 @@ bool build_ast(Context* context, u8* path) {
             buf_push(tokens, ((Token) { token_literal, .literal_value = value, .pos = file_pos }));
         } break;
 
-        case '+': case '-': case '*': case '/':
+        case '+': case '-': case '*': case '/': case '%':
         case '=': case '<': case '>':
         case '&': case '!': case '|': case '^':
         {
@@ -3262,28 +3274,47 @@ bool build_ast(Context* context, u8* path) {
                     i += 1;
                 } break;
 
+                case '%': {
+                    kind = token_mod;
+                    i += 1;
+                } break;
+
                 case '&': {
                     kind = token_and;
                     i += 1;
                 } break;
 
                 case '>': {
-                    if (b == '=') {
-                        kind = token_greater_or_equal;
-                        i += 2;
-                    } else {
-                        kind = token_greater;
-                        i += 1;
+                    switch (b) {
+                        case '=': {
+                            kind = token_greater_or_equal;
+                            i += 2;
+                        } break;
+                        case '>': {
+                            kind = token_shift_right;
+                            i += 2;
+                        } break;
+                        default: {
+                            kind = token_greater;
+                            i += 1;
+                        } break;
                     }
                 } break;
 
                 case '<': {
-                    if (b == '=') {
-                        kind = token_less_or_equal;
-                        i += 2;
-                    } else {
-                        kind = token_less;
-                        i += 1;
+                    switch (b) {
+                        case '=': {
+                            kind = token_less_or_equal;
+                            i += 2;
+                        } break;
+                        case '<': {
+                            kind = token_shift_left;
+                            i += 2;
+                        } break;
+                        default: {
+                            kind = token_less;
+                            i += 1;
+                        } break;
                     }
                 } break;
 
@@ -3754,6 +3785,8 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
             } else {
                 if (left_primitive == right_primitive && primitive_is_integer(left_primitive)) {
                     expr->type_index = expr->binary.left->type_index;
+
+                // Handle special cases for pointer arithmetic
                 } else switch (expr->binary.op) {
                     case binary_add: {
                         if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
@@ -3773,6 +3806,7 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
 
                     case binary_mul: {} break;
                     case binary_div: {} break;
+                    case binary_mod: {} break;
 
                     default: assert(false);
                 }
@@ -4119,11 +4153,6 @@ void intermediate_deallocate_temporary(Context* context, Local local) {
     assert(local.kind == local_temporary);
     assert(context->tmp_tmps[local.value].currently_allocated);
     context->tmp_tmps[local.value].currently_allocated = false;
-
-    Op op = {0};
-    op.kind = op_reset_temporary;
-    op.temporary = local.value;
-    buf_push(context->tmp_ops, op);
 }
 
 void intermediate_write_compound_set(Context* context, Local source, Local target, u32 type_index) {
@@ -4314,6 +4343,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 case binary_sub:  op.kind = op_sub;  break;
                 case binary_mul:  op.kind = op_mul;  break;
                 case binary_div:  op.kind = op_div;  break;
+                case binary_mod:  op.kind = op_mod;  break;
                 case binary_neq:  op.kind = op_neq;  break;
                 case binary_eq:   op.kind = op_eq;   break;
                 case binary_gt:   op.kind = op_gt;   break;
@@ -4331,6 +4361,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 case binary_sub:
                 case binary_mul:
                 case binary_div:
+                case binary_mod:
                 {
                     op.primitive = target_primitive;
                 } break;
@@ -4938,11 +4969,6 @@ void eval_ops(Context* context) {
             instructions_executed += 1;
 
             switch (op->kind) {
-                case op_reset_temporary: {
-                    Mem_Item* item = &frame->func->body.mem_layout.tmps[op->temporary];
-                    mem_clear(frame->local_data + item->offset, item->size);
-                } break;
-
                 case op_set: {
                     u8* target_pointer = eval_get_local(frame, op->binary.target, false);
                     u8* source_pointer = eval_get_local(frame, op->binary.source, true);
@@ -4954,6 +4980,7 @@ void eval_ops(Context* context) {
                 case op_sub:
                 case op_mul:
                 case op_div:
+                case op_mod:
                 {
                     u8* target_pointer = eval_get_local(frame, op->binary.target, false);
                     u8* source_pointer = eval_get_local(frame, op->binary.source, true);
@@ -4985,6 +5012,7 @@ void eval_ops(Context* context) {
                                 case op_sub: result = target - source; break;
                                 case op_mul: result = target * source; break;
                                 case op_div: result = target / source; break;
+                                case op_mod: result = target % source; break;
                                 default: assert(false);
                             }
                             mem_copy((u8*) &result, target_pointer, operand_size);
@@ -5701,6 +5729,15 @@ void instruction_load_local(u8** b, Func* func, X64_Reg reg, Local local, u8 byt
     }
 }
 
+void instruction_mov_ah_to_al(u8** b) {
+    buf_push(*b, 0x88);
+    buf_push(*b, 0xe0);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov8 al, ah");
+    #endif
+}
+
 
 void machinecode_for_op(Context* context, Func* func, u32 op_index) {
     Op* op = &func->body.ops[op_index];
@@ -5767,6 +5804,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
         case op_mul:
         case op_div:
+        case op_mod:
         {
             u8 primitive_size = primitive_size_of(op->primitive);
 
@@ -5775,15 +5813,22 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
             instruction_load_local(&context->bytecode, func, reg_rcx, op->binary.source, primitive_size);
 
+            X64_Reg result_reg;
             X64_Instruction_Unary kind;
             switch (op->kind) {
-                case op_mul: kind = instruction_mul; break;
-                case op_div: kind = instruction_div; break;
+                case op_mul: kind = instruction_mul; result_reg = reg_rax; break;
+                case op_div: kind = instruction_div; result_reg = reg_rax; break;
+                case op_mod: kind = instruction_div; result_reg = reg_rdx; break;
                 default: assert(false);
             }
             instruction_general_reg(&context->bytecode, kind, reg_rcx, primitive_size);
 
-            instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+            if (primitive_size == 1 && op->kind == op_mod) {
+                instruction_mov_ah_to_al(&context->bytecode);
+                result_reg = reg_rax;
+            }
+
+            instruction_mov_stack(&context->bytecode, func, mov_to, result_reg, op->binary.target, primitive_size);
         } break;
 
         case op_neq:
@@ -5944,8 +5989,6 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             fixup.text_location = big_jump_text_location;
             buf_push(context->jump_fixups, fixup);
         } break;
-
-        case op_reset_temporary: break;
 
         case op_end_of_function: assert(false);
         default: assert(false);
@@ -6997,7 +7040,7 @@ void main() {
     Context context = {0};
     if (!build_ast(&context, "W:/asm2/code.txt")) return;
     if (!typecheck(&context)) return;
-    //print_verbose_info(&context);
+    print_verbose_info(&context);
     build_intermediate(&context);
     //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
