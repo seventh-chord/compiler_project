@@ -7,8 +7,10 @@ extern "kernel32.lib" {
 }
 
 fn main() -> u8 {
-    var message_a: [3]u8 = [3]u8 { seventy_two(), 105, 10 };
-    var message_b: [3]u8 = [3]u8 { 89, 111, 10 };
+    var message_a: [3]u8 = [3]u8 { 0, 105, 10 };
+    var message_b: [3]u8 = [3]u8 { 72, 111, 10 };
+
+    message_a[0] = seventy_two();
 
     {
         var written: u32 = 0;
@@ -18,7 +20,7 @@ fn main() -> u8 {
         for (a > 0) {
             a = a - 1;
 
-            if ((a/2)*2 == a) { # Who needs a modulus operator anyways?
+            if ((a/2)*2 != a) { # Who needs a modulus operator anyways?
                 WriteFile(handle, &message_a, 2, &written, null);
             } else {
                 WriteFile(handle, &message_b, 2, &written, null);
@@ -99,7 +101,6 @@ fn seventy_two() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
-#   loops
 #   global variables and constants (.data and .bss (?))
 #   type inference
 #   structs, unions, enums

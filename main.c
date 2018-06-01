@@ -717,6 +717,9 @@ typedef struct Token {
         token_div = '/',
 
         token_and = '&',
+        token_not = '!', // Not in use yet
+        token_or  = '|', // Not in use yet
+        token_xor = '^', // Not in use yet
 
         token_greater = '>',
         token_less = '<',
@@ -727,6 +730,7 @@ typedef struct Token {
         token_greater_or_equal, // ">="
         token_less_or_equal, // "<="
         token_equal, // "=="
+        token_not_equal, // "!="
         token_arrow, // "->"
 
 
@@ -760,8 +764,6 @@ typedef struct Token {
 
     File_Pos pos;
 } Token;
-
-
 
 typedef struct Var {
     u32 name;
@@ -968,6 +970,7 @@ typedef enum Binary_Op {
     binary_div,
 
     binary_eq,
+    binary_neq,
     binary_gt,
     binary_gteq,
     binary_lt,
@@ -979,8 +982,11 @@ typedef enum Binary_Op {
 u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
     [binary_mul] = 2,
     [binary_div] = 2,
+
     [binary_add] = 1,
     [binary_sub] = 1,
+
+    [binary_neq] = 0,
     [binary_eq] = 0,
     [binary_gt] = 0,
     [binary_gteq] = 0,
@@ -993,6 +999,7 @@ bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
     [binary_div] = true,
     [binary_mul] = false,
     [binary_add] = false,
+    [binary_neq] = false,
     [binary_eq] = false,
     [binary_gt] = false,
     [binary_gteq] = false,
@@ -1005,10 +1012,12 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [binary_sub] = "-",
     [binary_mul] = "*",
     [binary_div] = "/",
-    [binary_eq] = "==",
-    [binary_gt] = ">",
+
+    [binary_neq]  = "!=",
+    [binary_eq]   = "==",
+    [binary_gt]   = ">",
     [binary_gteq] = ">=",
-    [binary_lt] = "<",
+    [binary_lt]   = "<",
     [binary_lteq] = "<=",
 };
 
@@ -1167,12 +1176,35 @@ typedef enum Op_Kind {
     op_mul,
     op_div,
     op_address_of,
+    op_neq,
     op_eq,
     op_gt,
     op_gteq,
     op_lt,
     op_lteq,
+
+    OP_COUNT,
 } Op_Kind;
+
+u8* OP_NAMES[OP_COUNT] = {
+    [op_end_of_function] = "end_of_function",
+    [op_reset_temporary] = "reset_temporary",
+    [op_call] = "call",
+    [op_cast] = "cast",
+    [op_jump] = "jump",
+    [op_set] = "set",
+    [op_add] = "add",
+    [op_sub] = "sub",
+    [op_mul] = "mul",
+    [op_div] = "div",
+    [op_address_of] = "address_of",
+    [op_neq] = "neq",
+    [op_eq] = "eq",
+    [op_gt] = "gt",
+    [op_gteq] = "gteq",
+    [op_lt] = "lt",
+    [op_lteq] = "lteq",
+};
 
 typedef struct Op_Call_Param {
     Local local;
@@ -1350,8 +1382,10 @@ u8* reg_names[REG_COUNT] = {
     "r12", "r13", "r14", "r15"
 };
 
+// These match the the 'cc' part in 'jmpcc', 'setcc' and 'movcc'
 typedef enum X64_Condition {
     x64_condition_eq,
+    x64_condition_neq,
     x64_condition_gt,
     x64_condition_gteq,
     x64_condition_lt,
@@ -1559,6 +1593,52 @@ void print_type(Context* context, u32 type_index) {
     }
 }
 
+u8* token_kind_name(int kind) {
+    switch (kind) {
+        case token_identifier:  assert(false); return null;
+        case token_literal:     assert(false); return null;
+        case token_string:      assert(false); return null;
+
+        case token_end_of_stream:        return "end of file";
+        case token_add:                  return "+";
+        case token_sub:                  return "-";
+        case token_mul:                  return "*";
+        case token_div:                  return "/";
+        case token_and:                  return "&";
+        case token_or:                   return "|";
+        case token_not:                  return "!";
+        case token_xor:                  return "^";
+        case token_greater:              return ">";
+        case token_greater_or_equal:     return ">=";
+        case token_less:                 return "<";
+        case token_less_or_equal:        return "<=";
+        case token_equal:                return "==";
+        case token_not_equal:            return "!=";
+        case token_assign:               return "=";
+        case token_arrow:                return "->";
+        case token_semicolon:            return "semicolon ';'";
+        case token_comma:                return "comma ','";
+        case token_colon:                return "colon ':'";
+        case token_bracket_round_open:   return "opening parenthesis '('";
+        case token_bracket_round_close:  return "closing parenthesis ')'";
+        case token_bracket_square_open:  return "opening square bracket '['";
+        case token_bracket_square_close: return "closing square bracket ']'";
+        case token_bracket_curly_open:   return "opening curly brace '{'";
+        case token_bracket_curly_close:  return "closing curly brace '}'";
+        case token_keyword_fn:           return "fn";
+        case token_keyword_extern:       return "extern";
+        case token_keyword_var:          return "var";
+        case token_keyword_if:           return "if";
+        case token_keyword_else:         return "else";
+        case token_keyword_for:          return "for";
+        case token_keyword_true:         return "true";
+        case token_keyword_false:        return "false";
+        case token_keyword_null:         return "null";
+
+        default: assert(false); return null;
+    }
+}
+
 void print_token(u8* string_table, Token* t) {
     u8* s = null;
 
@@ -1575,44 +1655,9 @@ void print_token(u8* string_table, Token* t) {
             printf("\"%z\"", t->string.length, t->string.bytes);
         } break;
 
-        case token_end_of_stream: s = "end of file"; break;
-
-        case token_add:                  s = "+"; break;
-        case token_sub:                  s = "-"; break;
-        case token_mul:                  s = "*"; break;
-        case token_div:                  s = "/"; break;
-        case token_greater:              s = ">"; break;
-        case token_greater_or_equal:     s = ">="; break;
-        case token_less:                 s = "<"; break;
-        case token_less_or_equal:        s = "<="; break;
-        case token_equal:                s = "=="; break;
-        case token_assign:               s = "="; break;
-        case token_arrow:                s = "->"; break;
-        case token_semicolon:            s = ";"; break;
-        case token_comma:                s = ","; break;
-        case token_colon:                s = ":"; break;
-        case token_bracket_round_open:   s = "("; break;
-        case token_bracket_round_close:  s = ")"; break;
-        case token_bracket_square_open:  s = "["; break;
-        case token_bracket_square_close: s = "]"; break;
-        case token_bracket_curly_open:   s = "{"; break;
-        case token_bracket_curly_close:  s = "}"; break;
-
-        case token_keyword_fn:      s = "keyword fn"; break;
-        case token_keyword_extern:  s = "keyword extern"; break;
-        case token_keyword_var:     s = "keyword var"; break;
-        case token_keyword_if:      s = "keyword if"; break;
-        case token_keyword_else:    s = "keyword else"; break;
-        case token_keyword_for:     s = "keyword for"; break;
-        case token_keyword_true:    s = "keyword true"; break;
-        case token_keyword_false:   s = "keyword false"; break;
-        case token_keyword_null:    s = "keyword null"; break;
-
-        default: assert(false);
-    }
-
-    if (s != null) {
-        printf(s);
+        default: {
+            printf(token_kind_name(t->kind));
+        } break;
     }
 }
 
@@ -1834,25 +1879,9 @@ void print_op(Context* context, Func* func, Op* op) {
         } break;
 
         case op_set: case op_add: case op_sub: case op_mul: case op_div:
-        case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
+        case op_neq: case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
         {
-            u8* op_name;
-            switch (op->kind) {
-                case op_set:  op_name = "set"; break;
-                case op_add:  op_name = "add"; break;
-                case op_sub:  op_name = "sub"; break;
-                case op_mul:  op_name = "mul"; break;
-                case op_div:  op_name = "div"; break;
-                case op_eq:   op_name = "eq"; break;
-                case op_gt:   op_name = "gt"; break;
-                case op_gteq: op_name = "gteq"; break;
-                case op_lt:   op_name = "lt"; break;
-                case op_lteq: op_name = "lteq"; break;
-                default: assert(false);
-            }
-
-            printf("(%s) %s ", primitive_name(op->primitive), op_name);
-
+            printf("(%s) %s ", primitive_name(op->primitive), OP_NAMES[op->kind]);
             print_local(context, func, op->binary.target);
             printf(", ");
             print_local(context, func, op->binary.source);
@@ -1937,52 +1966,8 @@ Primitive parse_primitive_name(Context* context, u32 name_index) {
 }
 
 bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
-    u8* token_name = null;
-    switch (kind) {
-        case token_bracket_round_open:   token_name = "opening parenthesis '('"; break;
-        case token_bracket_round_close:  token_name = "closing parenthesis ')'"; break;
-        case token_bracket_square_open:  token_name = "opening square bracket '['"; break;
-        case token_bracket_square_close: token_name = "closing square bracket ']'"; break;
-        case token_bracket_curly_open:   token_name = "opening curly brace '{'"; break;
-        case token_bracket_curly_close:  token_name = "closing curly brace '}'"; break;
-
-        case token_semicolon: token_name = "semicolon ';'"; break;
-        case token_comma:     token_name = "comma ','"; break;
-        case token_colon:     token_name = "colon ':'"; break;
-
-        case token_add: token_name = "+"; break;
-        case token_sub: token_name = "-"; break;
-        case token_mul: token_name = "*"; break;
-        case token_div: token_name = "/"; break;
-        case token_and: token_name = "&"; break;
-
-        case token_greater:             token_name = ">"; break;
-        case token_greater_or_equal:    token_name = ">="; break;
-        case token_less:                token_name = "<"; break;
-        case token_less_or_equal:       token_name = "<="; break;
-        case token_assign:              token_name = "="; break;
-        case token_equal:               token_name = "=="; break;
-        case token_arrow:               token_name = "->"; break;
-
-        case token_keyword_extern: token_name = "extern"; break;
-        case token_keyword_var:    token_name = "var"; break;
-        case token_keyword_fn:     token_name = "fn"; break;
-        case token_keyword_null:   token_name = "null"; break;
-        case token_keyword_if:     token_name = "if"; break;
-        case token_keyword_else:   token_name = "else"; break;
-        case token_keyword_for:    token_name = "for"; break;
-        case token_keyword_true:   token_name = "true"; break;
-        case token_keyword_false:  token_name = "false"; break;
-
-        // These don't realy make sense, they require special parsing
-        case token_identifier: unimplemented(); break;
-        case token_literal:    unimplemented(); break;
-        case token_string:     unimplemented(); break;
-        default: assert(false);
-    }
-
     if (t->kind != kind) {
-        printf("Expected %s %s, but got ", token_name, location);
+        printf("Expected %s %s, but got ", token_kind_name(t->kind), location);
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
@@ -2466,6 +2451,10 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expect_value = true;
                 } break;
 
+                case token_not: {
+                    unimplemented(); // TODO logical not and bitwise not
+                } break;
+
                 default: {
                     t += 1;
                 } break;
@@ -2519,6 +2508,14 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         case token_less:               op = binary_lt; break;
                         case token_less_or_equal:      op = binary_lteq; break;
                         case token_equal:              op = binary_eq; break;
+                        case token_not_equal:          op = binary_neq; break;
+
+                        case token_and:
+                        case token_or:
+                        case token_xor:
+                        {
+                            unimplemented(); // TODO bitwise operators
+                        } break;
                     }
 
                     if (op != binary_op_invalid) {
@@ -3233,40 +3230,93 @@ bool build_ast(Context* context, u8* path) {
 
         case '+': case '-': case '*': case '/':
         case '=': case '<': case '>':
-        case '&':
+        case '&': case '!': case '|': case '^':
         {
             u8 a = file[i];
             u8 b = i + 1 < file_length? file[i + 1] : 0;
 
-            int kind;
+            int kind = -1;
+            switch (a) {
+                case '+': {
+                    kind = token_add;
+                    i += 1;
+                } break;
 
-            if (a == '-' && b == '>') {
-                kind = token_arrow;
-                i += 2;
-            } else if (a == '<' && b == '=') {
-                kind = token_less_or_equal;
-                i += 2;
-            } else if (a == '>' && b == '=') {
-                kind = token_greater_or_equal;
-                i += 2;
-            } else if (a == '=' && b == '=') {
-                kind = token_equal;
-                i += 2;
-            } else {
-                switch (a) {
-                    case '+': kind = token_add; break;
-                    case '-': kind = token_sub; break;
-                    case '*': kind = token_mul; break;
-                    case '/': kind = token_div; break;
-                    case '&': kind = token_and; break;
-                    case '>': kind = token_greater; break;
-                    case '<': kind = token_less; break;
-                    case '=': kind = token_assign; break;
-                    default: assert(false);
-                }
-                i += 1;
+                case '-': {
+                    if (b == '>') {
+                        kind = token_arrow;
+                        i += 2;
+                    } else {
+                        kind = token_sub;
+                        i += 1;
+                    }
+                } break;
+
+                case '*': {
+                    kind = token_mul;
+                    i += 1;
+                } break;
+
+                case '/': {
+                    kind = token_div;
+                    i += 1;
+                } break;
+
+                case '&': {
+                    kind = token_and;
+                    i += 1;
+                } break;
+
+                case '>': {
+                    if (b == '=') {
+                        kind = token_greater_or_equal;
+                        i += 2;
+                    } else {
+                        kind = token_greater;
+                        i += 1;
+                    }
+                } break;
+
+                case '<': {
+                    if (b == '=') {
+                        kind = token_less_or_equal;
+                        i += 2;
+                    } else {
+                        kind = token_less;
+                        i += 1;
+                    }
+                } break;
+
+                case '=': {
+                    if (b == '=') {
+                        kind = token_equal;
+                        i += 2;
+                    } else {
+                        kind = token_assign;
+                        i += 1;
+                    }
+                } break;
+
+                case '!': {
+                    if (b == '=') {
+                        kind = token_not_equal;
+                        i += 2;
+                    } else {
+                        kind = token_not;
+                        i += 1;
+                    }
+                } break;
+
+                case '|': {
+                    kind = token_or;
+                } break;
+
+                case '^': {
+                    kind = token_xor;
+                } break;
             }
 
+            assert(kind != -1);
             buf_push(tokens, ((Token) { kind, .pos = file_pos }));
         } break;
 
@@ -3649,6 +3699,7 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
             bool is_comparasion = false;
             switch (expr->binary.op) {
                 case binary_eq:
+                case binary_neq:
                 case binary_gt:
                 case binary_gteq:
                 case binary_lt:
@@ -4263,6 +4314,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 case binary_sub:  op.kind = op_sub;  break;
                 case binary_mul:  op.kind = op_mul;  break;
                 case binary_div:  op.kind = op_div;  break;
+                case binary_neq:  op.kind = op_neq;  break;
                 case binary_eq:   op.kind = op_eq;   break;
                 case binary_gt:   op.kind = op_gt;   break;
                 case binary_gteq: op.kind = op_gteq; break;
@@ -4284,11 +4336,14 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 } break;
 
                 case binary_eq:
+                case binary_neq:
                 case binary_gt:
                 case binary_gteq:
                 case binary_lt:
                 case binary_lteq:
                 {
+                    // NB for comparative operations, 'op.primitive' should be the type we are comparing, not the
+                    // type we are producing (which always is bool)
                     Primitive left_primitive  = context->type_buf[expr->binary.left->type_index];
                     Primitive right_primitive = context->type_buf[expr->binary.right->type_index];
                     assert(left_primitive == right_primitive);
@@ -4947,13 +5002,19 @@ void eval_ops(Context* context) {
                     }
                 } break;
 
-                case op_eq: {
+                case op_neq: case op_eq:
+                {
                     assert(!primitive_is_compound(op->primitive));
                     u8* target_pointer = eval_get_local(frame, op->binary.target, false);
                     u8* source_pointer = eval_get_local(frame, op->binary.source, true);
                     u8 size = primitive_size_of(op->primitive);
                     bool equal = mem_cmp(target_pointer, source_pointer, size);
-                    *target_pointer = equal? 1 : 0;
+
+                    switch (op->kind) {
+                        case op_eq:  *target_pointer = equal? 1 : 0; break;
+                        case op_neq: *target_pointer = equal? 0 : 1; break;
+                        default: assert(false);
+                    }
                 } break;
 
                 case op_gt:
@@ -5324,6 +5385,7 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
     if (sign) {
         switch (condition) {
             case x64_condition_eq:   opcode = 0x94; break;
+            case x64_condition_neq:  opcode = 0x95; break;
             case x64_condition_gt:   opcode = 0x9f; break;
             case x64_condition_gteq: opcode = 0x9d; break;
             case x64_condition_lt:   opcode = 0x9c; break;
@@ -5333,6 +5395,7 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
     } else {
         switch (condition) {
             case x64_condition_eq:   opcode = 0x94; break;
+            case x64_condition_neq:  opcode = 0x95; break;
             case x64_condition_gt:   opcode = 0x97; break;
             case x64_condition_gteq: opcode = 0x93; break;
             case x64_condition_lt:   opcode = 0x92; break;
@@ -5360,6 +5423,7 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
     if (sign) {
         switch (condition) {
             case x64_condition_eq:   condition_name = "e";  break;
+            case x64_condition_neq:  condition_name = "ne"; break;
             case x64_condition_gt:   condition_name = "g";  break;
             case x64_condition_gteq: condition_name = "ge"; break;
             case x64_condition_lt:   condition_name = "l";  break;
@@ -5369,6 +5433,7 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
     } else {
         switch (condition) {
             case x64_condition_eq:   condition_name = "e"; break;
+            case x64_condition_neq:  condition_name = "ne"; break;
             case x64_condition_gt:   condition_name = "a"; break;
             case x64_condition_gteq: condition_name = "ae"; break;
             case x64_condition_lt:   condition_name = "b"; break;
@@ -5721,6 +5786,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
         } break;
 
+        case op_neq:
         case op_eq:
         case op_gt:
         case op_gteq:
@@ -5742,6 +5808,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             X64_Condition condition;
             switch (op->kind) {
                 case op_eq:   condition = x64_condition_eq;     break;
+                case op_neq:  condition = x64_condition_neq;    break;
                 case op_gt:   condition = x64_condition_gt;     break;
                 case op_gteq: condition = x64_condition_gteq;   break;
                 case op_lt:   condition = x64_condition_lt;     break;
