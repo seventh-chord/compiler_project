@@ -2198,6 +2198,8 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
+Expr* parse_compound_literal(Context* context, Token* t, u32* length);
+
 Expr* parse_expr(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
@@ -2410,73 +2412,32 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     could_parse = true;
                 } break;
 
-                // Array literal
-                case token_bracket_square_open: {
-                    u32 type_length = 0;
-                    u32 type_index = parse_type(context, t, &type_length);
-                    t += type_length;
+                // Array compound literal, or untyped compound literals
+                case token_bracket_curly_open:
+                case token_bracket_square_open:
+                {
+                    u32 type_index = 0;
+                    if (t->kind == token_bracket_square_open) {
+                        u32 type_length = 0;
+                        type_index = parse_type(context, t, &type_length);
+                        t += type_length;
 
-                    if (type_index == U32_MAX) {
-                        *length = t - t_start;
-                        return null;
-                    }
-
-                    if (!expect_single_token(context, t, token_bracket_curly_open, "after type of compound literal")) {
-                        *length = t - t_start;
-                        return null;
-                    }
-                    t += 1;
-
-                    Expr_List* expr_list = null;
-                    Expr_List* expr_list_head = null;
-                    u32 expr_count = 0;
-
-                    while (t->kind != token_bracket_curly_close) {
-                        u32 sub_expr_length = 0;
-                        Expr* sub_expr = parse_expr(context, t, &sub_expr_length);
-                        t += sub_expr_length;
-
-                        if (sub_expr == null) {
+                        if (type_index == U32_MAX) {
                             *length = t - t_start;
                             return null;
                         }
-
-                        if (t->kind != token_bracket_curly_close) {
-                            if (t->kind != token_comma) {
-                                printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
-                                print_token(context->string_table, t);
-                                printf(" (Line %u)\n", (u64) t->pos.line);
-                                *length = t - t_start;
-                                return null;
-                            }
-                            t += 1;
-                        }
-
-                        Expr_List* list_item = arena_new(&context->arena, Expr_List);
-                        list_item->expr = sub_expr;
-
-                        if (expr_list_head == null) {
-                            expr_list_head = list_item;
-                        } else {
-                            expr_list->next = list_item;
-                        }
-                        expr_list = list_item;
-
-                        expr_count += 1;
                     }
-                    
-                    if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
+
+                    u32 compound_literal_length = 0;
+                    Expr* expr = parse_compound_literal(context, t, &compound_literal_length);
+                    t += compound_literal_length;
+
+                    if (expr == null) {
                         *length = t - t_start;
                         return null;
                     }
-                    t += 1;
 
-                    Expr* expr = arena_new(&context->arena, Expr);
-                    expr->kind = expr_compound_literal;
                     expr->type_index = type_index;
-                    expr->compound_literal.content = expr_list_head;
-                    expr->compound_literal.count = expr_count;
-                    expr->pos = t->pos;
 
                     shunting_yard_push_expr(context, yard, expr);
 
@@ -2510,10 +2471,6 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                 case token_not: {
                     unimplemented(); // TODO logical not and bitwise not
-                } break;
-
-                default: {
-                    t += 1;
                 } break;
             }
         } else {
@@ -2613,6 +2570,69 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
     Expr* expr = yard->expr_queue[0];
 
     arena_stack_pop(&context->stack);
+
+    *length = t - t_start;
+    return expr;
+}
+
+Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
+    Token* t_start = t;
+
+    if (!expect_single_token(context, t, token_bracket_curly_open, "after type of compound literal")) {
+        *length = t - t_start;
+        return null;
+    }
+    t += 1;
+
+    Expr_List* expr_list = null;
+    Expr_List* expr_list_head = null;
+    u32 expr_count = 0;
+
+    while (t->kind != token_bracket_curly_close) {
+        u32 sub_expr_length = 0;
+        Expr* sub_expr = parse_expr(context, t, &sub_expr_length);
+        t += sub_expr_length;
+
+        if (sub_expr == null) {
+            *length = t - t_start;
+            return null;
+        }
+
+        if (t->kind != token_bracket_curly_close) {
+            if (t->kind != token_comma) {
+                printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", (u64) t->pos.line);
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+        }
+
+        Expr_List* list_item = arena_new(&context->arena, Expr_List);
+        list_item->expr = sub_expr;
+
+        if (expr_list_head == null) {
+            expr_list_head = list_item;
+        } else {
+            expr_list->next = list_item;
+        }
+        expr_list = list_item;
+
+        expr_count += 1;
+    }
+    
+    if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
+        *length = t - t_start;
+        return null;
+    }
+    t += 1;
+
+    Expr* expr = arena_new(&context->arena, Expr);
+    expr->kind = expr_compound_literal;
+    expr->compound_literal.content = expr_list_head;
+    expr->compound_literal.count = expr_count;
+    expr->pos = t_start->pos;
 
     *length = t - t_start;
     return expr;
@@ -3724,17 +3744,18 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
         } break;
 
         case expr_compound_literal: {
-            // The syntax requires you to give a type when creating a compound literal, so we just
-            // have to check that the members inside the literal are correct.
+            if (expr->type_index == 0) {
+                expr->type_index = solidify_to;
+            }
 
             Primitive primitive = context->type_buf[expr->type_index];
             if (primitive == primitive_array) {
                 u64 expected_child_count = *((u64*) &context->type_buf[expr->type_index + 1]);
-                u32 expected_child_type_index = context->type_buf[expr->type_index + 1 + sizeof(u64)];
+                u32 expected_child_type_index = expr->type_index + 1 + sizeof(u64);
 
                 if (expr->compound_literal.count != expected_child_count) {
                     printf(
-                        "To %s values in compound literal: expected %u, got %u (Line %u)\n",
+                        "Too %s values in compound literal: expected %u, got %u (Line %u)\n",
                         (expr->compound_literal.count > expected_child_count)? "many" : "few",
                         (u64) expected_child_count,
                         (u64) expr->compound_literal.count,
@@ -3759,7 +3780,6 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                         return false;
                     }
                 }
-
             } else {
                 printf("Invalid type for compound literal: ");
                 print_type(context, expr->type_index);
