@@ -1331,11 +1331,12 @@ typedef struct Op {
 
         struct {
             Local local;
-            u32 bytecode_data_offset;
+            u32 data_offset;
+            bool writable; // selects seg_rodata or seg_rwdata
         } load_data;
     };
 
-    u32 bytecode_start;
+    u32 text_start;
 } Op;
 
 typedef struct Tmp {
@@ -1384,7 +1385,8 @@ typedef struct Fixup {
 
     enum {
         fixup_imported_function,
-        fixup_data,
+        fixup_rwdata,
+        fixup_rodata,
     } kind;
 
     union {
@@ -1445,7 +1447,7 @@ typedef struct Func {
             Op* ops;
             u32 op_count;
 
-            u32 bytecode_start;
+            u32 text_start;
         } body;
     };
 } Func;
@@ -1508,8 +1510,9 @@ typedef struct Context {
     u32 string_type; // *u8
 
     // Low level representation
-    u8* bytecode; // stretchy-buffer
-    u8* bytecode_data; // stretchy-buffer
+    u8* seg_text; // stretchy-buffer
+    u8* seg_rwdata; // stretchy-buffer
+    u8* seg_rodata; // stretchy-buffer
     Fixup* fixups; // stretchy-buffer
 
     Library_Import* imports; // stretchy-buffer
@@ -1552,6 +1555,19 @@ Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
     index.function = buf_length(import->function_names);
     buf_push(import->function_names, function_name);
     return index;
+}
+
+u64 add_exe_data(Context* context, u8* data, u64 length, bool writable) {
+    u8** buffer;
+    if (writable) {
+        buffer = &context->seg_rwdata;
+    } else {
+        buffer = &context->seg_rodata;
+    }
+
+    u64 data_offset = buf_length(*buffer);
+    str_push_str(buffer, data, length);
+    return data_offset;
 }
 
 bool type_cmp(Context* context, u32 a, u32 b) {
@@ -4391,15 +4407,16 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_string_literal: {
-            u64 bytecode_data_offset = buf_length(context->bytecode_data);
-            str_push_str(&context->bytecode_data, expr->string.bytes, expr->string.length + 1);
+            bool writable = false; // Decides whether strings should be writable by user code
 
-            assert(bytecode_data_offset <= U32_MAX);
+            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, writable);
+            assert(data_offset <= U32_MAX);
 
             Op op = {0};
             op.kind = op_load_data;
             op.load_data.local = assign_to;
-            op.load_data.bytecode_data_offset = (u32) bytecode_data_offset;
+            op.load_data.data_offset = (u32) data_offset;
+            op.load_data.writable = writable;
             buf_push(context->tmp_ops, op);
         } break;
 
@@ -5698,18 +5715,18 @@ void instruction_lea_stack(u8** b, Func* func, Local local, X64_Reg reg) {
     #endif
 }
 
-void instruction_lea_data(Context* context, u32 data_offset, X64_Reg reg) {
-    buf_push(context->bytecode, 0x48);
-    buf_push(context->bytecode, 0x8d);
-    buf_push(context->bytecode, 0x05);
-    buf_push(context->bytecode, 0xde);
-    buf_push(context->bytecode, 0xad);
-    buf_push(context->bytecode, 0xbe);
-    buf_push(context->bytecode, 0xef);
+void instruction_lea_data(Context* context, u32 data_offset, bool writable, X64_Reg reg) {
+    buf_push(context->seg_text, 0x48);
+    buf_push(context->seg_text, 0x8d);
+    buf_push(context->seg_text, 0x05);
+    buf_push(context->seg_text, 0xde);
+    buf_push(context->seg_text, 0xad);
+    buf_push(context->seg_text, 0xbe);
+    buf_push(context->seg_text, 0xef);
 
     Fixup fixup = {0};
-    fixup.kind = fixup_data;
-    fixup.text_location = buf_length(context->bytecode) - sizeof(u32);
+    fixup.kind = writable? fixup_rwdata : fixup_rodata;
+    fixup.text_location = buf_length(context->seg_text) - sizeof(u32);
     fixup.data_offset = data_offset;
     buf_push(context->fixups, fixup);
 
@@ -5903,7 +5920,7 @@ void instruction_mov_ah_to_al(u8** b) {
 
 void machinecode_for_op(Context* context, Func* func, u32 op_index) {
     Op* op = &func->body.ops[op_index];
-    op->bytecode_start = buf_length(context->bytecode);
+    op->text_start = buf_length(context->seg_text);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("; ");
@@ -5915,13 +5932,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         case op_set: {
             u8 primitive_size = primitive_size_of(op->primitive);
 
-            instruction_load_local(&context->bytecode, func, reg_rax, op->binary.source, primitive_size);
+            instruction_load_local(&context->seg_text, func, reg_rax, op->binary.source, primitive_size);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
-                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, primitive_size);
             }
         } break;
 
@@ -5931,8 +5948,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->binary.source.as_reference) unimplemented(); // TODO
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_lea_stack(&context->bytecode, func, op->binary.source, reg_rax);
-            instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, POINTER_SIZE);
+            instruction_lea_stack(&context->seg_text, func, op->binary.source, reg_rax);
+            instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, POINTER_SIZE);
         } break;
 
         case op_add:
@@ -5941,13 +5958,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
-                instruction_mov_pointer(&context->bytecode, mov_from, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_from, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->binary.target, primitive_size);
             }
 
-            instruction_load_local(&context->bytecode, func, reg_rdx, op->binary.source, primitive_size);
+            instruction_load_local(&context->seg_text, func, reg_rdx, op->binary.source, primitive_size);
 
             int kind;
             switch (op->kind) {
@@ -5955,12 +5972,12 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                 case op_sub: kind = instruction_sub; break;
                 default: assert(false);
             }
-            instruction_general_reg_reg(&context->bytecode, kind, reg_rax, reg_rdx, primitive_size);
+            instruction_general_reg_reg(&context->seg_text, kind, reg_rax, reg_rdx, primitive_size);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, primitive_size);
             }
         } break;
 
@@ -5972,8 +5989,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
-            instruction_load_local(&context->bytecode, func, reg_rcx, op->binary.source, primitive_size);
+            instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->binary.target, primitive_size);
+            instruction_load_local(&context->seg_text, func, reg_rcx, op->binary.source, primitive_size);
 
             X64_Reg result_reg;
             X64_Instruction_Unary kind;
@@ -5983,14 +6000,14 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                 case op_mod: kind = instruction_div; result_reg = reg_rdx; break;
                 default: assert(false);
             }
-            instruction_general_reg(&context->bytecode, kind, reg_rcx, primitive_size);
+            instruction_general_reg(&context->seg_text, kind, reg_rcx, primitive_size);
 
             if (primitive_size == 1 && op->kind == op_mod) {
-                instruction_mov_ah_to_al(&context->bytecode);
+                instruction_mov_ah_to_al(&context->seg_text);
                 result_reg = reg_rax;
             }
 
-            instruction_mov_stack(&context->bytecode, func, mov_to, result_reg, op->binary.target, primitive_size);
+            instruction_mov_stack(&context->seg_text, func, mov_to, result_reg, op->binary.target, primitive_size);
         } break;
 
         case op_neq:
@@ -6003,13 +6020,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
-                instruction_mov_pointer(&context->bytecode, mov_from, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_from, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->binary.target, primitive_size);
             }
 
-            instruction_load_local(&context->bytecode, func, reg_rdx, op->binary.source, primitive_size);
+            instruction_load_local(&context->seg_text, func, reg_rdx, op->binary.source, primitive_size);
 
             bool sign = primitive_is_signed(op->primitive); 
             X64_Condition condition;
@@ -6023,13 +6040,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                 default: assert(false);
             }
 
-            instruction_general_reg_reg(&context->bytecode, instruction_cmp, reg_rax, reg_rdx, primitive_size);
-            instruction_setcc(&context->bytecode, condition, sign, reg_rax);
+            instruction_general_reg_reg(&context->seg_text, instruction_cmp, reg_rax, reg_rdx, primitive_size);
+            instruction_setcc(&context->seg_text, condition, sign, reg_rax);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, primitive_size);
             }
 
         } break;
@@ -6050,39 +6067,39 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                     default: reg = reg_rax; break;
                 }
 
-                instruction_load_local(&context->bytecode, func, reg, local, size);
+                instruction_load_local(&context->seg_text, func, reg, local, size);
 
                 if (p >= 4) {
                     u32 offset = POINTER_SIZE * p;
-                    instruction_mov_stack_manual(&context->bytecode, mov_to, reg, offset, size);
+                    instruction_mov_stack_manual(&context->seg_text, mov_to, reg, offset, size);
                 }
             }
 
             // Actually call the function
             switch (callee->kind) {
                 case func_kind_normal: {
-                    buf_push(context->bytecode, 0xe8);
-                    buf_push(context->bytecode, 0xde);
-                    buf_push(context->bytecode, 0xad);
-                    buf_push(context->bytecode, 0xbe);
-                    buf_push(context->bytecode, 0xef);
+                    buf_push(context->seg_text, 0xe8);
+                    buf_push(context->seg_text, 0xde);
+                    buf_push(context->seg_text, 0xad);
+                    buf_push(context->seg_text, 0xbe);
+                    buf_push(context->seg_text, 0xef);
 
                     Call_Fixup fixup = {0};
-                    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
+                    fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
                     fixup.func_index = op->call.func_index;
                     buf_push(context->call_fixups, fixup);
                 } break;
 
                 case func_kind_imported: {
-                    buf_push(context->bytecode, 0xff);
-                    buf_push(context->bytecode, 0x15);
-                    buf_push(context->bytecode, 0xde);
-                    buf_push(context->bytecode, 0xad);
-                    buf_push(context->bytecode, 0xbe);
-                    buf_push(context->bytecode, 0xef);
+                    buf_push(context->seg_text, 0xff);
+                    buf_push(context->seg_text, 0x15);
+                    buf_push(context->seg_text, 0xde);
+                    buf_push(context->seg_text, 0xad);
+                    buf_push(context->seg_text, 0xbe);
+                    buf_push(context->seg_text, 0xef);
 
                     Fixup fixup = {0};
-                    fixup.text_location = buf_length(context->bytecode) - sizeof(i32);
+                    fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
                     fixup.kind = fixup_imported_function;
                     fixup.import_index = callee->import_info.index;
                     buf_push(context->fixups, fixup);
@@ -6098,10 +6115,10 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (op->primitive != primitive_void) {
                 if (op->call.target.as_reference) {
-                    instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, op->call.target, POINTER_SIZE);
-                    instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, primitive_size_of(op->primitive));
+                    instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->call.target, POINTER_SIZE);
+                    instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size_of(op->primitive));
                 } else {
-                    instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->call.target, primitive_size_of(op->primitive));
+                    instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->call.target, primitive_size_of(op->primitive));
                 }
             }
         } break;
@@ -6117,8 +6134,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (new_size > old_size) {
                 if (op->cast.local.as_reference) unimplemented(); // TODO
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, op->cast.local, old_size);
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, op->cast.local, new_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->cast.local, old_size);
+                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->cast.local, new_size);
             }
         } break;
 
@@ -6126,19 +6143,19 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u64 big_jump_text_location;
 
             if (op->jump.conditional) {
-                instruction_load_local(&context->bytecode, func, reg_rcx, op->jump.condition, 1);
-                instruction_xor_reg_imm(&context->bytecode, reg_rcx, 1, 1);
-                instruction_zero_extend_8_to_64(&context->bytecode, reg_rcx);
-                u64 small_jump_text_location = instruction_jmp_rcx_zero(&context->bytecode);
-                u64 small_jump_from = buf_length(context->bytecode);
-                big_jump_text_location = instruction_jmp_i32(&context->bytecode);
-                u64 small_jump_to = buf_length(context->bytecode);
+                instruction_load_local(&context->seg_text, func, reg_rcx, op->jump.condition, 1);
+                instruction_xor_reg_imm(&context->seg_text, reg_rcx, 1, 1);
+                instruction_zero_extend_8_to_64(&context->seg_text, reg_rcx);
+                u64 small_jump_text_location = instruction_jmp_rcx_zero(&context->seg_text);
+                u64 small_jump_from = buf_length(context->seg_text);
+                big_jump_text_location = instruction_jmp_i32(&context->seg_text);
+                u64 small_jump_to = buf_length(context->seg_text);
 
                 u8 small_jump_size = small_jump_to - small_jump_from;
                 assert(small_jump_size < I8_MAX);
-                context->bytecode[small_jump_text_location] = small_jump_size;
+                context->seg_text[small_jump_text_location] = small_jump_size;
             } else {
-                big_jump_text_location = instruction_jmp_i32(&context->bytecode);
+                big_jump_text_location = instruction_jmp_i32(&context->seg_text);
             }
 
             // NB The way we currently do 'Jump_Fixup's depends on the jmp being the last instruction
@@ -6153,14 +6170,14 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         } break;
 
         case op_load_data: {
-            instruction_lea_data(context, op->load_data.bytecode_data_offset, reg_rax);
+            instruction_lea_data(context, op->load_data.data_offset, op->load_data.writable, reg_rax);
 
             Local local = op->load_data.local;
             if (local.as_reference) {
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rcx, local, POINTER_SIZE);
-                instruction_mov_pointer(&context->bytecode, mov_to, reg_rcx, reg_rax, POINTER_SIZE);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, local, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, POINTER_SIZE);
             } else {
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg_rax, local, POINTER_SIZE);
+                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, local, POINTER_SIZE);
             }
         } break;
 
@@ -6183,7 +6200,7 @@ void build_machinecode(Context* context) {
     buf_foreach (Func, func, context->funcs) {
         if (func->kind != func_kind_normal) continue;
 
-        func->body.bytecode_start = buf_length(context->bytecode);
+        func->body.text_start = buf_length(context->seg_text);
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         u8* name = string_table_access(context->string_table, func->name);
@@ -6278,15 +6295,15 @@ void build_machinecode(Context* context) {
         #endif
 
         if (func->body.stack_layout.total_bytes < I8_MAX) {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x83);
-            buf_push(context->bytecode, 0xec);
-            str_push_integer(&context->bytecode, sizeof(i8), (u8) func->body.stack_layout.total_bytes);
+            buf_push(context->seg_text, 0x48);
+            buf_push(context->seg_text, 0x83);
+            buf_push(context->seg_text, 0xec);
+            str_push_integer(&context->seg_text, sizeof(i8), (u8) func->body.stack_layout.total_bytes);
         } else {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x81);
-            buf_push(context->bytecode, 0xec);
-            str_push_integer(&context->bytecode, sizeof(i32), func->body.stack_layout.total_bytes);
+            buf_push(context->seg_text, 0x48);
+            buf_push(context->seg_text, 0x81);
+            buf_push(context->seg_text, 0xec);
+            str_push_integer(&context->seg_text, sizeof(i32), func->body.stack_layout.total_bytes);
         }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         printf("sub rsp, %x\n", func->body.stack_layout.total_bytes);
@@ -6311,7 +6328,7 @@ void build_machinecode(Context* context) {
                     case 3: reg = reg_r9; break;
                     default: assert(false);
                 }
-                instruction_mov_stack(&context->bytecode, func, mov_to, reg, local, (u8) operand_size);
+                instruction_mov_stack(&context->seg_text, func, mov_to, reg, local, (u8) operand_size);
             }
         }
 
@@ -6320,13 +6337,13 @@ void build_machinecode(Context* context) {
             machinecode_for_op(context, func, i);
         }
         assert(func->body.ops[func->body.op_count].kind == op_end_of_function);
-        func->body.ops[func->body.op_count].bytecode_start = buf_length(context->bytecode);
+        func->body.ops[func->body.op_count].text_start = buf_length(context->seg_text);
 
         buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
-            u64 from_instruction = func->body.ops[fixup->from_op + 1].bytecode_start;
-            u64 to_instruction   = func->body.ops[fixup->to_op].bytecode_start;
+            u64 from_instruction = func->body.ops[fixup->from_op + 1].text_start;
+            u64 to_instruction   = func->body.ops[fixup->to_op].text_start;
 
-            i32* jump = (i32*) (context->bytecode + fixup->text_location);
+            i32* jump = (i32*) (context->seg_text + fixup->text_location);
             assert(*jump == 0xdeadbeef);
 
             if (from_instruction > to_instruction) {
@@ -6356,30 +6373,30 @@ void build_machinecode(Context* context) {
                 }
             } else {
                 u8 operand_size = primitive_size_of(output_primitive);
-                instruction_mov_stack(&context->bytecode, func, mov_from, reg_rax, output_local, operand_size);
+                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, output_local, operand_size);
             }
         } else {
-            instruction_general_reg_reg(&context->bytecode, instruction_xor, reg_rax, reg_rax, POINTER_SIZE);
+            instruction_general_reg_reg(&context->seg_text, instruction_xor, reg_rax, reg_rax, POINTER_SIZE);
         }
 
         // Reset stack
         if (func->body.stack_layout.total_bytes < I8_MAX) {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x83);
-            buf_push(context->bytecode, 0xc4);
-            buf_push(context->bytecode, func->body.stack_layout.total_bytes);
+            buf_push(context->seg_text, 0x48);
+            buf_push(context->seg_text, 0x83);
+            buf_push(context->seg_text, 0xc4);
+            buf_push(context->seg_text, func->body.stack_layout.total_bytes);
         } else {
-            buf_push(context->bytecode, 0x48);
-            buf_push(context->bytecode, 0x81);
-            buf_push(context->bytecode, 0xc4);
-            str_push_integer(&context->bytecode, sizeof(i32), func->body.stack_layout.total_bytes);
+            buf_push(context->seg_text, 0x48);
+            buf_push(context->seg_text, 0x81);
+            buf_push(context->seg_text, 0xc4);
+            str_push_integer(&context->seg_text, sizeof(i32), func->body.stack_layout.total_bytes);
         }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         printf("add rsp, %x\n", (u64) func->body.stack_layout.total_bytes);
         #endif
 
         // Return to caller
-        buf_push(context->bytecode, 0xc3);
+        buf_push(context->seg_text, 0xc3);
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         printf("ret\n");
         #endif
@@ -6387,13 +6404,13 @@ void build_machinecode(Context* context) {
 
     // Call fixups
     buf_foreach (Call_Fixup, fixup, context->call_fixups) {
-        i32* target = (i32*) (context->bytecode + fixup->text_location);
+        i32* target = (i32*) (context->seg_text + fixup->text_location);
         assert(*target == 0xefbeadde);
 
         Func* callee = &context->funcs[fixup->func_index];
         assert(callee->kind == func_kind_normal);
 
-        u32 jump_to = callee->body.bytecode_start;
+        u32 jump_to = callee->body.text_start;
         u32 jump_from = fixup->text_location + sizeof(i32);
         i32 jump_by = ((i32) jump_to) - ((i32) jump_from);
         *target = jump_by;
@@ -6717,12 +6734,15 @@ bool parse_library(Context* context, Library_Import* import) {
 }
 
 bool write_executable(u8* path, Context* context) {
-    enum { MAX_SECTION_COUNT = 4 }; // So we can use it as an array length
+    enum { MAX_SECTION_COUNT = 5 }; // So we can use it as an array length
 
-    u64 text_length = buf_length(context->bytecode);
-    u64 data_length = buf_length(context->bytecode_data);
+    u64 text_length = buf_length(context->seg_text);
+    u64 rodata_length = buf_length(context->seg_rodata);
+    u64 rwdata_length = buf_length(context->seg_rwdata);
 
-    u32 section_count = data_length == 0? 3 : 4;
+    u32 section_count = 3;
+    if (rwdata_length > 0) section_count += 1;
+    if (rodata_length > 0) section_count += 1;
 
     u64 in_file_alignment = 0x200;
     u64 in_memory_alignment = 0x1000;
@@ -6740,15 +6760,17 @@ bool write_executable(u8* path, Context* context) {
     // Figure out placement and final size
     u64 header_space = round_to_next(total_header_size, in_file_alignment);
 
-    u64 text_file_start  = header_space;
-    u64 data_file_start  = text_file_start  + round_to_next(text_length,  in_file_alignment);
-    u64 pdata_file_start = data_file_start  + round_to_next(data_length,  in_file_alignment);
-    u64 idata_file_start = pdata_file_start + round_to_next(pdata_length, in_file_alignment);
+    u64 text_file_start   = header_space;
+    u64 rodata_file_start = text_file_start   + round_to_next(text_length,   in_file_alignment);
+    u64 rwdata_file_start = rodata_file_start + round_to_next(rodata_length, in_file_alignment);
+    u64 pdata_file_start  = rwdata_file_start + round_to_next(rwdata_length, in_file_alignment);
+    u64 idata_file_start  = pdata_file_start  + round_to_next(pdata_length,  in_file_alignment);
 
-    u64 text_memory_start  = round_to_next(total_header_size, in_memory_alignment);
-    u64 data_memory_start  = text_memory_start  + round_to_next(text_length,  in_memory_alignment);
-    u64 pdata_memory_start = data_memory_start  + round_to_next(data_length,  in_memory_alignment);
-    u64 idata_memory_start = pdata_memory_start + round_to_next(pdata_length, in_memory_alignment);
+    u64 text_memory_start   = round_to_next(total_header_size, in_memory_alignment);
+    u64 rodata_memory_start = text_memory_start   + round_to_next(text_length,   in_memory_alignment);
+    u64 rwdata_memory_start = rodata_memory_start + round_to_next(rodata_length, in_memory_alignment);
+    u64 pdata_memory_start  = rwdata_memory_start + round_to_next(rwdata_length, in_memory_alignment);
+    u64 idata_memory_start  = pdata_memory_start  + round_to_next(pdata_length,  in_memory_alignment);
 
     // Verify that fixups are not bogus data, so we don't have to do that later...
     for (u64 i = 0; i < buf_length(context->fixups); i += 1) {
@@ -6758,7 +6780,7 @@ bool write_executable(u8* path, Context* context) {
             panic("Can't apply fixup at %x which is beyond end of text section at %x\n", fixup->text_location, text_length);
         }
 
-        i32 text_value = *((u32*) (context->bytecode + fixup->text_location));
+        i32 text_value = *((u32*) (context->seg_text + fixup->text_location));
         if (text_value != 0xefbeadde) {
             panic("All fixup override locations should be set to {0xde 0xad 0xbe 0xef} as a sentinel. Found %x instead\n", text_value);
         }
@@ -6772,9 +6794,8 @@ bool write_executable(u8* path, Context* context) {
                 assert(f < buf_length(context->imports[l].function_names));
             } break;
 
-            case fixup_data: {
-                assert(fixup->data_offset < data_length);
-            } break;
+            case fixup_rwdata: assert(fixup->data_offset < rwdata_length); break;
+            case fixup_rodata: assert(fixup->data_offset < rodata_length); break;
 
             default: assert(false);
         }
@@ -6843,7 +6864,7 @@ bool write_executable(u8* path, Context* context) {
             u32 function = fixup->import_index.function;
             u64 function_address = idata_memory_start + address_table_start + sizeof(u64)*function;
 
-            i32* text_value = (i32*) (context->bytecode + fixup->text_location);
+            i32* text_value = (i32*) (context->seg_text + fixup->text_location);
             *text_value = function_address;
             *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
         }
@@ -6857,13 +6878,18 @@ bool write_executable(u8* path, Context* context) {
     // Apply data & function fixups
     for (u64 i = 0; i < buf_length(context->fixups); i += 1) {
         Fixup* fixup = &context->fixups[i];
-        i32* text_value = (u32*) (context->bytecode + fixup->text_location);
+        i32* text_value = (u32*) (context->seg_text + fixup->text_location);
 
         switch (fixup->kind) {
             case fixup_imported_function: break;
 
-            case fixup_data: {
-                *text_value = data_memory_start + fixup->data_offset;
+            case fixup_rodata: {
+                *text_value = rodata_memory_start + fixup->data_offset;
+                *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
+            } break;
+
+            case fixup_rwdata: {
+                *text_value = rwdata_memory_start + fixup->data_offset;
                 *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
             } break;
 
@@ -6884,15 +6910,26 @@ bool write_executable(u8* path, Context* context) {
     text_header->size_of_raw_data = round_to_next(text_length, in_file_alignment);
     text_header->pointer_to_raw_data = text_file_start;
 
-    if (data_length > 0) {
-        Section_Header* data_header = &section_headers[section_index];
+    if (rwdata_length > 0) {
+        Section_Header* rwdata_header = &section_headers[section_index];
         section_index += 1;
-        mem_copy(".data", data_header->name, 5);
-        data_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
-        data_header->virtual_size = data_length;
-        data_header->virtual_address = data_memory_start;
-        data_header->size_of_raw_data = round_to_next(data_length, in_file_alignment);
-        data_header->pointer_to_raw_data = data_file_start;
+        mem_copy(".rwdata", rwdata_header->name, 7);
+        rwdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
+        rwdata_header->virtual_size = rwdata_length;
+        rwdata_header->virtual_address = rwdata_memory_start;
+        rwdata_header->size_of_raw_data = round_to_next(rwdata_length, in_file_alignment);
+        rwdata_header->pointer_to_raw_data = rwdata_file_start;
+    }
+
+    if (rodata_length > 0) {
+        Section_Header* rodata_header = &section_headers[section_index];
+        section_index += 1;
+        mem_copy(".rodata", rodata_header->name, 7);
+        rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
+        rodata_header->virtual_size = rodata_length;
+        rodata_header->virtual_address = rodata_memory_start;
+        rodata_header->size_of_raw_data = round_to_next(rodata_length, in_file_alignment);
+        rodata_header->pointer_to_raw_data = rodata_file_start;
     }
 
     Section_Header* pdata_header = &section_headers[section_index];
@@ -6962,15 +6999,15 @@ bool write_executable(u8* path, Context* context) {
     coff.section_count = section_count;
 
     image.size_of_code = text_length;
-    image.size_of_initialized_data = data_length + idata_length + pdata_length;
+    image.size_of_initialized_data = rodata_length + rwdata_length + idata_length + pdata_length;
     image.size_of_uninitialized_data = 0;
 
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
     if (main_func_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
     }
-    u32 main_bytecode_start = context->funcs[main_func_index].body.bytecode_start;
-    image.entry_point = text_memory_start + main_bytecode_start;
+    u32 main_text_start = context->funcs[main_func_index].body.text_start;
+    image.entry_point = text_memory_start + main_text_start;
 
     image.base_of_code = text_memory_start;
     image.size_of_image = memory_image_size;
@@ -6999,10 +7036,11 @@ bool write_executable(u8* path, Context* context) {
     mem_copy((u8*) section_headers, output_file + header_offset, section_count * sizeof(Section_Header));
 
     // Write data
-    mem_copy(context->bytecode, output_file + text_file_start,  text_length);
-    mem_copy(context->bytecode_data, output_file + data_file_start,  data_length);
-    mem_copy(pdata,    output_file + pdata_file_start, pdata_length);
-    mem_copy(idata,    output_file + idata_file_start, idata_length);
+    mem_copy(context->seg_text, output_file + text_file_start, text_length);
+    mem_copy(context->seg_rwdata, output_file + rwdata_file_start, rwdata_length);
+    mem_copy(context->seg_rodata, output_file + rodata_file_start, rodata_length);
+    mem_copy(pdata, output_file + pdata_file_start, pdata_length);
+    mem_copy(idata, output_file + idata_file_start, idata_length);
 
     IO_Result result = write_entire_file(path, output_file, file_image_size);
     if (result != io_ok) {
@@ -7235,7 +7273,7 @@ void main() {
             }
         }
 
-        printf("%u intermediate ops, %u bytes of machine code\n", total_ops, buf_length(context.bytecode));
+        printf("%u intermediate ops, %u bytes of machine code\n", total_ops, buf_length(context.seg_text));
     }
 
     printf("\nRunning generated executable:\n");

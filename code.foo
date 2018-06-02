@@ -7,10 +7,11 @@ extern "kernel32.lib" {
 }
 
 fn main() -> u8 {
-    let hi = "_i\n";
+    let hi = "Hi\n";
     let ho = "Ho\n";
 
-    *(hi + 0) = seventy_two(); # NB: This is not that nice, as strings are stored in .data
+    # This will crash now, since we put strings in a read-only section
+    #*(hi + 0) = seventy_two();
 
     {
         let written: u32 = 0;
@@ -99,7 +100,6 @@ fn seventy_two() -> u8 {
 }
 
 #   global variables and constants (.data and .bss (?))
-#   type inference
 #   slices
 #   structs, unions, enums
 #   size_of, align_of, type_of
