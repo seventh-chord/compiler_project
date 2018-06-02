@@ -6,6 +6,8 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
+let global = 3 > 2;
+
 fn main() -> u8 {
     let hi = "Hi\n";
     let ho = "Ho\n";
@@ -29,10 +31,19 @@ fn main() -> u8 {
         }
 
         WriteFile(handle, hi + 2, 1, &written, null);
+
+
+        if (global) { WriteFile(handle, "Dude\n", 5, &written, null); }
+        sidewinder();
+        if (global) { WriteFile(handle, "Not\n", 4, &written, null); }
+        sidewinder();
+        if (global) { WriteFile(handle, "Nice\n", 5, &written, null); }
     }
 
     ExitProcess(0);
 }
+
+fn sidewinder() { if (global) { global = false; } else { global = true; } }
 
 fn four() -> u8 {
     let big_boy: [4][4]u64 = {
@@ -99,7 +110,7 @@ fn seventy_two() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
-#   global variables and constants (.data and .bss (?))
+#   global variables and constants (.rodata, .rwdata, .bss (?))
 #   slices
 #   structs, unions, enums
 #   size_of, align_of, type_of
@@ -108,6 +119,7 @@ fn seventy_two() -> u8 {
 
 #   .pdata so we can crash properly, or whatever that is for
 #   debug info
-#   growing the stack? stack guards?
+#   growing the stack? stack guards? __chkstk
 #   constant evaluation / elimination
 #   peephole optimizer
+#   eval_ops, compile-time execution?

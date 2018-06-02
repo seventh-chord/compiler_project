@@ -831,11 +831,27 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_keyword_null]         = "null",
 };
 
+
+typedef struct Expr Expr;
+
+
+// When a var index has this bit set, it refers to a global rather than to a local
+// We assume that there will never be more than (2^31 - 1) local variables
+#define VAR_INDEX_GLOBAL_FLAG 0x80000000
+#define MAX_LOCAL_VARS        0x7fffffff
+
 typedef struct Var {
     u32 name;
     u32 type_index; // We set this to 0 to indicate that we want to infer the type
     File_Pos declaration_pos;
 } Var;
+
+typedef struct Global_Var {
+    Var var;
+    Expr* initial_expr;
+    u32 data_offset;
+    bool typechecked;
+} Global_Var;
 
 
 typedef enum Primitive {
@@ -1095,8 +1111,6 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
 
 
 typedef struct Expr_List Expr_List;
-typedef struct Expr Expr;
-
 struct Expr_List {
     Expr* expr;
     Expr_List* next;
@@ -1119,7 +1133,7 @@ typedef enum Expr_Kind {
     expr_subscript,
 } Expr_Kind;
 
-struct Expr {
+struct Expr { // 'typedef'd earlier!
     Expr_Kind kind;
     u8 flags;
 
@@ -1224,11 +1238,13 @@ struct Stmt {
 };
 
 
+// NB 'Local' probably is the wrong name now, 'Op_Param' would be more fitting
 typedef struct Local {
     enum {
         local_temporary = 0,
         local_variable = 1,
         local_literal = 2,
+        local_global = 3,
     } kind;
     bool as_reference;
     u64 value;
@@ -1499,6 +1515,7 @@ typedef struct Context {
     Func* funcs; // stretchy-buffer
 
     // These are only for temporary use, we copy to arena buffers & clear
+    Global_Var* global_vars;
     Var* tmp_vars; // stretchy-buffer
     Op* tmp_ops; // stretchy-buffer, linearized from of stmts
     Tmp* tmp_tmps; // stretchy-buffer, also built during op generation
@@ -1566,7 +1583,13 @@ u64 add_exe_data(Context* context, u8* data, u64 length, bool writable) {
     }
 
     u64 data_offset = buf_length(*buffer);
-    str_push_str(buffer, data, length);
+
+    if (data == null) {
+        str_push_zeroes(buffer, length);
+    } else {
+        str_push_str(buffer, data, length);
+    }
+
     return data_offset;
 }
 
@@ -1726,7 +1749,14 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 u8* name = string_table_access(context->string_table, expr->variable.unresolved_name);
                 printf("<unresolved %s>", name);
             } else {
-                Var* var = &func->body.vars[expr->variable.index];
+                Var* var;
+                if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
+                    u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
+                    var = &context->global_vars[global_index].var;
+                } else {
+                    var = &func->body.vars[expr->variable.index];
+                }
+
                 u8* name = string_table_access(context->string_table, var->name);
                 printf("%s", name);
             }
@@ -1897,12 +1927,14 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             printf("}");
         } break;
 
+        case stmt_end: printf("<end>"); break;
+
         default: assert(false);
     }
 
     printf("\n");
 
-    if (stmt->next->kind != stmt_end) {
+    if (stmt->next != null && stmt->next->kind != stmt_end) {
         print_stmts(context, func, stmt->next, indent_level);
     }
 }
@@ -1922,6 +1954,12 @@ void print_local(Context* context, Func* func, Local local) {
             printf("%s%s", pointer_star, name);
         } break;
 
+        case local_global: {
+            Var* var = &context->global_vars[local.value].var;
+            u8* name = string_table_access(context->string_table, var->name);
+            printf("%s%s", pointer_star, name);
+        } break;
+
         case local_temporary: {
             printf("%s$%u", pointer_star, (u64) local.value);
         } break;
@@ -1936,7 +1974,7 @@ void print_local(Context* context, Func* func, Local local) {
 
 void print_op(Context* context, Func* func, Op* op) {
     switch (op->kind) {
-        case op_set: case op_add: case op_sub: case op_mul: case op_div:
+        case op_set: case op_add: case op_sub: case op_mul: case op_div: case op_mod:
         case op_neq: case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
         {
             printf("(%s) %s ", primitive_name(op->primitive), OP_NAMES[op->kind]);
@@ -1989,17 +2027,32 @@ void print_op(Context* context, Func* func, Op* op) {
             printf(" to %u", (u64) op->jump.to_op);
         } break;
 
+        case op_load_data: {
+            printf("address of ");
+            print_local(context, func, op->load_data.local);
+            printf(", %s + %u into ", op->load_data.writable? ".data" : ".rdata", (u64) op->load_data.data_offset);
+        } break;
+
         default: assert(false);
     }
 }
 
 
-u32 find_var(Func* func, u32 name) {
-    for (u32 i = 0; i < func->body.var_count; i += 1) {
-        if (func->body.vars[i].name == name) {
-            return i;
+u32 find_var(Context* context, Func* func, u32 name) {
+    if (func != null) {
+        for (u32 i = 0; i < func->body.var_count; i += 1) {
+            if (func->body.vars[i].name == name) {
+                return i;
+            }
         }
     }
+
+    for (u32 i = 0; i < buf_length(context->global_vars); i += 1) {
+        if (context->global_vars[i].var.name == name) {
+            return i | VAR_INDEX_GLOBAL_FLAG;
+        }
+    }
+
     return U32_MAX;
 }
 
@@ -2850,6 +2903,8 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
             .type_index = type_index,
         }));
 
+        assert(buf_length(context->tmp_vars) < MAX_LOCAL_VARS);
+
         stmt->kind = stmt_declaration;
         stmt->declaration.var_index = var_index;
         stmt->declaration.right = expr;
@@ -3657,6 +3712,59 @@ bool build_ast(Context* context, u8* path) {
             t += length;
         } break;
 
+        case token_keyword_let: {
+            File_Pos start_pos = t->pos;
+            t += 1;
+
+            if (t->kind != token_identifier) {
+                printf("Expected global variable name, but found ");
+                print_token(context->string_table, t);
+                printf(" (Line %u)\n", t->pos.line);
+                return null;
+            }
+            u32 name_index = t->identifier_string_table_index;
+            t += 1;
+
+            u32 type_index = 0;
+            if (t->kind == token_colon) {
+                t += 1;
+
+                u32 type_length = 0;
+                type_index = parse_type(context, t, &type_length);
+                if (type_index == U32_MAX) return null;
+                t += type_length;
+            }
+
+            Expr* expr = null;
+            if (t->kind == token_assign) {
+                t += 1;
+
+                u32 right_length = 0;
+                expr = parse_expr(context, t, &right_length); 
+                if (expr == null) return null;
+                t += right_length;
+            }
+
+            if (expr == null && type_index == null) {
+                u8* name = string_table_access(context->string_table, name_index);
+                printf("Declared global variable '%s' without specifying type or initial value. Hence can't infer type (Line %u)\n", name, t->pos.line);
+                return null;
+            }
+
+            if (!expect_single_token(context, t, token_semicolon, "after global variable declaration")) return null;
+            t += 1;
+
+
+            Global_Var global = {0};
+            global.var.name = name_index;
+            global.var.declaration_pos = start_pos;
+            global.var.type_index = type_index;
+            global.initial_expr = expr;
+            buf_push(context->global_vars, global);
+
+            assert(buf_length(context->global_vars) < MAX_LOCAL_VARS);
+        } break;
+
         default: {
             valid = false;
 
@@ -3679,6 +3787,93 @@ bool build_ast(Context* context, u8* path) {
     }
 }
 
+
+
+// NB will allocate on context->stack, push/pop before/after
+bool eval_expr(Context* context, Expr* expr, u8* result_into) {
+    u64 type_size = type_size_of(context, expr->type_index);
+    assert(type_size > 0);
+
+    switch (expr->kind) {
+        case expr_literal: {
+            assert(type_size <= 8);
+            mem_copy((u8*) &expr->literal.value, result_into, type_size);
+            return true;
+        } break;
+
+        case expr_binary: {
+            assert(expr->binary.left->type_index == expr->binary.right->type_index);
+            u64 child_size = type_size_of(context, expr->binary.left->type_index);
+
+            assert(type_size <= 8 && child_size <= 8);
+
+            u8* mem = arena_alloc(&context->stack, 2*child_size);
+            u8* left_result = mem;
+            u8* right_result = mem + child_size;
+
+            if (!eval_expr(context, expr->binary.left, left_result)) return false;
+            if (!eval_expr(context, expr->binary.right, right_result)) return false;
+
+            bool is_signed = primitive_is_signed(context->type_buf[expr->binary.left->type_index]);
+
+            u64 result = 0;
+
+            if (is_signed) {
+                i64 left, right;
+                switch (child_size) {
+                    case 1: left = (i64) *((i8*)  left_result); right = (i64) *((i8*)  right_result); break;
+                    case 2: left = (i64) *((i16*) left_result); right = (i64) *((i16*) right_result); break;
+                    case 4: left = (i64) *((i32*) left_result); right = (i64) *((i32*) right_result); break;
+                    case 8: left = (i64) *((i64*) left_result); right = (i64) *((i64*) right_result); break;
+                    default: assert(false);
+                }
+
+                switch (expr->binary.op) {
+                    case binary_add:  result = left +  right; break;
+                    case binary_sub:  result = left -  right; break;
+                    case binary_mul:  result = left *  right; break;
+                    case binary_div:  result = left /  right; break;
+                    case binary_mod:  result = left %  right; break;
+                    case binary_eq:   result = left == right; break;
+                    case binary_neq:  result = left != right; break;
+                    case binary_gt:   result = left >  right; break;
+                    case binary_gteq: result = left >= right; break;
+                    case binary_lt:   result = left <  right; break;
+                    case binary_lteq: result = left <= right; break;
+                }
+            } else {
+                u64 left, right;
+                switch (child_size) {
+                    case 1: left = (u64) *((u8*)  left_result); right = (u64) *((u8*)  right_result); break;
+                    case 2: left = (u64) *((u16*) left_result); right = (u64) *((u16*) right_result); break;
+                    case 4: left = (u64) *((u32*) left_result); right = (u64) *((u32*) right_result); break;
+                    case 8: left = (u64) *((u64*) left_result); right = (u64) *((u64*) right_result); break;
+                    default: assert(false);
+                }
+
+                switch (expr->binary.op) {
+                    case binary_add:  result = left +  right; break;
+                    case binary_sub:  result = left -  right; break;
+                    case binary_mul:  result = left *  right; break;
+                    case binary_div:  result = left /  right; break;
+                    case binary_mod:  result = left %  right; break;
+                    case binary_eq:   result = left == right; break;
+                    case binary_neq:  result = left != right; break;
+                    case binary_gt:   result = left >  right; break;
+                    case binary_gteq: result = left >= right; break;
+                    case binary_lt:   result = left <  right; break;
+                    case binary_lteq: result = left <= right; break;
+                }
+            }
+
+            mem_copy((u8*) &result, result_into, type_size);
+            return true;
+        } break;
+    }
+
+    printf("Can't evaluate this expression at compile time yet (Line %u)\n", expr->pos.line);
+    return false;
+}
 
 
 typedef struct Scope Scope;
@@ -3806,19 +4001,23 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
 
         case expr_variable: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 var_index = find_var(func, expr->variable.unresolved_name);
+                u32 var_index = find_var(context, func, expr->variable.unresolved_name);
 
                 if (var_index == U32_MAX) {
                     u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
-                    u8* func_name = string_table_access(context->string_table, func->name);
-                    printf(
-                        "Can't find variable '%s' in function '%s' (Line %u)\n",
-                        var_name, func_name, (u64) expr->pos.line
-                    );
+                    printf("Can't find variable '%s' ", var_name);
+                    if (func != null) {
+                        u8* func_name = string_table_access(context->string_table, func->name);
+                        printf("in function '%s' or \n", func_name);
+                    }
+                    printf("in global scope (Line %u)\n", (u64) expr->pos.line);
                     return false;
                 }
 
-                if (scope->map[var_index] == false) {
+                if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                    u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                    assert(context->global_vars[global_index].typechecked);
+                } else if (scope->map[var_index] == false) {
                     Var* var = &func->body.vars[var_index];
                     u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
 
@@ -3844,7 +4043,12 @@ bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            expr->type_index = func->body.vars[expr->variable.index].type_index;
+            if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
+                expr->type_index = context->global_vars[global_index].var.type_index;
+            } else {
+                expr->type_index = func->body.vars[expr->variable.index].type_index;
+            }
 
             expr->flags |= EXPR_FLAG_ASSIGNABLE;
         } break;
@@ -4133,19 +4337,15 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
 
                 if (!typecheck_expr(context, func, scope, right, solidify_to)) {
                     bad_types = true;
-                } else {
-                    if (var->type_index == 0) {
-                        var->type_index = right->type_index;
-                    } else {
-                        if (!type_cmp(context, var->type_index, right->type_index)) {
-                            printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                            print_type(context, var->type_index);
-                            printf(" but got ");
-                            print_type(context, right->type_index);
-                            printf(" (Line %u)\n", stmt->pos.line);
-                            bad_types = true;
-                        }
-                    }
+                } else if (var->type_index == 0) {
+                    var->type_index = right->type_index;
+                } else if (!type_cmp(context, var->type_index, right->type_index)) {
+                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                    print_type(context, var->type_index);
+                    printf(" but got ");
+                    print_type(context, right->type_index);
+                    printf(" (Line %u)\n", stmt->pos.line);
+                    bad_types = true;
                 }
             }
 
@@ -4213,6 +4413,57 @@ bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
 
 bool typecheck(Context* context) {
     bool valid = true;
+
+    Scope global_scope = {0};
+
+    arena_stack_push(&context->stack); // For eval_expr
+    for (u32 g = 0; g < buf_length(context->global_vars); g += 1) {
+        Global_Var* global = &context->global_vars[g];
+        assert(global->initial_expr != null || global->var.type_index != 0);
+
+        global->typechecked = global->var.type_index != 0;
+
+        if (global->initial_expr != null) {
+            u32 solidify_to;
+            if (global->var.type_index == 0) {
+                solidify_to = DEFAULT_INTEGER_TYPE;
+            } else {
+                solidify_to = global->var.type_index;
+            }
+
+            if (!typecheck_expr(context, null, &global_scope, global->initial_expr, solidify_to)) {
+                global->typechecked = false;
+            } else if (global->var.type_index == 0) {
+                global->var.type_index = global->initial_expr->type_index;
+                global->typechecked = true;
+            } else if (!type_cmp(context, global->var.type_index, global->initial_expr->type_index)) {
+                printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                print_type(context, global->var.type_index);
+                printf(" but got ");
+                print_type(context, global->initial_expr->type_index);
+                printf(" (Line %u)\n", global->var.declaration_pos.line);
+                global->typechecked = false;
+            } else {
+                global->typechecked = true;
+            }
+        }
+
+        if (!global->typechecked) valid = false;
+
+        u64 type_size = type_size_of(context, global->var.type_index);
+        assert(type_size > 0);
+
+        global->data_offset = add_exe_data(context, null, type_size, true);
+
+        u8* result_into = &context->seg_rwdata[global->data_offset];
+        if (global->initial_expr == null) {
+        } else if (!eval_expr(context, global->initial_expr, result_into)) {
+            valid = false;
+        }
+    }
+    arena_stack_pop(&context->stack);
+
+    if (!valid) return false;
 
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
         arena_stack_push(&context->stack);
@@ -4381,8 +4632,20 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         {
             Local source;
             switch (expr->kind) {
-                case expr_literal:  source = (Local) { local_literal, false, expr->literal.value };  break;
-                case expr_variable: source = (Local) { local_variable, false, expr->variable.index }; break;
+                case expr_literal: {
+                    source = (Local) { local_literal, false, expr->literal.value };
+                } break;
+
+                case expr_variable: {
+                    u32 var_index = expr->variable.index;
+
+                    if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                        u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                        source = (Local) { local_global, false, global_index };
+                    } else {
+                        source = (Local) { local_variable, false, var_index };
+                    }
+                } break;
                 default: assert(false);
             }
 
@@ -4477,21 +4740,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             linearize_expr(context, expr->binary.left, assign_to, false);
 
-            Local right_local;
-            switch (expr->binary.right->kind) {
-                case expr_literal: {
-                    right_local = (Local) { local_literal, false, expr->binary.right->literal.value};
-                } break;
-
-                case expr_variable: {
-                    right_local = (Local) { local_variable, false, expr->binary.right->variable.index };
-                } break;
-
-                default: {
-                    u64 right_size = type_size_of(context, expr->binary.right->type_index);
-                    right_local = intermediate_allocate_temporary(context, right_size);
-                    linearize_expr(context, expr->binary.right, right_local, false);
-                } break;
+            Local right_local = {0};
+            if (!linearize_expr_to_local(expr->binary.right, &right_local)) {
+                u64 right_size = type_size_of(context, expr->binary.right->type_index);
+                right_local = intermediate_allocate_temporary(context, right_size);
+                linearize_expr(context, expr->binary.right, right_local, false);
             }
 
 
@@ -4562,20 +4815,10 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 u64 param_size = type_size_of(context, expr->type_index);
                 if (param_size > 8) unimplemented(); // TODO by-reference semantics
 
-                Local local;
-                switch (expr->kind) {
-                    case expr_literal: {
-                        local = (Local) { local_literal, false, expr->literal.value};
-                    } break;
-
-                    case expr_variable: {
-                        local = (Local) { local_variable, false, expr->variable.index };
-                    } break;
-
-                    default: {
-                        local = intermediate_allocate_temporary(context, param_size);
-                        linearize_expr(context, expr, local, false);
-                    } break;
+                Local local = {0};
+                if (!linearize_expr_to_local(expr, &local)) {
+                    local = intermediate_allocate_temporary(context, param_size);
+                    linearize_expr(context, expr, local, false);
                 }
 
                 call_params[p].size = param_size;
@@ -4705,6 +4948,38 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
     }
 }
 
+bool linearize_expr_to_local(Expr* expr, Local* local) {
+    switch (expr->kind) {
+        case expr_literal: {
+            local->kind = local_literal;
+            local->as_reference = false;
+            local->value = expr->literal.value;
+            return true;
+        } break;
+
+        case expr_variable: {
+            u32 var_index = expr->variable.index;
+
+            if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                local->kind = local_global;
+                local->as_reference = false;
+                local->value = global_index;
+            } else {
+                local->kind = local_variable;
+                local->as_reference = false;
+                local->value = var_index;
+            }
+
+            return true;
+        } break;
+
+        default: {
+            return false;
+        } break;
+    }
+}
+
 bool linearize_assignment_needs_temporary(Expr* expr, u32 var_index) {
     switch (expr->kind) {
         case expr_variable: {
@@ -4797,6 +5072,17 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 
             bool needs_temporary = linearize_assignment_needs_temporary(right, left->variable.index);
 
+            Local variable_local;
+            if (left->variable.index & VAR_INDEX_GLOBAL_FLAG) {
+                variable_local.kind = local_global;
+                variable_local.as_reference = false;
+                variable_local.value = left->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
+            } else {
+                variable_local.kind = local_variable;
+                variable_local.as_reference = false;
+                variable_local.value = left->variable.index;
+            }
+
             if (primitive_is_compound(left_primitive)) {
                 if (left_primitive == primitive_array) {
                     if (needs_temporary) {
@@ -4820,7 +5106,6 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
                             intermediate_deallocate_temporary(context, tmp_pointer);
                         }
 
-                        Local variable_local = { local_variable, false, left->variable.index };
                         Local pointer_to_variable_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
 
                         buf_push(context->tmp_ops, ((Op) {
@@ -4839,7 +5124,6 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
                         intermediate_deallocate_temporary(context, pointer_to_tmp_local);
                         intermediate_deallocate_temporary(context, pointer_to_variable_local);
                     } else {
-                        Local variable_local = { local_variable, false, left->variable.index };
                         Local pointer_to_variable_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
 
                         buf_push(context->tmp_ops, ((Op) {
@@ -4858,8 +5142,6 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 
             } else {
                 assert(operand_size <= POINTER_SIZE);
-
-                Local variable_local = { local_variable, false, left->variable.index };
 
                 if (needs_temporary) {
                     Local tmp_local = intermediate_allocate_temporary(context, operand_size);
@@ -5045,6 +5327,7 @@ u8* eval_get_local(Eval_Stack_Frame* frame, Local local, bool allow_literal) {
     Mem_Item* item;
     switch (local.kind) {
         case local_variable:  item = &frame->func->body.mem_layout.vars[local.value]; break;
+        case local_global:    unimplemented(); break;
         case local_temporary: item = &frame->func->body.mem_layout.tmps[local.value]; break;
         case local_literal: {
             assert(allow_literal);
@@ -5284,6 +5567,7 @@ void eval_ops(Context* context) {
                         u64 param_size = op->call.params[p].size;
 
                         u32 var_index = callee->signature.params[p].var_index;
+                        assert(!(var_index & VAR_INDEX_GLOBAL_FLAG));
                         Local into_variable = { local_variable, false, var_index };
 
                         u8* our = eval_get_local(frame, param, true);
@@ -5680,16 +5964,14 @@ Mem_Item* get_stack_item(Func* func, Local local) {
     switch (local.kind) {
         case local_variable:  item = &func->body.stack_layout.vars[local.value]; break;
         case local_temporary: item = &func->body.stack_layout.tmps[local.value]; break;
+        case local_global:  assert(false);
         case local_literal: assert(false);
         default: assert(false);
     }
     return item;
 }
 
-void instruction_lea_stack(u8** b, Func* func, Local local, X64_Reg reg) {
-    Mem_Item* item = get_stack_item(func, local);
-    u32 offset = item->offset;
-
+void instruction_lea_stack(u8** b, u32 offset, X64_Reg reg) {
     u8 rex = REX_BASE | REX_W;
     u8 modrm = 0;
 
@@ -5733,6 +6015,26 @@ void instruction_lea_data(Context* context, u32 data_offset, bool writable, X64_
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("lea %s, [.data + %u]\n", reg_names[reg], (u64) data_offset);
     #endif
+}
+
+void instruction_lea_mem(Context* context, Func* func, Local local, X64_Reg reg) {
+    switch (local.kind) {
+        case local_global: {
+            Global_Var* global = &context->global_vars[local.value];
+            instruction_lea_data(context, global->data_offset, true, reg);
+        } break;
+
+        case local_variable:
+        case local_temporary:
+        {
+            Mem_Item* item = get_stack_item(func, local);
+            u32 offset = item->offset;
+            instruction_lea_stack(&context->seg_text, offset, reg);
+        } break;
+
+        case local_literal: assert(false);
+        default: assert(false);
+    }
 }
 
 typedef enum Mov_Mode {
@@ -5797,8 +6099,8 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Reg pointer_reg, X64_Reg
 }
 
 // Moves to/from '[rsp + offset]'
-void instruction_mov_stack_manual(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 bytes) {
-    u8 rex = REX_BASE | REX_W;
+void instruction_mov_stack(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 bytes) {
+    u8 rex = REX_BASE;
     u8 modrm = 0;
     u8 opcode;
 
@@ -5809,17 +6111,10 @@ void instruction_mov_stack_manual(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset
     }
 
     switch (bytes) {
-        case 1: {
-            opcode -= 1;
-        } break;
-        case 2: {
-            buf_push(*b, 0x66);
-        } break;
-        case 4: {
-        } break;
-        case 8: {
-            rex |= REX_W;
-        } break;
+        case 1: opcode -= 1; break;
+        case 2: buf_push(*b, 0x66); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
         default: assert(false);
     }
 
@@ -5851,10 +6146,73 @@ void instruction_mov_stack_manual(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset
     #endif
 }
 
-void instruction_mov_stack(u8** b, Func* func, Mov_Mode mode, X64_Reg reg, Local local, u8 bytes) {
-    Mem_Item* item = get_stack_item(func, local);
-    u32 offset = item->offset;
-    instruction_mov_stack_manual(b, mode, reg, offset, bytes);
+void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, bool writable, X64_Reg reg, u8 bytes) {
+    u8 rex = REX_BASE;
+    u8 opcode = 0x8d;
+    u8 modrm = 0x05;
+
+    if (mode == mov_to) {
+        opcode = 0x89;
+    } else {
+        opcode = 0x8b;
+    }
+
+    switch (bytes) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, 0x66); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (reg >= reg_r8) rex |= REX_R;
+    assert(reg < 16);
+
+    if (rex != REX_BASE) {
+        buf_push(context->seg_text, rex);
+    }
+    buf_push(context->seg_text, opcode);
+    buf_push(context->seg_text, modrm);
+
+    buf_push(context->seg_text, 0xde);
+    buf_push(context->seg_text, 0xad);
+    buf_push(context->seg_text, 0xbe);
+    buf_push(context->seg_text, 0xef);
+
+    Fixup fixup = {0};
+    fixup.kind = writable? fixup_rwdata : fixup_rodata;
+    fixup.text_location = buf_length(context->seg_text) - sizeof(u32);
+    fixup.data_offset = data_offset;
+    buf_push(context->fixups, fixup);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (mode == mov_to) {
+        printf("mov%u [.data + %u], %s\n", (u64) (bytes*8), (u64) data_offset, reg_names[reg]);
+    } else {
+        printf("mov%u %s, [.data + %u]\n", (u64) (bytes*8), reg_names[reg], (u64) data_offset);
+    }
+    #endif
+}
+
+void instruction_mov_mem(Context* context, Func* func, Mov_Mode mode, Local local, X64_Reg reg, u8 bytes) {
+    switch (local.kind) {
+        case local_global: {
+            Global_Var* global = &context->global_vars[local.value];
+            instruction_mov_data(context, mode, global->data_offset, true, reg, bytes);
+        } break;
+
+        case local_variable:
+        case local_temporary:
+        {
+            Mem_Item* item = get_stack_item(func, local);
+            u32 offset = item->offset;
+            instruction_mov_stack(&context->seg_text, mode, reg, offset, bytes);
+        } break;
+
+        case local_literal: assert(false);
+        default: assert(false);
+    }
 }
 
 void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Reg reg, u8 bytes) {
@@ -5896,15 +6254,15 @@ void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Reg reg, u8 bytes) {
     #endif
 }
 
-void instruction_load_local(u8** b, Func* func, X64_Reg reg, Local local, u8 bytes) {
+void instruction_load_local(Context* context, Func* func, Local local, X64_Reg reg, u8 bytes) {
     if (local.kind == local_literal) {
         assert(!local.as_reference);
-        instruction_mov_imm_to_reg(b, local.value, reg, bytes);
+        instruction_mov_imm_to_reg(&context->seg_text, local.value, reg, bytes);
     } else if (local.as_reference) {
-        instruction_mov_stack(b, func, mov_from, reg, local, POINTER_SIZE);
-        instruction_mov_pointer(b, mov_from, reg, reg, bytes);
+        instruction_mov_mem(context, func, mov_from, local, reg, POINTER_SIZE);
+        instruction_mov_pointer(&context->seg_text, mov_from, reg, reg, bytes);
     } else {
-        instruction_mov_stack(b, func, mov_from, reg, local, bytes);
+        instruction_mov_mem(context, func, mov_from, local, reg, bytes);
     }
 }
 
@@ -5932,13 +6290,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         case op_set: {
             u8 primitive_size = primitive_size_of(op->primitive);
 
-            instruction_load_local(&context->seg_text, func, reg_rax, op->binary.source, primitive_size);
+            instruction_load_local(context, func, op->binary.source, reg_rax, primitive_size);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rcx, POINTER_SIZE);
                 instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, primitive_size);
             }
         } break;
 
@@ -5948,8 +6306,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->binary.source.as_reference) unimplemented(); // TODO
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_lea_stack(&context->seg_text, func, op->binary.source, reg_rax);
-            instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, POINTER_SIZE);
+            instruction_lea_mem(context, func, op->binary.source, reg_rax);
+            instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, POINTER_SIZE);
         } break;
 
         case op_add:
@@ -5958,13 +6316,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rcx, POINTER_SIZE);
                 instruction_mov_pointer(&context->seg_text, mov_from, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
             }
 
-            instruction_load_local(&context->seg_text, func, reg_rdx, op->binary.source, primitive_size);
+            instruction_load_local(context, func, op->binary.source, reg_rdx, primitive_size);
 
             int kind;
             switch (op->kind) {
@@ -5977,7 +6335,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->binary.target.as_reference) {
                 instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, primitive_size);
             }
         } break;
 
@@ -5989,8 +6347,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->binary.target, primitive_size);
-            instruction_load_local(&context->seg_text, func, reg_rcx, op->binary.source, primitive_size);
+            instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
+            instruction_load_local(context, func, op->binary.source, reg_rcx, primitive_size);
 
             X64_Reg result_reg;
             X64_Instruction_Unary kind;
@@ -6007,7 +6365,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                 result_reg = reg_rax;
             }
 
-            instruction_mov_stack(&context->seg_text, func, mov_to, result_reg, op->binary.target, primitive_size);
+            instruction_mov_mem(context, func, mov_to, op->binary.target, result_reg, primitive_size);
         } break;
 
         case op_neq:
@@ -6020,13 +6378,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->binary.target, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rcx, POINTER_SIZE);
                 instruction_mov_pointer(&context->seg_text, mov_from, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
             }
 
-            instruction_load_local(&context->seg_text, func, reg_rdx, op->binary.source, primitive_size);
+            instruction_load_local(context, func, op->binary.source, reg_rdx, primitive_size);
 
             bool sign = primitive_is_signed(op->primitive); 
             X64_Condition condition;
@@ -6046,7 +6404,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->binary.target.as_reference) {
                 instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
             } else {
-                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->binary.target, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, primitive_size);
             }
 
         } break;
@@ -6067,11 +6425,11 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                     default: reg = reg_rax; break;
                 }
 
-                instruction_load_local(&context->seg_text, func, reg, local, size);
+                instruction_load_local(context, func, local, reg, size);
 
                 if (p >= 4) {
                     u32 offset = POINTER_SIZE * p;
-                    instruction_mov_stack_manual(&context->seg_text, mov_to, reg, offset, size);
+                    instruction_mov_stack(&context->seg_text, mov_to, reg, offset, size);
                 }
             }
 
@@ -6115,10 +6473,10 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (op->primitive != primitive_void) {
                 if (op->call.target.as_reference) {
-                    instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, op->call.target, POINTER_SIZE);
+                    instruction_mov_mem(context, func, mov_from, op->call.target, reg_rcx, POINTER_SIZE);
                     instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size_of(op->primitive));
                 } else {
-                    instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->call.target, primitive_size_of(op->primitive));
+                    instruction_mov_mem(context, func, mov_to, op->call.target, reg_rax, primitive_size_of(op->primitive));
                 }
             }
         } break;
@@ -6134,8 +6492,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (new_size > old_size) {
                 if (op->cast.local.as_reference) unimplemented(); // TODO
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, op->cast.local, old_size);
-                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, op->cast.local, new_size);
+                instruction_mov_mem(context, func, mov_from, op->cast.local, reg_rax, old_size);
+                instruction_mov_mem(context, func, mov_to, op->cast.local, reg_rax, new_size);
             }
         } break;
 
@@ -6143,7 +6501,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u64 big_jump_text_location;
 
             if (op->jump.conditional) {
-                instruction_load_local(&context->seg_text, func, reg_rcx, op->jump.condition, 1);
+                instruction_load_local(context, func, op->jump.condition, reg_rcx, 1);
                 instruction_xor_reg_imm(&context->seg_text, reg_rcx, 1, 1);
                 instruction_zero_extend_8_to_64(&context->seg_text, reg_rcx);
                 u64 small_jump_text_location = instruction_jmp_rcx_zero(&context->seg_text);
@@ -6174,10 +6532,10 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             Local local = op->load_data.local;
             if (local.as_reference) {
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rcx, local, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_from, local, reg_rcx, POINTER_SIZE);
                 instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, POINTER_SIZE);
             } else {
-                instruction_mov_stack(&context->seg_text, func, mov_to, reg_rax, local, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_to, local, reg_rax, POINTER_SIZE);
             }
         } break;
 
@@ -6328,7 +6686,7 @@ void build_machinecode(Context* context) {
                     case 3: reg = reg_r9; break;
                     default: assert(false);
                 }
-                instruction_mov_stack(&context->seg_text, func, mov_to, reg, local, (u8) operand_size);
+                instruction_mov_mem(context, func, mov_to, local, reg, (u8) operand_size);
             }
         }
 
@@ -6361,7 +6719,6 @@ void build_machinecode(Context* context) {
         // Pass output
         if (func->signature.has_output) {
             u32 var_index = func->body.output_var_index;
-
             Local output_local = { local_variable, false, var_index };
             Primitive output_primitive = context->type_buf[func->signature.output_type_index];
 
@@ -6373,7 +6730,7 @@ void build_machinecode(Context* context) {
                 }
             } else {
                 u8 operand_size = primitive_size_of(output_primitive);
-                instruction_mov_stack(&context->seg_text, func, mov_from, reg_rax, output_local, operand_size);
+                instruction_mov_mem(context, func, mov_from, output_local, reg_rax, operand_size);
             }
         } else {
             instruction_general_reg_reg(&context->seg_text, instruction_xor, reg_rax, reg_rax, POINTER_SIZE);
@@ -6753,23 +7110,24 @@ bool write_executable(u8* path, Context* context) {
     // unwind info, which we deleted by accident. We have to figure out how to
     // generate that info. We can't test that without first having some codegen
     // though...
+    typedef struct Pdata_Entry { u32 begin_address, end_address, unwind_address; } Pdata_Entry; // Proper format for x64!!
     u8 pdata[12]  = { 0x0, 0x10, 0x0, 0x0, 0xa5, 0x10, 0x0, 0x0, 0x10, 0x21, 0x0, 0x0 };
     u64 pdata_length = 12;
-    struct { u32 begin; u32 end; u32 rva; } *pdata_info = (void*) pdata;
 
     // Figure out placement and final size
+    // NB sections data needs to be in the same order as section headers!
     u64 header_space = round_to_next(total_header_size, in_file_alignment);
 
     u64 text_file_start   = header_space;
-    u64 rodata_file_start = text_file_start   + round_to_next(text_length,   in_file_alignment);
-    u64 rwdata_file_start = rodata_file_start + round_to_next(rodata_length, in_file_alignment);
-    u64 pdata_file_start  = rwdata_file_start + round_to_next(rwdata_length, in_file_alignment);
+    u64 rwdata_file_start = text_file_start   + round_to_next(text_length,   in_file_alignment);
+    u64 rodata_file_start = rwdata_file_start + round_to_next(rwdata_length, in_file_alignment);
+    u64 pdata_file_start  = rodata_file_start + round_to_next(rodata_length, in_file_alignment);
     u64 idata_file_start  = pdata_file_start  + round_to_next(pdata_length,  in_file_alignment);
 
     u64 text_memory_start   = round_to_next(total_header_size, in_memory_alignment);
-    u64 rodata_memory_start = text_memory_start   + round_to_next(text_length,   in_memory_alignment);
-    u64 rwdata_memory_start = rodata_memory_start + round_to_next(rodata_length, in_memory_alignment);
-    u64 pdata_memory_start  = rwdata_memory_start + round_to_next(rwdata_length, in_memory_alignment);
+    u64 rwdata_memory_start = text_memory_start   + round_to_next(text_length,   in_memory_alignment);
+    u64 rodata_memory_start = rwdata_memory_start + round_to_next(rwdata_length, in_memory_alignment);
+    u64 pdata_memory_start  = rodata_memory_start + round_to_next(rodata_length, in_memory_alignment);
     u64 idata_memory_start  = pdata_memory_start  + round_to_next(pdata_length,  in_memory_alignment);
 
     // Verify that fixups are not bogus data, so we don't have to do that later...
@@ -6781,8 +7139,8 @@ bool write_executable(u8* path, Context* context) {
         }
 
         i32 text_value = *((u32*) (context->seg_text + fixup->text_location));
-        if (text_value != 0xefbeadde) {
-            panic("All fixup override locations should be set to {0xde 0xad 0xbe 0xef} as a sentinel. Found %x instead\n", text_value);
+        if (text_value != 0xefbeadde /* 0xdeadbeef, but in big endian */) {
+            panic("All fixup override locations should be set to { 0xde, 0xad, 0xbe, 0xef } as a sentinel. Found %x instead\n", text_value);
         }
 
         switch (fixup->kind) {
@@ -6913,7 +7271,7 @@ bool write_executable(u8* path, Context* context) {
     if (rwdata_length > 0) {
         Section_Header* rwdata_header = &section_headers[section_index];
         section_index += 1;
-        mem_copy(".rwdata", rwdata_header->name, 7);
+        mem_copy(".data", rwdata_header->name, 5);
         rwdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
         rwdata_header->virtual_size = rwdata_length;
         rwdata_header->virtual_address = rwdata_memory_start;
@@ -6924,7 +7282,7 @@ bool write_executable(u8* path, Context* context) {
     if (rodata_length > 0) {
         Section_Header* rodata_header = &section_headers[section_index];
         section_index += 1;
-        mem_copy(".rodata", rodata_header->name, 7);
+        mem_copy(".rdata", rodata_header->name, 6);
         rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
         rodata_header->virtual_size = rodata_length;
         rodata_header->virtual_address = rodata_memory_start;
@@ -7259,7 +7617,7 @@ void main() {
     Context context = {0};
     if (!build_ast(&context, "W:/asm2/code.foo")) return;
     if (!typecheck(&context)) return;
-    print_verbose_info(&context);
+    //print_verbose_info(&context);
     build_intermediate(&context);
     //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
