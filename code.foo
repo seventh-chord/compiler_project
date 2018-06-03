@@ -116,6 +116,7 @@ fn seventy_two() -> u8 {
 #   slices (also, make strings slices)
 #   size_of, align_of, type_of
 #   more operators      <<   >>   |   &   ~   ||   &&
+#   assignment operators += -= etc
 #   hex literals
 
 #   .pdata and unwind info

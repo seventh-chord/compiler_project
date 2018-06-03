@@ -1,0 +1,32 @@
+
+extern "kernel32.lib" {
+    fn ExitProcess(exit_code: u32);
+
+    fn GetStdHandle(key: u32) -> u64;
+    fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+}
+
+let stdout_handle: u64;
+
+fn print(string: *u8) {
+    if (stdout_handle == 0) {
+        stdout_handle = GetStdHandle(4294967285);
+    }
+
+    let length: u32 = 0;
+    let s = string;
+    for (*s != 0) {
+        s = s + 1;
+        length = length + 1;
+    }
+
+    let written: u32;
+    WriteFile(stdout_handle, string, length, &written, null);
+}
+
+fn main() -> u8 {
+    print("Hello world\n");
+    print("This is how nice stuff is now!\n");
+
+    ExitProcess(0);
+}

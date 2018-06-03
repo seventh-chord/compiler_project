@@ -137,6 +137,14 @@ bool mem_cmp(u8* a, u8* b, u64 count) {
     return true;
 }
 
+u64 str_length(u8* s) {
+    u64 length = 0;
+    for (u8* t = s; *t != 0; t += 1) {
+        length += 1;
+    }
+    return length;
+}
+
 bool str_cmp(u8* a, u8* b) {
     while (true) {
         if (*a != *b) {
@@ -214,11 +222,7 @@ void* _buf_grow(void* buf, u64 new_len, u64 element_size) {
 
 // Appends a c-string onto a stretchy buffer. Does not push the null terminator!
 void str_push_cstr(u8** buf, u8* cstr) {
-    u32 cstr_length = 0;
-    for (u8* t = cstr; *t != 0; t += 1) {
-        cstr_length += 1;
-    }
-
+    u32 cstr_length = str_length(cstr);
     if (cstr_length == 0) return;
 
     _buf_fit(*buf, cstr_length);
@@ -407,12 +411,7 @@ u32 string_table_search_with_length(u8* table, u8* string, u32 length) {
 }
 
 u32 string_table_search(u8* table, u8* string) {
-    u32 length = 0;
-    for (u8* t = string; *t != '\0'; t += 1) {
-        length += 1;
-    }
-
-    return string_table_search_with_length(table, string, length);
+    return string_table_search_with_length(table, string, str_length(string));
 }
 
 u32 string_table_intern(u8** table, u8* string, u32 length) {
@@ -432,12 +431,7 @@ u32 string_table_intern(u8** table, u8* string, u32 length) {
 }
 
 u32 string_table_intern_cstr(u8** table, u8* string) {
-    u32 length = 0;
-    for (u8* p = string; *p != 0; p += 1) {
-        length += 1;
-    }
-    
-    return string_table_intern(table, string, length);
+    return string_table_intern(table, string, str_length(string));
 }
 
 // NB when inserting into the string table, old pointer may get invalidated as we reallocate!
@@ -639,6 +633,18 @@ u8* io_result_message(IO_Result result) {
             assert(false);
             return null;
         }
+    }
+}
+
+IO_Result get_temp_path(u8* path_into, u32* length) {
+    *length = GetTempPathA(*length, path_into);
+    if (*length == 0) {
+        u32 error_code = GetLastError();
+        switch (error_code) {
+            default: return io_error;
+        }
+    } else {
+        return io_ok;
     }
 }
 
@@ -4536,13 +4542,6 @@ bool typecheck(Context* context) {
 
     if (!valid) return false;
 
-    buf_foreach (Global_Var, global, context->global_vars) {
-        u8* name = string_table_access(context->string_table, global->var.name);
-        printf("%s: ", name);
-        print_type(context, global->var.type_index);
-        printf(";\n");
-    }
-
     // Functions
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
         arena_stack_push(&context->stack);
@@ -7491,173 +7490,6 @@ bool write_executable(u8* path, Context* context) {
 }
 
 
-
-void print_executable_info(u8* path) {
-    // NB this is only testing code!!!!!!!!!!!!!!!!!!!!!!
-    // No overflow checking here!
-
-    u8* file;
-    u32 file_length;
-    IO_Result result = read_entire_file(path, &file, &file_length);
-    if (result != io_ok) {
-        printf("Couldn't load \"%s\": %s\n", path, io_result_message(result));
-        return;
-    }
-
-    printf("  %s file size: %u\n", path, (u64) file_length);
-    if (file_length > 78 + 38) {
-        // Grab the message from the dos stub for fun
-        printf("  ");
-        print(file + 78, 38);
-        printf(", nice!\n");
-    }
-
-    // Only used for printing, not a good idea..
-    struct {
-        u8 dos_header[60];
-        u32 offset_to_coff_header;
-        u8 dos_stub[136];
-
-        COFF_Header    coff;
-        Image_Header   image;
-        Section_Header sections[4];
-    } * header = (void*) file;
-
-    {
-        printf("\n\n\n");
-        printf("struct Full_Header* header = (void*) output_file;\n\n");
-
-        printf("header->offset_to_coff_header = %u;\n\n", header->offset_to_coff_header);
-
-        for (u32 i = 0; i < 64; i += 1) {
-            printf("header->dos_header[%u] = %x;\n", i, header->dos_header[i]);
-        }
-        for (u32 i = 0; i < 136; i += 1) {
-            printf("header->dos_stub[%u] = %x;\n", i, header->dos_stub[i]);
-        }
-        printf("\n");
-
-        printf("header->coff.signature[0] = %u;\n", header->coff.signature[0]);
-        printf("header->coff.signature[1] = %u;\n", header->coff.signature[1]);
-        printf("header->coff.signature[2] = %u;\n", header->coff.signature[2]);
-        printf("header->coff.signature[3] = %u;\n", header->coff.signature[3]);
-        printf("header->coff.machine = %u;\n", header->coff.machine);
-        printf("header->coff.section_count = %u;\n", header->coff.section_count);
-        printf("header->coff.timestamp = %u;\n", header->coff.timestamp);
-        printf("header->coff.pointer_to_symbol_table = %u;\n", header->coff.pointer_to_symbol_table);
-        printf("header->coff.number_of_symbols = %u;\n", header->coff.number_of_symbols);
-        printf("header->coff.size_of_optional_header = %u;\n", header->coff.size_of_optional_header);
-        printf("header->coff.flags = %u;\n", header->coff.flags);
-
-        printf("\n");
-        printf("header->image.magic = %u;\n", header->image.magic);
-        printf("header->image.major_linker_version = %u;\n", header->image.major_linker_version);
-        printf("header->image.minor_linker_version = %u;\n", header->image.minor_linker_version);
-        printf("header->image.size_of_code = %u;\n", header->image.size_of_code);
-        printf("header->image.size_of_initialized_data = %u;\n", header->image.size_of_initialized_data);
-        printf("header->image.size_of_uninitialized_data = %u;\n", header->image.size_of_uninitialized_data);
-        printf("header->image.entry_point = %u;\n", header->image.entry_point);
-        printf("header->image.base_of_code = %u;\n", header->image.base_of_code);
-        printf("header->image.image_base = %u;\n", header->image.image_base);
-        printf("header->image.section_alignment = %u;\n", header->image.section_alignment);
-        printf("header->image.file_alignment = %u;\n", header->image.file_alignment);
-        printf("header->image.major_os_version = %u;\n", header->image.major_os_version);
-        printf("header->image.minor_os_version = %u;\n", header->image.minor_os_version);
-        printf("header->image.major_image_version = %u;\n", header->image.major_image_version);
-        printf("header->image.minor_image_version = %u;\n", header->image.minor_image_version);
-        printf("header->image.major_subsystem_version = %u;\n", header->image.major_subsystem_version);
-        printf("header->image.minor_subsystem_version = %u;\n", header->image.minor_subsystem_version);
-        printf("header->image.win32_version_value = %u;\n", header->image.win32_version_value);
-        printf("header->image.size_of_image = %u;\n", header->image.size_of_image);
-        printf("header->image.size_of_headers = %u;\n", header->image.size_of_headers);
-        printf("header->image.checksum = %u;\n", header->image.checksum);
-        printf("header->image.subsystem = %u;\n", header->image.subsystem);
-        printf("header->image.dll_flags = %u;\n", header->image.dll_flags);
-        printf("header->image.stack_reserve = %u;\n", header->image.stack_reserve);
-        printf("header->image.stack_commit = %u;\n", header->image.stack_commit);
-        printf("header->image.heap_reserve = %u;\n", header->image.heap_reserve);
-        printf("header->image.heap_commit = %u;\n", header->image.heap_commit);
-        printf("header->image.loader_flags = %u;\n", header->image.loader_flags);
-        printf("header->image.number_of_rva_and_sizes = %u;\n", header->image.number_of_rva_and_sizes);
-
-        printf("\n");
-        for (u32 i = 0; i < 16; i += 1) {
-            printf("header->image.data_directories[%u].virtual_address = %u;\n", i, header->image.data_directories[i].virtual_address);
-            printf("header->image.data_directories[%u].size = %u;\n", i, header->image.data_directories[i].size);
-        }
-
-        printf("\n");
-
-        for (u32 i = 0; i < 4; i += 1) {
-            printf("{\n");
-            Section_Header* s = &(header->sections[i]);
-            printf("    Section_Header* s = &header->sections[%u];\n", i);
-            printf("\n");
-            printf("    s->name[0] = %u;\n", s->name[0]);
-            printf("    s->name[1] = %u;\n", s->name[1]);
-            printf("    s->name[2] = %u;\n", s->name[2]);
-            printf("    s->name[3] = %u;\n", s->name[3]);
-            printf("    s->name[4] = %u;\n", s->name[4]);
-            printf("    s->name[5] = %u;\n", s->name[5]);
-            printf("    s->name[6] = %u;\n", s->name[6]);
-            printf("    s->name[7] = %u;\n", s->name[7]);
-            printf("    s->virtual_size = %u;\n", s->virtual_size);
-            printf("    s->virtual_address = %u;\n", s->virtual_address);
-            printf("    s->size_of_raw_data = %u;\n", s->size_of_raw_data);
-            printf("    s->pointer_to_raw_data = %u;\n", s->pointer_to_raw_data);
-            printf("    s->flags = %u;\n", s->flags);
-            printf("\n");
-
-            u8* raw_data = file + s->pointer_to_raw_data;
-            printf("    u8 raw_data[%u] = { ", s->size_of_raw_data);
-            for (u32 i = 0; i < s->size_of_raw_data; i += 1) {
-                if (i == 0) {
-                    printf("%x", raw_data[i]);
-                } else {
-                    printf(", %x", raw_data[i]);
-                }
-            }
-            printf(" };\n");
-
-            printf("    for (u32 i = 0; i < s->size_of_raw_data; i += 1) {\n");
-            printf("        output_file[s->pointer_to_raw_data + i] = raw_data[i];\n");
-            printf("    }\n");
-
-            printf("}\n\n");
-        }
-    }
-    printf("\n\n\n");
-
-    u32 coff_header_offset = *((u32*) (file + 0x3c));
-    COFF_Header* coff_header = (void*) (file + coff_header_offset);
-
-    printf("  Section count: %u\n", (u64) coff_header->section_count);
-    printf("  Header size: %u\n", (u64) coff_header->size_of_optional_header);
-
-    Image_Header* image_header = (void*) (coff_header + 1);
-
-    printf("  Linker version: %u %u\n", (u64) image_header->major_linker_version, (u64) image_header->minor_linker_version);
-    printf("  .text is %u, .data is %u, .bss is %u\n", (u64) image_header->size_of_code, (u64) image_header->size_of_initialized_data, (u64) image_header->size_of_uninitialized_data);
-    printf("  Entry %x, base %x\n", image_header->entry_point, image_header->base_of_code);
-    printf("  Subsystem: %x\n", image_header->subsystem);
-    printf("  Stack: %x,%x\n", image_header->stack_reserve, image_header->stack_commit);
-
-    Section_Header* section_header = (void*) (image_header + 1);
-    for (u32 i = 0; i < coff_header->section_count; i += 1) {
-        u32 end = (u32) (((u8*) section_header) - file);
-        if (end > file_length) {
-            printf("  Sections run off end of file\n");
-            return;
-        }
-
-        printf("  Section %s\n", section_header->name);
-
-        section_header += 1;
-    }
-
-    free(file);
-}
-
 void print_verbose_info(Context* context) {
     printf("\n%u functions:\n", (u64) buf_length(context->funcs));
     buf_foreach (Func, func, context->funcs) {
@@ -7688,23 +7520,15 @@ void print_verbose_info(Context* context) {
     }
 }
 
-void main() {
-    u8* source_path = "W:/asm2/code.foo";
-    u8* exe_path = "out.exe";
-    printf("Compiling %s to %s\n", source_path, exe_path);
-
-    //print_executable_info("build/tiny.exe");
-
-    i64 start_time = perf_time();
-
+bool build_file_to_executable(u8* source_path, u8* exe_path) {
     Context context = {0};
-    if (!build_ast(&context, source_path)) return;
-    if (!typecheck(&context)) return;
+    if (!build_ast(&context, source_path)) return false;
+    if (!typecheck(&context)) return false;
     //print_verbose_info(&context);
     build_intermediate(&context);
     //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
-    if (!write_executable(exe_path, &context)) return;
+    if (!write_executable(exe_path, &context)) return false;
 
     {
         u64 total_ops = 0;
@@ -7717,16 +7541,65 @@ void main() {
         printf("%u intermediate ops, %u bytes of machine code\n", total_ops, buf_length(context.seg_text));
     }
 
-    printf("\nRunning generated executable:\n");
+    return true;
+}
+
+bool run_executable(u8* exe_path) {
     STARTUPINFO startup_info = {0};
     startup_info.size = sizeof(STARTUPINFO);
     PROCESSINFO process_info = {0};
     bool result = CreateProcessA(exe_path, "", null, null, false, 0, null, null, &startup_info, &process_info);
     if (!result) {
         printf("Failed to start generated executable\n");
-        return;
+        return false;
     }
+
     WaitForSingleObject(process_info.process, 0xffffffff);
+
+    return true;
+}
+
+void compile_and_run(u8* source_path, u8* exe_path) {
+    bool free_exe_path = false;
+
+    if (exe_path == null) {
+        free_exe_path = true;
+
+        u32 exe_path_alloc_length = 1024;
+        u32 exe_path_length = exe_path_alloc_length;
+        exe_path = alloc(exe_path_length);
+        IO_Result result = get_temp_path(exe_path, &exe_path_length);
+        if (result != io_ok) {
+            printf("Couldn't get temporary file path for executable: %s\n", io_result_message(result));
+        }
+
+        u32 source_path_length = str_length(source_path);
+        assert(exe_path_length + source_path_length + 4 < exe_path_alloc_length);
+
+        mem_copy(source_path, exe_path + exe_path_length, source_path_length);
+        mem_copy(".exe", exe_path + exe_path_length + source_path_length, 4);
+        exe_path[exe_path_length + source_path_length + 4] = 0;
+    }
+
+    printf("Compiling %s to %s\n", source_path, exe_path);
+    if (build_file_to_executable(source_path, exe_path)) {
+        printf("Running %s:\n", exe_path);
+        run_executable(exe_path);
+    }
+
+    if (free_exe_path) {
+        free(exe_path);
+    }
+}
+
+void main() {
+    i64 start_time = perf_time();
+
+    u8* source_path = "W:/asm2/code.foo";
+    u8* exe_path = "out.exe";
+
+    compile_and_run("code.foo", "out.exe");
+    compile_and_run("print.foo", null);
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
