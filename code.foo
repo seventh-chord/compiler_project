@@ -24,8 +24,7 @@ fn print(string: *u8) {
 }
 
 
-
-fn sidewinder() { if (global) { global = false; } else { global = true; } }
+fn sidewinder() { global = !global; }
 
 let global = 3 > 2;
 
@@ -131,6 +130,7 @@ fn seventy_two() -> u8 {
 #   more operators      <<   >>   |   &   ~   ||   &&
 #   assignment operators += -= etc
 #   hex literals
+#   variable shadowing
 
 #   .pdata and unwind info
 #   debug info

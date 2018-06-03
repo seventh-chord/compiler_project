@@ -1061,6 +1061,22 @@ u64 size_mask(u8 size) {
 
 
 
+typedef enum Unary_Op {
+    unary_op_invalid = 0,
+
+    unary_not,
+    unary_dereference,
+    unary_address_of,
+
+    UNARY_OP_COUNT,
+} Unary_Op;
+
+u8* UNARY_OP_SYMBOL[UNARY_OP_COUNT] = {
+    [unary_not]         = "!",
+    [unary_dereference] = "*",
+    [unary_address_of]  = "&",
+};
+
 typedef enum Binary_Op {
     binary_op_invalid = 0,
 
@@ -1142,10 +1158,9 @@ typedef enum Expr_Kind {
     expr_string_literal,
     expr_compound_literal,
     expr_binary,
+    expr_unary,
     expr_call,
     expr_cast,
-    expr_address_of,
-    expr_dereference,
     expr_subscript,
 } Expr_Kind;
 
@@ -1182,6 +1197,11 @@ struct Expr { // 'typedef'd earlier!
         } binary;
 
         struct {
+            Unary_Op op;
+            Expr* inner;
+        } unary;
+
+        struct {
             union {
                 u32 unresolved_name;
                 u32 func_index;
@@ -1192,8 +1212,6 @@ struct Expr { // 'typedef'd earlier!
         } call;
 
         Expr* cast_from;
-        Expr* dereference_from;
-        Expr* address_from;
 
         struct {
             Expr* array;
@@ -1278,6 +1296,9 @@ typedef enum Op_Kind {
     op_cast,
     op_jump,
     op_load_data,
+
+    // 'unary'
+    op_neg,
     
     // 'binary'
     op_set,
@@ -1303,6 +1324,7 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_cast] = "cast",
     [op_jump] = "jump",
     [op_load_data] = "load_data",
+    [op_neg] = "neg",
     [op_set] = "set",
     [op_add] = "add",
     [op_sub] = "sub",
@@ -1332,6 +1354,8 @@ typedef struct Op {
 
     union {
         u32 temporary;
+
+        Local unary;
 
         struct {
             Local source;
@@ -1822,6 +1846,11 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             printf(")");
         } break;
 
+        case expr_unary: {
+            printf(UNARY_OP_SYMBOL[expr->unary.op]);
+            print_expr(context, func, expr->unary.inner);
+        } break;
+
         case expr_call: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
                 u8* name = string_table_access(context->string_table, expr->call.unresolved_name);
@@ -1847,16 +1876,6 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             printf("(");
             print_expr(context, func, expr->cast_from);
             printf(")");
-        } break;
-
-        case expr_address_of: {
-            printf("&");
-            print_expr(context, func, expr->address_from);
-        } break;
-
-        case expr_dereference: {
-            printf("*");
-            print_expr(context, func, expr->dereference_from);
         } break;
 
         case expr_subscript: {
@@ -1990,6 +2009,12 @@ void print_local(Context* context, Func* func, Local local) {
 
 void print_op(Context* context, Func* func, Op* op) {
     switch (op->kind) {
+        case op_neg:
+        {
+            printf("(%s) %s ", primitive_name(op->primitive), OP_NAMES[op->kind]);
+            print_local(context, func, op->unary);
+        } break;
+
         case op_set: case op_add: case op_sub: case op_mul: case op_div: case op_mod:
         case op_neq: case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
         {
@@ -2180,8 +2205,7 @@ typedef struct Shunting_Yard {
     Binary_Op* op_queue;
     u32 op_queue_index, op_queue_size;
 
-    Expr* prefix;
-    Expr** prefix_insert_slot;
+    Expr* unary_prefix;
 } Shunting_Yard;
 
 Shunting_Yard* shunting_yard_setup(Context* context) {
@@ -2196,28 +2220,34 @@ Shunting_Yard* shunting_yard_setup(Context* context) {
     return yard;
 }
 
-void shunting_yard_push_prefix_for_next_expr(Shunting_Yard* yard, Expr* prefix, Expr** slot) {
-    if (yard->prefix == null) {
-        yard->prefix = prefix;
-    } else {
-        *yard->prefix_insert_slot = prefix;
-    }
+void shunting_yard_push_unary_prefix(Shunting_Yard* yard, Expr* expr) {
+    assert(expr->kind == expr_unary);
 
-    yard->prefix_insert_slot = slot;
+    if (yard->unary_prefix == null) {
+        yard->unary_prefix = expr;
+    } else {
+        assert(yard->unary_prefix->kind == expr_unary);
+
+        Expr* inner = yard->unary_prefix;
+        while (inner->unary.inner != null) {
+            inner = inner->unary.inner;
+        }
+        inner->unary.inner = expr;
+    }
 }
 
 void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* index) {
-    assert(yard->prefix == null);
+    assert(yard->unary_prefix == null);
     assert(yard->expr_queue_index > 0);
 
     Expr** array = &yard->expr_queue[yard->expr_queue_index - 1];
 
     while (true) {
         bool done = false;
-        switch ((*array)->kind) {
-            case expr_address_of:  array = &((*array)->address_from);      break;
-            case expr_dereference: array = &((*array)->dereference_from);  break;
-            default: done = true; break;
+        if ((*array)->kind == expr_unary) {
+            array = &((*array)->unary.inner);
+        } else {
+            done = true;
         }
         if (done) break;
     }
@@ -2232,12 +2262,15 @@ void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* i
 }
 
 void shunting_yard_push_expr(Context* context, Shunting_Yard* yard, Expr* new_expr) {
-    if (yard->prefix != null) {
-        *yard->prefix_insert_slot = new_expr;
-        new_expr = yard->prefix;
+    if (yard->unary_prefix != null) {
+        Expr* inner = yard->unary_prefix;
+        while (inner->unary.inner != null) {
+            inner = inner->unary.inner;
+        }
+        inner->unary.inner = new_expr;
 
-        yard->prefix = null;
-        yard->prefix_insert_slot = null;
+        new_expr = yard->unary_prefix;
+        yard->unary_prefix = null;
     }
 
     assert(yard->expr_queue_index < yard->expr_queue_size);
@@ -2530,32 +2563,27 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expect_value = false;
                 } break;
 
-                case token_and: {
-                    Expr* expr = arena_new(&context->arena, Expr);
-                    expr->kind = expr_address_of;
-                    expr->pos = t->pos;
+                default: {
+                    Unary_Op op = unary_op_invalid;
+                    switch (t->kind) {
+                        case token_and: op = unary_address_of; break;
+                        case token_mul: op = unary_dereference; break;
+                        case token_not: op = unary_not; break;
+                    }
 
-                    shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->address_from);
+                    if (op != unary_op_invalid) {
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = expr_unary;
+                        expr->unary.op = op;
+                        expr->pos = t->pos;
+
+                        shunting_yard_push_unary_prefix(yard, expr);
+
+                        could_parse = true;
+                        expect_value = true;
+                    }
 
                     t += 1;
-                    could_parse = true;
-                    expect_value = true;
-                } break;
-
-                case token_mul: {
-                    Expr* expr = arena_new(&context->arena, Expr);
-                    expr->kind = expr_dereference;
-                    expr->pos = t->pos;
-
-                    shunting_yard_push_prefix_for_next_expr(yard, expr, &expr->dereference_from);
-
-                    t += 1;
-                    could_parse = true;
-                    expect_value = true;
-                } break;
-
-                case token_not: {
-                    unimplemented(); // TODO logical not and bitwise not
                 } break;
             }
         } else {
@@ -4198,40 +4226,62 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             typecheck_expr(info, expr->cast_from, expr->type_index);
         } break;
 
-        case expr_address_of: {
-            if (!typecheck_expr(info, expr->address_from, primitive_invalid)) {
+        case expr_unary: {
+            u32 inner_solidify_to;
+            switch (expr->unary.op) {
+                case unary_not:         inner_solidify_to = solidify_to; break;
+                case unary_dereference: inner_solidify_to = primitive_invalid; break;
+                case unary_address_of:  inner_solidify_to = primitive_invalid; break;
+                default: assert(false);
+            }
+
+            if (!typecheck_expr(info, expr->unary.inner, inner_solidify_to)) {
                 return false;
             }
 
-            if (!(expr->address_from->flags & EXPR_FLAG_ASSIGNABLE)) {
-                printf("Can't take address of ");
-                print_expr(info->context, info->func, expr->address_from);
-                printf(" (Line %u)\n", expr->pos.line);
-                return false;
+            switch (expr->unary.op) {
+                case unary_not: {
+                    // TODO allow using unary_not to do a bitwise not on integers
+                    Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
+                    if (child_primitive != primitive_bool) {
+                        printf("Can only negatve a 'bool' not a ");
+                        print_type(info->context, expr->unary.inner->type_index);
+                        printf(" (Line %u)\n", expr->unary.inner->pos.line);
+                        return false;
+                    }
+
+                    expr->type_index = expr->unary.inner->type_index;
+                } break;
+
+                case unary_dereference: {
+                    Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
+                    if (child_primitive != primitive_pointer) {
+                        printf("Can't dereference non-pointer ");
+                        print_expr(info->context, info->func, expr->unary.inner);
+                        printf(" (Line %u)\n", expr->pos.line);
+                        return false;
+                    }
+
+                    expr->type_index = expr->unary.inner->type_index + 1;
+                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
+                } break;
+
+                case unary_address_of: {
+                    if (!(expr->unary.inner->flags & EXPR_FLAG_ASSIGNABLE)) {
+                        printf("Can't take address of ");
+                        print_expr(info->context, info->func, expr->unary.inner);
+                        printf(" (Line %u)\n", expr->pos.line);
+                        return false;
+                    }
+
+                    expr->type_index = buf_length(info->context->type_buf);
+                    buf_push(info->context->type_buf, primitive_pointer);
+                    u32 duped = type_duplicate(info->context, expr->unary.inner->type_index);
+                    assert(duped == expr->type_index + 1);
+                } break;
+
+                default: assert(false);
             }
-
-            expr->type_index = buf_length(info->context->type_buf);
-            buf_push(info->context->type_buf, primitive_pointer);
-            u32 duped = type_duplicate(info->context, expr->address_from->type_index);
-            assert(duped == expr->type_index + 1);
-        } break;
-
-        case expr_dereference: {
-            if (!typecheck_expr(info, expr->dereference_from, primitive_invalid)) {
-                return false;
-            }
-
-            u8 child_primitive = info->context->type_buf[expr->dereference_from->type_index];
-            if (child_primitive != primitive_pointer) {
-                printf("Can't dereference non-pointer ");
-                print_expr(info->context, info->func, expr->dereference_from);
-                printf(" (Line %u)\n", expr->pos.line);
-                return false;
-            }
-
-            expr->type_index = expr->dereference_from->type_index + 1;
-
-            expr->flags |= EXPR_FLAG_ASSIGNABLE;
         } break;
 
         case expr_subscript: {
@@ -4797,6 +4847,8 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_string_literal: {
+            assert(!get_address);
+
             bool writable = false; // Decides whether strings should be writable by user code
 
             u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, writable);
@@ -4989,29 +5041,46 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
         } break;
 
-        case expr_address_of: {
-            assert(!get_address);
-            linearize_expr(context, expr->address_from, assign_to, true);
-        } break;
+        case expr_unary: {
+            switch (expr->unary.op) {
+                case unary_not: {
+                    assert(!get_address);
+                    
+                    linearize_expr(context, expr->unary.inner, assign_to, false);
 
-        case expr_dereference: {
-            if (get_address) {
-                // Used for lvalues
-                linearize_expr(context, expr->dereference_from, assign_to, false);
+                    Op op = {0};
+                    op.kind = op_neg;
+                    op.unary = assign_to;
+                    op.primitive = context->type_buf[expr->type_index];
+                    buf_push(context->tmp_ops, op);
+                } break;
 
-            } else {
-                Local right_local = intermediate_allocate_temporary(context, POINTER_SIZE);
-                right_local.as_reference = false;
-                linearize_expr(context, expr->dereference_from, right_local, false);
-                right_local.as_reference = true;
+                case unary_dereference: {
+                    if (get_address) {
+                        // Used for lvalues
+                        linearize_expr(context, expr->unary.inner, assign_to, false);
+                    } else {
+                        Local right_local = intermediate_allocate_temporary(context, POINTER_SIZE);
+                        right_local.as_reference = false;
+                        linearize_expr(context, expr->unary.inner, right_local, false);
+                        right_local.as_reference = true;
 
-                if (primitive_is_compound(context->type_buf[expr->type_index])) {
-                    assert(assign_to.as_reference);
-                }
+                        if (primitive_is_compound(context->type_buf[expr->type_index])) {
+                            assert(assign_to.as_reference);
+                        }
 
-                intermediate_write_compound_set(context, right_local, assign_to, expr->type_index);
+                        intermediate_write_compound_set(context, right_local, assign_to, expr->type_index);
 
-                intermediate_deallocate_temporary(context, right_local);
+                        intermediate_deallocate_temporary(context, right_local);
+                    }
+                } break;
+
+                case unary_address_of: {
+                    assert(!get_address);
+                    linearize_expr(context, expr->unary.inner, assign_to, true);
+                } break;
+
+                default: assert(false);
             }
         } break;
 
@@ -5134,12 +5203,8 @@ bool linearize_assignment_needs_temporary(Expr* expr, u32 var_index) {
             return linearize_assignment_needs_temporary(expr->cast_from, var_index);
         } break;
 
-        case expr_address_of: {
-            return linearize_assignment_needs_temporary(expr->address_from, var_index);
-        } break;
-
-        case expr_dereference: {
-            return linearize_assignment_needs_temporary(expr->dereference_from, var_index);
+        case expr_unary: {
+            return linearize_assignment_needs_temporary(expr->unary.inner, var_index);
         } break;
 
         case expr_subscript: {
@@ -5156,8 +5221,12 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 
     switch (left->kind) {
         case expr_subscript:
-        case expr_dereference:
+        case expr_unary:
         {
+            if (left->kind == expr_unary && left->unary.op != unary_dereference) {
+                break;
+            }
+
             bool use_pointer_to_right = primitive_is_compound(context->type_buf[left->type_index]);
 
             Local right_data_local = intermediate_allocate_temporary(context, type_size_of(context, right->type_index));
@@ -5281,16 +5350,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
             }
         } break;
 
-        case expr_literal:
-        case expr_binary:
-        case expr_call:
-        case expr_cast:
-        case expr_address_of:
-        {
-            panic("Invalid lexpr\n");
-        } break;
-
-        default: assert(false);
+        default: panic("Invalid lexpr\n");
     }
 }
 
@@ -6450,6 +6510,23 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
     #endif
 
     switch (op->kind) {
+        case op_neg: {
+            u8 primitive_size = primitive_size_of(op->primitive);
+
+            instruction_load_local(context, func, op->unary, reg_rax, primitive_size);
+
+            // NB this only works if we assume the bools value initialy was one
+            assert(op->primitive == primitive_bool);
+            instruction_xor_reg_imm(&context->seg_text, reg_rax, 1, primitive_size);
+
+            if (op->unary.as_reference) {
+                instruction_mov_mem(context, func, mov_from, op->unary, reg_rcx, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_mem(context, func, mov_to, op->unary, reg_rax, primitive_size);
+            }
+        } break;
+
         case op_set: {
             u8 primitive_size = primitive_size_of(op->primitive);
 
