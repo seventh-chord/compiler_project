@@ -32,8 +32,8 @@ fn main() -> u8 {
     let hi = "Hi";
     let ho = "Ho";
 
-    # This will crash now, since we put strings in a read-only section
-    #*(hi + 0) = seventy_two();
+    // This will crash now, since we put strings in a read-only section
+    //*(hi + 0) = seventy_two();
 
     let a: u8 = 10;
     for (a > 0) {
@@ -122,19 +122,21 @@ fn seventy_two() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
-#   constants in .rodata
-#   uninitialized (zeroed) global variables in .bss
-#   structs, unions, enums
-#   slices (also, make strings slices)
-#   size_of, align_of, type_of
-#   more operators      <<   >>   |   &   ~   ||   &&
-#   assignment operators += -= etc
-#   hex literals
-#   variable shadowing
+/*
+constants in .rodata
+uninitialized (zeroed) global variables in .bss
+structs, unions, enums
+slices (also, make strings slices)
+size_of, align_of, type_of
+more operators      <<   >>   |   &   ~   ||   &&
+assignment operators += -= etc
+hex literals
+variable shadowing
 
-#   .pdata and unwind info
-#   debug info
-#   growing the stack? __chkstk
-#   constant evaluation / elimination
-#   peephole optimizer
-#   some form of compile-time execution
+.pdata and unwind info
+debug info
+growing the stack? __chkstk
+constant evaluation / elimination
+peephole optimizer
+some form of compile-time execution
+*/

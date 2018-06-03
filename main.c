@@ -3502,8 +3502,54 @@ bool build_ast(Context* context, u8* path) {
                 } break;
 
                 case '/': {
-                    kind = token_div;
-                    i += 1;
+                    // Comments!
+                    if (b == '/') {
+                        for (; i < file_length; i += 1) if (file[i] == '\n' || file[i] == '\r') break;
+                    } else if (b == '*') {
+                        i += 2;
+                        u32 comment_level = 1;
+
+                        while (i < file_length) {
+                            switch (file[i]) {
+                                case '\n': case '\r': {
+                                    i += 1;
+                                    if (i < file_length && file[i] + file[i - 1] == '\n' + '\r') {
+                                        i += 1;
+                                    }
+
+                                    file_pos.line += 1;
+                                } break;
+
+                                case '/': {
+                                    i += 1;
+                                    if (file[i] == '*') {
+                                        comment_level += 1;
+                                    }
+                                    i += 1;
+                                } break;
+
+                                case '*': {
+                                    i += 1;
+                                    if (file[i] == '/') {
+                                        comment_level -= 1;
+                                    }
+                                    i += 1;
+                                } break;
+
+                                default: {
+                                    i += 1;
+                                } break;
+                            }
+
+                            if (comment_level == 0) {
+                                break;
+                            }
+                        }
+
+                    } else {
+                        kind = token_div;
+                        i += 1;
+                    }
                 } break;
 
                 case '%': {
@@ -3579,8 +3625,9 @@ bool build_ast(Context* context, u8* path) {
                 } break;
             }
 
-            assert(kind != -1);
-            buf_push(tokens, ((Token) { kind, .pos = file_pos }));
+            if (kind != -1) {
+                buf_push(tokens, ((Token) { kind, .pos = file_pos }));
+            }
         } break;
 
         case '{': case '}':
@@ -3711,10 +3758,6 @@ bool build_ast(Context* context, u8* path) {
                     .string.length = collapsed_length,
                 }));
             }
-        } break;
-
-        case '#': {
-            for (; i < file_length; i += 1) if (file[i] == '\n' || file[i] == '\r') break;
         } break;
 
         case ',': {
@@ -4019,7 +4062,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                     printf("Can't find variable '%s' ", var_name);
                     if (info->func != null) {
                         u8* func_name = string_table_access(info->context->string_table, info->func->name);
-                        printf("in function '%s' or \n", func_name);
+                        printf("in function '%s' or ", func_name);
                     }
                     printf("in global scope (Line %u)\n", (u64) expr->pos.line);
                     return false;
