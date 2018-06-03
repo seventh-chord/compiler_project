@@ -5807,6 +5807,23 @@ enum {
     MODRM_MOD_MASK = 0xc0,
 };
 
+
+void instruction_int3(u8** b) {
+    buf_push(*b, 0xcc);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("int 3\n");
+    #endif
+}
+
+void instruction_nop(u8** b) {
+    buf_push(*b, 0x90);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("nop\n");
+    #endif
+}
+
 typedef enum X64_Instruction_Binary {
     instruction_xor,
     instruction_add,
@@ -5959,23 +5976,58 @@ void instruction_xor_reg_imm(u8** b, X64_Reg reg, u32 immediate, u8 bytes) {
 
 }
 
-void instruction_zero_extend_8_to_64(u8** b, X64_Reg reg) {
+void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+
     u8 modrm =
         0xc0 |
         ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
         ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+    u8 rex = REX_BASE;
 
-    u8 rex = REX_BASE | REX_W | (reg >= reg_r8? (REX_R | REX_B) : 0);
+    if (reg > reg_r8) {
+        rex |= REX_R | REX_B;
+    }
 
-    buf_push(*b, rex);
+    switch (target_bytes) {
+        case 1: assert(false); // Can't zero-extend from 1 byte to 1 byte
+        case 2: buf_push(*b, 0x66); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
     buf_push(*b, 0x0f);
     buf_push(*b, 0xb6);
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8* reg_name = reg_names[reg];
-    printf("movzx %s %s (8 -> 64)\n", reg_name, reg_name);
+    printf("movzx %s %s (8 -> %u)\n", reg_name, reg_name, target_bytes*8);
     #endif
+
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
+    instruction_nop(b);
 }
 
 void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) {
@@ -6040,22 +6092,6 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
         }
     }
     printf("set%s %s\n", condition_name, reg_names[reg]);
-    #endif
-}
-
-void instruction_int3(u8** b) {
-    buf_push(*b, 0xcc);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("int 3\n");
-    #endif
-}
-
-void instruction_nop(u8** b) {
-    buf_push(*b, 0x90);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("nop\n");
     #endif
 }
 
@@ -6477,6 +6513,17 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
             instruction_load_local(context, func, op->binary.source, reg_rcx, primitive_size);
 
+            if (op->kind == op_div || op->kind == op_mod) {
+                // NB We need to clear rdx when executing 'div', as x64 divides rdx:rax (128 bits), or in
+                // 8 bit mode, we need to clear ah because 'div' uses ah:al
+
+                if (primitive_size == 1) {
+                    instruction_zero_extend_byte(&context->seg_text, reg_rax, 2);
+                } else {
+                    instruction_general_reg_reg(&context->seg_text, instruction_xor, reg_rdx, reg_rdx, POINTER_SIZE);
+                }
+            }
+
             X64_Reg result_reg;
             X64_Instruction_Unary kind;
             switch (op->kind) {
@@ -6630,7 +6677,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->jump.conditional) {
                 instruction_load_local(context, func, op->jump.condition, reg_rcx, 1);
                 instruction_xor_reg_imm(&context->seg_text, reg_rcx, 1, 1);
-                instruction_zero_extend_8_to_64(&context->seg_text, reg_rcx);
+                instruction_zero_extend_byte(&context->seg_text, reg_rcx, 8);
                 u64 small_jump_text_location = instruction_jmp_rcx_zero(&context->seg_text);
                 u64 small_jump_from = buf_length(context->seg_text);
                 big_jump_text_location = instruction_jmp_i32(&context->seg_text);
@@ -7620,7 +7667,6 @@ void main() {
     i64 start_time = perf_time();
 
     compile_and_run("W:/asm2/code.foo", "out.exe");
-    compile_and_run("W:/asm2/print.foo", "print.exe");
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);

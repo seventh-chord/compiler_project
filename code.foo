@@ -6,41 +6,54 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
+let stdout_handle: u64;
+fn print(string: *u8) {
+    if (stdout_handle == 0) {
+        stdout_handle = GetStdHandle(4294967285);
+    }
+
+    let length: u32 = 0;
+    let s = string;
+    for (*s != 0) {
+        s += 1;
+        length += 1;
+    }
+
+    let written: u32;
+    WriteFile(stdout_handle, string, length, &written, null);
+}
+
+
+
 fn sidewinder() { if (global) { global = false; } else { global = true; } }
 
 let global = 3 > 2;
 
 fn main() -> u8 {
-    let hi = "Hi\n";
-    let ho = "Ho\n";
+    let hi = "Hi";
+    let ho = "Ho";
 
     # This will crash now, since we put strings in a read-only section
     #*(hi + 0) = seventy_two();
 
-    {
-        let written: u32 = 0;
-        let handle: u64 = GetStdHandle(4294967285);
-
-        let a: u8 = 10;
-        for (a > 0) {
-            if (a % 2 == 0) { # Who needs a modulus operator anyways?
-                WriteFile(handle, hi, 2, &written, null);
-            } else {
-                WriteFile(handle, ho, 2, &written, null);
-            }
-
-            a = a - 1;
+    let a: u8 = 10;
+    for (a > 0) {
+        if (a % 2 == 0) {
+            print(hi);
+        } else {
+            print(ho);
         }
 
-        WriteFile(handle, hi + 2, 1, &written, null);
-
-
-        if (global) { WriteFile(handle, "Dude\n", 5, &written, null); }
-        sidewinder();
-        if (global) { WriteFile(handle, "Not\n", 4, &written, null); }
-        sidewinder();
-        if (global) { WriteFile(handle, "Nice\n", 5, &written, null); }
+        a -= 1;
     }
+
+    print("\n");
+
+    if (global) { print("Dude, "); }
+    sidewinder();
+    if (global) { print("thats not "); }
+    sidewinder();
+    if (global) { print("nice\n"); }
 
     ExitProcess(0);
 }
