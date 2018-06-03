@@ -16,8 +16,8 @@ fn print(string: *u8) {
     let length: u32 = 0;
     let s = string;
     for (*s != 0) {
-        s = s + 1;
-        length = length + 1;
+        s += 1;
+        length += 1;
     }
 
     let written: u32;

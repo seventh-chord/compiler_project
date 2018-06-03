@@ -20,7 +20,6 @@ WINAPI_PRE Handle WINAPI_POST GetStdHandle(u32 key);
 #define STD_OUTPUT_HANDLE ((u32)-11)
 #define STD_ERROR_HANDLE  ((u32)-12)
 
-
 WINAPI_PRE u32 WINAPI_POST GetTempPathA(u32 buffer_length, u8* buffer);
 
 WINAPI_PRE Handle WINAPI_POST CreateFileA(

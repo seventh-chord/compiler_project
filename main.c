@@ -760,6 +760,9 @@ typedef struct Token {
         token_shift_left, // "<<", TODO
         token_shift_right, // ">>", TODO
 
+        token_add_assign, // "+="
+        token_sub_assign, // "-="
+
         token_identifier,
         token_literal,
         token_string,
@@ -818,6 +821,8 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_arrow]                = "->",
     [token_shift_left]           = "<<",
     [token_shift_right]          = ">>",
+    [token_add_assign]           = "+=",
+    [token_sub_assign]           = "-=",
 
     [token_semicolon]            = "semicolon ';'",
     [token_comma]                = "comma ','",
@@ -2089,7 +2094,7 @@ Primitive parse_primitive_name(Context* context, u32 name_index) {
 
 bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
     if (t->kind != kind) {
-        printf("Expected %s %s, but got ", TOKEN_NAMES[t->kind], location);
+        printf("Expected %s %s, but got ", TOKEN_NAMES[kind], location);
         print_token(context->string_table, t);
         printf(" (Line %u)\n", (u64) t->pos.line);
         return false;
@@ -2586,6 +2591,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 case token_assign:
                 case token_keyword_let:
                 case token_keyword_fn:
+                case token_add_assign:
+                case token_sub_assign:
                 {
                     reached_end = true;
                 } break;
@@ -2931,21 +2938,55 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
 
         if (left == null) return null;
 
-        if (t->kind == token_assign) {
-            t += 1;
+        switch (t->kind) {
+            case token_assign: {
+                t += 1;
 
-            u32 right_length = 0;
-            Expr* right = parse_expr(context, t, &right_length);
-            t += right_length;
+                u32 right_length = 0;
+                Expr* right = parse_expr(context, t, &right_length);
+                t += right_length;
 
-            if (right == null) return null;
+                if (right == null) return null;
 
-            stmt->kind = stmt_assignment;
-            stmt->assignment.left = left;
-            stmt->assignment.right = right;
-        } else {
-            stmt->kind = stmt_expr;
-            stmt->expr = left;
+                stmt->kind = stmt_assignment;
+                stmt->assignment.left = left;
+                stmt->assignment.right = right;
+            } break;
+
+            case token_add_assign:
+            case token_sub_assign:
+            {
+                Binary_Op op;
+                switch (t->kind) {
+                    case token_add_assign: op = binary_add; break;
+                    case token_sub_assign: op = binary_sub; break;
+                    default: assert(false);
+                }
+
+                t += 1;
+
+                u32 right_length = 0;
+                Expr* right = parse_expr(context, t, &right_length);
+                t += right_length;
+
+                if (right == null) return null;
+
+                Expr* binary = arena_new(&context->arena, Expr);
+                binary->kind = expr_binary;
+                binary->pos = left->pos;
+                binary->binary.left = left;
+                binary->binary.right = right;
+                binary->binary.op = op;
+
+                stmt->kind = stmt_assignment;
+                stmt->assignment.left = left;
+                stmt->assignment.right = binary;
+            } break;
+
+            default: {
+                stmt->kind = stmt_expr;
+                stmt->expr = left;
+            } break;
         }
 
         if (!expect_single_token(context, t, token_semicolon, "after statement")) return null;
@@ -3405,13 +3446,21 @@ bool build_ast(Context* context, u8* path) {
             int kind = -1;
             switch (a) {
                 case '+': {
-                    kind = token_add;
-                    i += 1;
+                    if (b == '=') {
+                        kind = token_add_assign;
+                        i += 2;
+                    } else {
+                        kind = token_add;
+                        i += 1;
+                    }
                 } break;
 
                 case '-': {
                     if (b == '>') {
                         kind = token_arrow;
+                        i += 2;
+                    } else if (b == '=') {
+                        kind = token_sub_assign;
                         i += 2;
                     } else {
                         kind = token_sub;
@@ -7560,46 +7609,18 @@ bool run_executable(u8* exe_path) {
 }
 
 void compile_and_run(u8* source_path, u8* exe_path) {
-    bool free_exe_path = false;
-
-    if (exe_path == null) {
-        free_exe_path = true;
-
-        u32 exe_path_alloc_length = 1024;
-        u32 exe_path_length = exe_path_alloc_length;
-        exe_path = alloc(exe_path_length);
-        IO_Result result = get_temp_path(exe_path, &exe_path_length);
-        if (result != io_ok) {
-            printf("Couldn't get temporary file path for executable: %s\n", io_result_message(result));
-        }
-
-        u32 source_path_length = str_length(source_path);
-        assert(exe_path_length + source_path_length + 4 < exe_path_alloc_length);
-
-        mem_copy(source_path, exe_path + exe_path_length, source_path_length);
-        mem_copy(".exe", exe_path + exe_path_length + source_path_length, 4);
-        exe_path[exe_path_length + source_path_length + 4] = 0;
-    }
-
-    printf("Compiling %s to %s\n", source_path, exe_path);
+    printf("    Compiling %s to %s\n", source_path, exe_path);
     if (build_file_to_executable(source_path, exe_path)) {
-        printf("Running %s:\n", exe_path);
+        printf("    Running %s:\n", exe_path);
         run_executable(exe_path);
-    }
-
-    if (free_exe_path) {
-        free(exe_path);
     }
 }
 
 void main() {
     i64 start_time = perf_time();
 
-    u8* source_path = "W:/asm2/code.foo";
-    u8* exe_path = "out.exe";
-
-    compile_and_run("code.foo", "out.exe");
-    compile_and_run("print.foo", null);
+    compile_and_run("W:/asm2/code.foo", "out.exe");
+    compile_and_run("W:/asm2/print.foo", "print.exe");
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
