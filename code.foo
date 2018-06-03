@@ -6,6 +6,8 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
+fn sidewinder() { if (global) { global = false; } else { global = true; } }
+
 let global = 3 > 2;
 
 fn main() -> u8 {
@@ -42,8 +44,6 @@ fn main() -> u8 {
 
     ExitProcess(0);
 }
-
-fn sidewinder() { if (global) { global = false; } else { global = true; } }
 
 fn four() -> u8 {
     let big_boy: [4][4]u64 = {
@@ -110,16 +110,17 @@ fn seventy_two() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
-#   global variables and constants (.rodata, .rwdata, .bss (?))
-#   slices
+#   constants in .rodata
+#   uninitialized (zeroed) global variables in .bss
 #   structs, unions, enums
+#   slices (also, make strings slices)
 #   size_of, align_of, type_of
 #   more operators      <<   >>   |   &   ~   ||   &&
 #   hex literals
 
-#   .pdata so we can crash properly, or whatever that is for
+#   .pdata and unwind info
 #   debug info
-#   growing the stack? stack guards? __chkstk
+#   growing the stack? __chkstk
 #   constant evaluation / elimination
 #   peephole optimizer
-#   eval_ops, compile-time execution?
+#   some form of compile-time execution

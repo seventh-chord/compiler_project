@@ -710,6 +710,10 @@ typedef struct File_Pos {
     u32 line;
 } File_Pos;
 
+bool file_pos_is_after(File_Pos a, File_Pos b) {
+    return a.line > b.line;
+}
+
 typedef struct Token {
     enum {
         token_end_of_stream = 0,
@@ -850,7 +854,8 @@ typedef struct Global_Var {
     Var var;
     Expr* initial_expr;
     u32 data_offset;
-    bool typechecked;
+
+    bool checked, valid;
 } Global_Var;
 
 
@@ -2196,7 +2201,7 @@ void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* i
 
     Expr** array = &yard->expr_queue[yard->expr_queue_index - 1];
 
-    while (1) {
+    while (true) {
         bool done = false;
         switch ((*array)->kind) {
             case expr_address_of:  array = &((*array)->address_from);      break;
@@ -2754,7 +2759,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
     } else if (t->kind == token_keyword_if) {
         Stmt* if_stmt = stmt;
 
-        while (1) {
+        while (true) {
             if_stmt->kind = stmt_if;
 
             t += 1;
@@ -3788,10 +3793,571 @@ bool build_ast(Context* context, u8* path) {
 }
 
 
+typedef struct Scope Scope;
+struct Scope {
+    u32 var_count;
+    u8* map; // list of booleans, for marking which variables currently are in scope
 
-// NB will allocate on context->stack, push/pop before/after
-bool eval_expr(Context* context, Expr* expr, u8* result_into) {
-    u64 type_size = type_size_of(context, expr->type_index);
+    Scope *child, *parent;
+};
+
+typedef struct Typecheck_Info {
+    Context* context;
+    Func* func;
+    Scope* scope;
+} Typecheck_Info;
+
+Scope* scope_new(Context* context, u32 var_count) {
+    Scope* scope = arena_new(&context->stack, Scope);
+    scope->var_count = var_count;
+    scope->map = arena_alloc(&context->stack, var_count);
+    mem_clear(scope->map, var_count);
+    return scope;
+}
+
+void typecheck_scope_push(Typecheck_Info* info) {
+    if (info->scope->child == null) {
+        info->scope->child = scope_new(info->context, info->scope->var_count);
+        info->scope->child->parent = info->scope;
+    }
+
+    mem_copy(info->scope->map, info->scope->child->map, info->scope->var_count);
+
+    info->scope = info->scope->child;
+}
+
+void typecheck_scope_pop(Typecheck_Info* info) {
+    assert(info->scope->parent != null);
+    info->scope = info->scope->parent;
+}
+
+bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
+    switch (expr->kind) {
+        case expr_literal: {
+            Primitive solidify_to_primitive = info->context->type_buf[solidify_to];
+
+            switch (expr->literal.kind) {
+                case expr_literal_integer: {
+                    if (solidify_to_primitive == primitive_pointer) {
+                        solidify_to_primitive = primitive_u64;
+                    }
+                    bool can_solidify = solidify_to_primitive >= primitive_u8 && solidify_to_primitive <= primitive_i64;
+
+                    if (can_solidify) {
+                        expr->type_index = solidify_to_primitive;
+
+                        u64 mask = size_mask(primitive_size_of(solidify_to_primitive));
+                        u64 value = expr->literal.value;
+
+                        if (value != (value & mask)) {
+                            printf(
+                                "Warning: Literal %u won't fit fully into a %s and will be masked! (Line %u)\n",
+                                (u64) value, primitive_name(solidify_to_primitive), (u64) expr->pos.line
+                            );
+                        }
+                    } else {
+                        expr->type_index = primitive_unsolidified_int;
+                    }
+                } break;
+
+                case expr_literal_pointer: {
+                    if (solidify_to_primitive == primitive_pointer) {
+                        expr->type_index = solidify_to;
+                    } else {
+                        expr->type_index = primitive_invalid;
+                    }
+                } break;
+
+                case expr_literal_bool: {
+                    assert(expr->literal.value == true || expr->literal.value == false);
+                    expr->type_index = primitive_bool;
+                } break;
+
+                default: assert(false);
+            }
+
+        } break;
+
+        case expr_string_literal: {
+            assert(expr->type_index == info->context->string_type);
+        } break;
+
+        case expr_compound_literal: {
+            if (expr->type_index == 0) {
+                expr->type_index = solidify_to;
+            }
+
+            Primitive primitive = info->context->type_buf[expr->type_index];
+            if (primitive == primitive_array) {
+                u64 expected_child_count = *((u64*) &info->context->type_buf[expr->type_index + 1]);
+                u32 expected_child_type_index = expr->type_index + 1 + sizeof(u64);
+
+                if (expr->compound_literal.count != expected_child_count) {
+                    printf(
+                        "Too %s values in compound literal: expected %u, got %u (Line %u)\n",
+                        (expr->compound_literal.count > expected_child_count)? "many" : "few",
+                        (u64) expected_child_count,
+                        (u64) expr->compound_literal.count,
+                        (u64) expr->pos.line
+                    );
+                    return false;
+                }
+
+                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
+                    Expr* child = node->expr;
+                    if (!typecheck_expr(info, child, expected_child_type_index)) {
+                        return false;
+                    }
+
+                    if (!type_cmp(info->context, expected_child_type_index, child->type_index)) {
+                        printf("Invalid type inside compound literal: Expected ");
+                        print_type(info->context, expected_child_type_index);
+                        printf(" but got ");
+                        print_type(info->context, child->type_index);
+                        printf(" (Line %u)\n", (u64) expr->pos.line);
+
+                        return false;
+                    }
+                }
+            } else {
+                printf("Invalid type for compound literal: ");
+                print_type(info->context, expr->type_index);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
+        } break;
+
+        case expr_variable: {
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                u32 var_index = find_var(info->context, info->func, expr->variable.unresolved_name);
+
+                if (var_index == U32_MAX) {
+                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
+                    printf("Can't find variable '%s' ", var_name);
+                    if (info->func != null) {
+                        u8* func_name = string_table_access(info->context->string_table, info->func->name);
+                        printf("in function '%s' or \n", func_name);
+                    }
+                    printf("in global scope (Line %u)\n", (u64) expr->pos.line);
+                    return false;
+                }
+
+                if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                    u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                    Global_Var* global = &info->context->global_vars[global_index];
+
+                    if (!global->valid) {
+                        if (!global->checked) {
+                            u8* name = string_table_access(info->context->string_table, global->var.name);
+                            printf(
+                                "Can't use global variable %s before its declaration on line %u (Line %u)\n",
+                                name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
+                            );
+                        }
+
+                        return false;
+                    }
+                } else if (info->scope->map[var_index] == false) {
+                    Var* var = &info->func->body.vars[var_index];
+                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
+
+                    u64 use_line = expr->pos.line;
+                    u64 decl_line = var->declaration_pos.line;
+
+                    if (use_line <= decl_line) {
+                        printf(
+                            "Can't use variable %s on line %u before its declaration on line %u\n",
+                            var_name, use_line, decl_line
+                        );
+                    } else {
+                        printf(
+                            "Can't use variable %s on line %u, as it isn't in scope\n",
+                            var_name, use_line
+                        );
+                    }
+
+                    return false;
+                }
+
+                expr->variable.index = var_index;
+                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
+            }
+
+            if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
+                expr->type_index = info->context->global_vars[global_index].var.type_index;
+            } else {
+                expr->type_index = info->func->body.vars[expr->variable.index].type_index;
+            }
+
+            expr->flags |= EXPR_FLAG_ASSIGNABLE;
+        } break;
+
+        case expr_binary: {
+            bool is_comparasion = false;
+            switch (expr->binary.op) {
+                case binary_eq:
+                case binary_neq:
+                case binary_gt:
+                case binary_gteq:
+                case binary_lt:
+                case binary_lteq:
+                {
+                    is_comparasion = true;
+                    solidify_to = primitive_u64;
+                } break;
+            }
+
+            if (!typecheck_expr(info, expr->binary.left, solidify_to))  return false;
+            if (!typecheck_expr(info, expr->binary.right, solidify_to)) return false;
+
+            assert(info->context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
+            assert(info->context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
+
+            // We take one shot at matching the types to each other by changing what we try solidifying to
+            if (!type_cmp(info->context, expr->binary.left->type_index, expr->binary.right->type_index)) {
+                bool left_strong = info->context->type_buf[expr->binary.left->type_index] != solidify_to;
+                bool right_strong = info->context->type_buf[expr->binary.right->type_index] != solidify_to;
+
+                if (left_strong) {
+                    assert(typecheck_expr(info, expr->binary.right, expr->binary.left->type_index));
+                } else if (right_strong) {
+                    assert(typecheck_expr(info, expr->binary.left, expr->binary.right->type_index));
+                }
+            }
+
+            expr->type_index = primitive_invalid;
+
+            Primitive left_primitive = info->context->type_buf[expr->binary.left->type_index];
+            Primitive right_primitive = info->context->type_buf[expr->binary.right->type_index];
+
+            if (is_comparasion) {
+                expr->type_index = primitive_bool;
+
+                bool valid;
+                if (expr->binary.op == binary_eq) {
+                    valid = left_primitive == right_primitive && !primitive_is_compound(left_primitive);
+                } else {
+                    valid = left_primitive == right_primitive && primitive_is_integer(left_primitive);
+                }
+
+                if (!valid) {
+                    printf("Can't compare ");
+                    print_type(info->context, expr->binary.left->type_index);
+                    printf(" with ");
+                    print_type(info->context, expr->binary.right->type_index);
+                    printf(" using operator %s (Line %u)\n", BINARY_OP_SYMBOL[expr->binary.op], (u64) expr->pos.line);
+                    return false;
+                }
+            } else {
+                if (left_primitive == right_primitive && primitive_is_integer(left_primitive)) {
+                    expr->type_index = expr->binary.left->type_index;
+
+                // Handle special cases for pointer arithmetic
+                } else switch (expr->binary.op) {
+                    case binary_add: {
+                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                            expr->type_index = expr->binary.left->type_index;
+                        }
+
+                        if (left_primitive == primitive_u64 && right_primitive == primitive_pointer) {
+                            expr->type_index = expr->binary.right->type_index;
+                        }
+                    } break;
+
+                    case binary_sub: {
+                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                            expr->type_index = expr->binary.left->type_index;
+                        }
+                    } break;
+
+                    case binary_mul: {} break;
+                    case binary_div: {} break;
+                    case binary_mod: {} break;
+
+                    default: assert(false);
+                }
+            }
+
+            if (expr->type_index == primitive_invalid) {
+                printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
+                print_type(info->context, expr->binary.left->type_index);
+                printf(" vs ");
+                print_type(info->context, expr->binary.right->type_index);
+                printf(" (Line %u)\n", (u64) expr->pos.line);
+                return false;
+            }
+        } break;
+
+        case expr_call: {
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                u32 func_index = find_func(info->context, expr->call.unresolved_name);
+                if (func_index == U32_MAX) {
+                    u8* name = string_table_access(info->context->string_table, expr->call.unresolved_name);
+                    printf("Can't find function '%s' (Line %u)\n", name, (u64) expr->pos.line);
+                    return false;
+                }
+
+                expr->call.func_index = func_index;
+                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
+            }
+
+            Func* callee = &info->context->funcs[expr->call.func_index];
+            expr->type_index = callee->signature.output_type_index;
+
+            if (expr->call.param_count != callee->signature.param_count) {
+                u8* name = string_table_access(info->context->string_table, callee->name);
+                printf(
+                    "Function '%s' takes %u parameters, but %u were given (Line %u)\n",
+                    name, (u64) callee->signature.param_count, (u64) expr->call.param_count, (u64) expr->pos.line
+                );
+                return false;
+            }
+
+            Expr_List* param_expr = expr->call.params;
+            for (u32 p = 0; p < expr->call.param_count; p += 1, param_expr = param_expr->next) {
+                u32 var_index = callee->signature.params[p].var_index;
+                u32 expected_type_index = callee->signature.params[p].type_index;
+
+                if (!typecheck_expr(info, param_expr->expr, expected_type_index)) {
+                    return false;
+                }
+
+                u32 actual_type_index = param_expr->expr->type_index;
+                if (!type_cmp(info->context, expected_type_index, actual_type_index)) {
+                    u8* func_name = string_table_access(info->context->string_table, callee->name);
+                    printf("Invalid type for %n parameter to %s: Expected ", (u64) (p + 1), func_name);
+                    print_type(info->context, expected_type_index);
+                    printf(" but got ");
+                    print_type(info->context, actual_type_index);
+                    printf(" (Line %u)\n", (u64) expr->pos.line);
+
+                    return false;
+                }
+            }
+        } break;
+
+        case expr_cast: {
+            Primitive primitive = info->context->type_buf[expr->type_index];
+            assert(primitive >= primitive_u8 && primitive <= primitive_i64);
+            typecheck_expr(info, expr->cast_from, expr->type_index);
+        } break;
+
+        case expr_address_of: {
+            if (!typecheck_expr(info, expr->address_from, primitive_invalid)) {
+                return false;
+            }
+
+            if (!(expr->address_from->flags & EXPR_FLAG_ASSIGNABLE)) {
+                printf("Can't take address of ");
+                print_expr(info->context, info->func, expr->address_from);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
+
+            expr->type_index = buf_length(info->context->type_buf);
+            buf_push(info->context->type_buf, primitive_pointer);
+            u32 duped = type_duplicate(info->context, expr->address_from->type_index);
+            assert(duped == expr->type_index + 1);
+        } break;
+
+        case expr_dereference: {
+            if (!typecheck_expr(info, expr->dereference_from, primitive_invalid)) {
+                return false;
+            }
+
+            u8 child_primitive = info->context->type_buf[expr->dereference_from->type_index];
+            if (child_primitive != primitive_pointer) {
+                printf("Can't dereference non-pointer ");
+                print_expr(info->context, info->func, expr->dereference_from);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
+
+            expr->type_index = expr->dereference_from->type_index + 1;
+
+            expr->flags |= EXPR_FLAG_ASSIGNABLE;
+        } break;
+
+        case expr_subscript: {
+            if (!typecheck_expr(info, expr->subscript.array, primitive_invalid)) {
+                return false;
+            }
+
+            if (!typecheck_expr(info, expr->subscript.index, primitive_u64)) {
+                return false;
+            }
+
+            bool bad = false;
+
+            u32 array_type_index = expr->subscript.array->type_index;
+            if (info->context->type_buf[array_type_index] == primitive_array) {
+                expr->type_index = array_type_index + sizeof(u64) + 1;
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            } else if (info->context->type_buf[array_type_index] == primitive_pointer && info->context->type_buf[array_type_index + 1] == primitive_array) {
+                expr->type_index = array_type_index + sizeof(u64) + 2;
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            } else {
+                printf("Can't index a ");
+                print_type(info->context, array_type_index);
+                printf(" (Line %u)\n", (u64) expr->pos.line);
+                bad = true;
+            }
+
+            u32 index_type_index = expr->subscript.index->type_index;
+            if (info->context->type_buf[index_type_index] != primitive_u64) {
+                // TODO should we allow other integer types and insert automatic promotions as neccesary here??
+                printf("Can only use u64 as an array index, not ");
+                print_type(info->context, index_type_index);
+                printf(" (Line %u)\n", (u64) expr->subscript.index->pos.line);
+                bad = true;
+            }
+
+            if (bad) return false;
+        } break;
+
+        default: assert(false);
+    }
+
+    return true;
+}
+
+bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
+    switch (stmt->kind) {
+        case stmt_assignment: {
+            if (!typecheck_expr(info, stmt->assignment.left, primitive_invalid)) {
+                return false;
+            }
+            u32 left_type_index = stmt->assignment.left->type_index;
+
+            if (!typecheck_expr(info, stmt->assignment.right, left_type_index)) {
+                return false;
+            }
+            u32 right_type_index = stmt->assignment.right->type_index;
+
+            if (!type_cmp(info->context, left_type_index, right_type_index)) {
+                printf("Types on left and right side of assignment don't match: ");
+                print_type(info->context, left_type_index);
+                printf(" vs ");
+                print_type(info->context, right_type_index);
+                printf(" (Line %u)\n", (u64) stmt->pos.line);
+                return false;
+            }
+
+            if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
+                printf("Can't assign to left hand side: ");
+                print_expr(info->context, info->func, stmt->assignment.left);
+                printf(" (Line %u)\n", (u64) stmt->pos.line);
+                return false;
+            }
+        } break;
+
+        case stmt_expr: {
+            if (!typecheck_expr(info, stmt->expr, primitive_invalid)) {
+                return false;
+            }
+        } break;
+
+        case stmt_declaration: {
+            u32 var_index = stmt->declaration.var_index;
+            Var* var = &info->func->body.vars[var_index];
+            Expr* right = stmt->declaration.right;
+
+            assert(var->type_index != 0 || stmt->declaration.right != null);
+
+            bool bad_types = false;
+
+            if (right != null) {
+                u32 solidify_to;
+                if (var->type_index == 0) {
+                    solidify_to = DEFAULT_INTEGER_TYPE;
+                } else {
+                    solidify_to = var->type_index;
+                }
+
+                if (!typecheck_expr(info, right, solidify_to)) {
+                    bad_types = true;
+                } else if (var->type_index == 0) {
+                    var->type_index = right->type_index;
+                } else if (!type_cmp(info->context, var->type_index, right->type_index)) {
+                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                    print_type(info->context, var->type_index);
+                    printf(" but got ");
+                    print_type(info->context, right->type_index);
+                    printf(" (Line %u)\n", stmt->pos.line);
+                    bad_types = true;
+                }
+            }
+
+            assert(!info->scope->map[stmt->declaration.var_index]);
+            info->scope->map[stmt->declaration.var_index] = true;
+
+            if (bad_types) return false;
+        } break;
+
+        case stmt_block: {
+            typecheck_scope_push(info);
+            for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
+                if (!typecheck_stmt(info, inner)) return false;
+            }
+            typecheck_scope_pop(info);
+        } break;
+
+        case stmt_if: {
+            if (!typecheck_expr(info, stmt->conditional.condition, primitive_bool)) return false;
+
+            Primitive condition_primitive = info->context->type_buf[stmt->conditional.condition->type_index];
+            if (condition_primitive != primitive_bool) {
+                printf("Expected bool but got ");
+                print_type(info->context, stmt->conditional.condition->type_index);
+                printf(" in 'if'-statement (Line %u)\n", stmt->conditional.condition->pos.line);
+                return false;
+            }
+
+            typecheck_scope_push(info);
+            for (Stmt* inner = stmt->conditional.then; inner->kind != stmt_end; inner = inner->next) {
+                if (!typecheck_stmt(info, inner)) return false;
+            }
+            typecheck_scope_pop(info);
+
+            if (stmt->conditional.else_then != null) {
+                typecheck_scope_push(info);
+                for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
+                    if (!typecheck_stmt(info, inner)) return false;
+                }
+                typecheck_scope_pop(info);
+            }
+        } break;
+
+        case stmt_loop: {
+            if (stmt->loop.condition != null) {
+                if (!typecheck_expr(info, stmt->loop.condition, primitive_bool)) return false;
+
+                Primitive condition_primitive = info->context->type_buf[stmt->loop.condition->type_index];
+                if (condition_primitive != primitive_bool) {
+                    printf("Expected bool but got ");
+                    print_type(info->context, stmt->loop.condition->type_index);
+                    printf(" in 'for'-loop (Line %u)\n", stmt->loop.condition->pos.line);
+                    return false;
+                }
+            }
+
+            typecheck_scope_push(info);
+            for (Stmt* inner = stmt->loop.body; inner->kind != stmt_end; inner = inner->next) {
+                if (!typecheck_stmt(info, inner)) return false;
+            }
+            typecheck_scope_pop(info);
+        } break;
+
+        default: assert(false);
+    }
+
+    return true;
+}
+
+// NB This will allocate on context->stack, push/pop before/after
+bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
+    u64 type_size = type_size_of(info->context, expr->type_index);
     assert(type_size > 0);
 
     switch (expr->kind) {
@@ -3801,20 +4367,48 @@ bool eval_expr(Context* context, Expr* expr, u8* result_into) {
             return true;
         } break;
 
+        case expr_variable: {
+            if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
+                Global_Var* global = &info->context->global_vars[global_index];
+
+                if (!global->valid) {
+                    if (!global->checked) {
+                        u8* name = string_table_access(info->context->string_table, global->var.name);
+                        printf(
+                            "Can't use global variable %s in a compile time expression before its declaration on line %u (Line %u)\n",
+                            name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
+                        );
+                    }
+                    return false;
+                } else {
+                    u64 other_size = type_size_of(info->context, global->var.type_index);
+                    assert(other_size == type_size);
+
+                    u8* other_value = &info->context->seg_rwdata[global->data_offset];
+                    mem_copy(other_value, result_into, type_size);
+                    return true;
+                }
+            } else {
+                printf("Can't use local variables in constant expressions (Line %u)\n", expr->pos.line);
+                return false;
+            }
+        } break;
+
         case expr_binary: {
             assert(expr->binary.left->type_index == expr->binary.right->type_index);
-            u64 child_size = type_size_of(context, expr->binary.left->type_index);
+            u64 child_size = type_size_of(info->context, expr->binary.left->type_index);
 
             assert(type_size <= 8 && child_size <= 8);
 
-            u8* mem = arena_alloc(&context->stack, 2*child_size);
+            u8* mem = arena_alloc(&info->context->stack, 2*child_size);
             u8* left_result = mem;
             u8* right_result = mem + child_size;
 
-            if (!eval_expr(context, expr->binary.left, left_result)) return false;
-            if (!eval_expr(context, expr->binary.right, right_result)) return false;
+            if (!eval_compile_time_expr(info, expr->binary.left, left_result)) return false;
+            if (!eval_compile_time_expr(info, expr->binary.right, right_result)) return false;
 
-            bool is_signed = primitive_is_signed(context->type_buf[expr->binary.left->type_index]);
+            bool is_signed = primitive_is_signed(info->context->type_buf[expr->binary.left->type_index]);
 
             u64 result = 0;
 
@@ -3875,553 +4469,18 @@ bool eval_expr(Context* context, Expr* expr, u8* result_into) {
     return false;
 }
 
-
-typedef struct Scope Scope;
-struct Scope {
-    u32 var_count;
-    u8* map; // list of booleans, for marking which variables currently are in scope
-
-    Scope *child;
-};
-
-Scope* scope_new(Context* context, u32 var_count) {
-    Scope* scope = arena_new(&context->stack, Scope);
-    scope->var_count = var_count;
-    scope->map = arena_alloc(&context->stack, var_count);
-    mem_clear(scope->map, var_count);
-    return scope;
-}
-
-Scope* scope_push(Context* context, Scope* scope) {
-    if (scope->child == null) {
-        scope->child = scope_new(context, scope->var_count);
-    }
-
-    mem_copy(scope->map, scope->child->map, scope->var_count);
-    return scope->child;
-}
-
-
-
-bool typecheck_expr(Context* context, Func* func, Scope* scope, Expr* expr, u32 solidify_to) {
-    switch (expr->kind) {
-        case expr_literal: {
-            Primitive solidify_to_primitive = context->type_buf[solidify_to];
-
-            switch (expr->literal.kind) {
-                case expr_literal_integer: {
-                    if (solidify_to_primitive == primitive_pointer) {
-                        solidify_to_primitive = primitive_u64;
-                    }
-                    bool can_solidify = solidify_to_primitive >= primitive_u8 && solidify_to_primitive <= primitive_i64;
-
-                    if (can_solidify) {
-                        expr->type_index = solidify_to_primitive;
-
-                        u64 mask = size_mask(primitive_size_of(solidify_to_primitive));
-                        u64 value = expr->literal.value;
-
-                        if (value != (value & mask)) {
-                            printf(
-                                "Warning: Literal %u won't fit fully into a %s and will be masked! (Line %u)\n",
-                                (u64) value, primitive_name(solidify_to_primitive), (u64) expr->pos.line
-                            );
-                        }
-                    } else {
-                        expr->type_index = primitive_unsolidified_int;
-                    }
-                } break;
-
-                case expr_literal_pointer: {
-                    if (solidify_to_primitive == primitive_pointer) {
-                        expr->type_index = solidify_to;
-                    } else {
-                        expr->type_index = primitive_invalid;
-                    }
-                } break;
-
-                case expr_literal_bool: {
-                    assert(expr->literal.value == true || expr->literal.value == false);
-                    expr->type_index = primitive_bool;
-                } break;
-
-                default: assert(false);
-            }
-
-        } break;
-
-        case expr_string_literal: {
-            assert(expr->type_index == context->string_type);
-        } break;
-
-        case expr_compound_literal: {
-            if (expr->type_index == 0) {
-                expr->type_index = solidify_to;
-            }
-
-            Primitive primitive = context->type_buf[expr->type_index];
-            if (primitive == primitive_array) {
-                u64 expected_child_count = *((u64*) &context->type_buf[expr->type_index + 1]);
-                u32 expected_child_type_index = expr->type_index + 1 + sizeof(u64);
-
-                if (expr->compound_literal.count != expected_child_count) {
-                    printf(
-                        "Too %s values in compound literal: expected %u, got %u (Line %u)\n",
-                        (expr->compound_literal.count > expected_child_count)? "many" : "few",
-                        (u64) expected_child_count,
-                        (u64) expr->compound_literal.count,
-                        (u64) expr->pos.line
-                    );
-                    return false;
-                }
-
-                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
-                    Expr* child = node->expr;
-                    if (!typecheck_expr(context, func, scope, child, expected_child_type_index)) {
-                        return false;
-                    }
-
-                    if (!type_cmp(context, expected_child_type_index, child->type_index)) {
-                        printf("Invalid type inside compound literal: Expected ");
-                        print_type(context, expected_child_type_index);
-                        printf(" but got ");
-                        print_type(context, child->type_index);
-                        printf(" (Line %u)\n", (u64) expr->pos.line);
-
-                        return false;
-                    }
-                }
-            } else {
-                printf("Invalid type for compound literal: ");
-                print_type(context, expr->type_index);
-                printf(" (Line %u)\n", expr->pos.line);
-                return false;
-            }
-        } break;
-
-        case expr_variable: {
-            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 var_index = find_var(context, func, expr->variable.unresolved_name);
-
-                if (var_index == U32_MAX) {
-                    u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
-                    printf("Can't find variable '%s' ", var_name);
-                    if (func != null) {
-                        u8* func_name = string_table_access(context->string_table, func->name);
-                        printf("in function '%s' or \n", func_name);
-                    }
-                    printf("in global scope (Line %u)\n", (u64) expr->pos.line);
-                    return false;
-                }
-
-                if (var_index & VAR_INDEX_GLOBAL_FLAG) {
-                    u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
-                    assert(context->global_vars[global_index].typechecked);
-                } else if (scope->map[var_index] == false) {
-                    Var* var = &func->body.vars[var_index];
-                    u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
-
-                    u64 use_line = expr->pos.line;
-                    u64 decl_line = var->declaration_pos.line;
-
-                    if (use_line <= decl_line) {
-                        printf(
-                            "Can't use variable %s on line %u before its declaration on line %u\n",
-                            var_name, use_line, decl_line
-                        );
-                    } else {
-                        printf(
-                            "Can't use variable %s on line %u, as it isn't in scope\n",
-                            var_name, use_line
-                        );
-                    }
-
-                    return false;
-                }
-
-                expr->variable.index = var_index;
-                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
-            }
-
-            if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
-                u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
-                expr->type_index = context->global_vars[global_index].var.type_index;
-            } else {
-                expr->type_index = func->body.vars[expr->variable.index].type_index;
-            }
-
-            expr->flags |= EXPR_FLAG_ASSIGNABLE;
-        } break;
-
-        case expr_binary: {
-            bool is_comparasion = false;
-            switch (expr->binary.op) {
-                case binary_eq:
-                case binary_neq:
-                case binary_gt:
-                case binary_gteq:
-                case binary_lt:
-                case binary_lteq:
-                {
-                    is_comparasion = true;
-                    solidify_to = primitive_u64;
-                } break;
-            }
-
-            if (!typecheck_expr(context, func, scope, expr->binary.left, solidify_to))  return false;
-            if (!typecheck_expr(context, func, scope, expr->binary.right, solidify_to)) return false;
-
-            assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
-            assert(context->type_buf[expr->binary.left->type_index] != primitive_unsolidified_int);
-
-            // We take one shot at matching the types to each other by changing what we try solidifying to
-            if (!type_cmp(context, expr->binary.left->type_index, expr->binary.right->type_index)) {
-                bool left_strong = context->type_buf[expr->binary.left->type_index] != solidify_to;
-                bool right_strong = context->type_buf[expr->binary.right->type_index] != solidify_to;
-
-                if (left_strong) {
-                    assert(typecheck_expr(context, func, scope, expr->binary.right, expr->binary.left->type_index));
-                } else if (right_strong) {
-                    assert(typecheck_expr(context, func, scope, expr->binary.left, expr->binary.right->type_index));
-                }
-            }
-
-            expr->type_index = primitive_invalid;
-
-            Primitive left_primitive = context->type_buf[expr->binary.left->type_index];
-            Primitive right_primitive = context->type_buf[expr->binary.right->type_index];
-
-            if (is_comparasion) {
-                expr->type_index = primitive_bool;
-
-                bool valid;
-                if (expr->binary.op == binary_eq) {
-                    valid = left_primitive == right_primitive && !primitive_is_compound(left_primitive);
-                } else {
-                    valid = left_primitive == right_primitive && primitive_is_integer(left_primitive);
-                }
-
-                if (!valid) {
-                    printf("Can't compare ");
-                    print_type(context, expr->binary.left->type_index);
-                    printf(" with ");
-                    print_type(context, expr->binary.right->type_index);
-                    printf(" using operator %s (Line %u)\n", BINARY_OP_SYMBOL[expr->binary.op], (u64) expr->pos.line);
-                    return false;
-                }
-            } else {
-                if (left_primitive == right_primitive && primitive_is_integer(left_primitive)) {
-                    expr->type_index = expr->binary.left->type_index;
-
-                // Handle special cases for pointer arithmetic
-                } else switch (expr->binary.op) {
-                    case binary_add: {
-                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
-                            expr->type_index = expr->binary.left->type_index;
-                        }
-
-                        if (left_primitive == primitive_u64 && right_primitive == primitive_pointer) {
-                            expr->type_index = expr->binary.right->type_index;
-                        }
-                    } break;
-
-                    case binary_sub: {
-                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
-                            expr->type_index = expr->binary.left->type_index;
-                        }
-                    } break;
-
-                    case binary_mul: {} break;
-                    case binary_div: {} break;
-                    case binary_mod: {} break;
-
-                    default: assert(false);
-                }
-            }
-
-            if (expr->type_index == primitive_invalid) {
-                printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
-                print_type(context, expr->binary.left->type_index);
-                printf(" vs ");
-                print_type(context, expr->binary.right->type_index);
-                printf(" (Line %u)\n", (u64) expr->pos.line);
-                return false;
-            }
-        } break;
-
-        case expr_call: {
-            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 func_index = find_func(context, expr->call.unresolved_name);
-                if (func_index == U32_MAX) {
-                    u8* name = string_table_access(context->string_table, expr->call.unresolved_name);
-                    printf("Can't find function '%s' (Line %u)\n", name, (u64) expr->pos.line);
-                    return false;
-                }
-
-                expr->call.func_index = func_index;
-                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
-            }
-
-            Func* callee = &context->funcs[expr->call.func_index];
-            expr->type_index = callee->signature.output_type_index;
-
-            if (expr->call.param_count != callee->signature.param_count) {
-                u8* name = string_table_access(context->string_table, callee->name);
-                printf(
-                    "Function '%s' takes %u parameters, but %u were given (Line %u)\n",
-                    name, (u64) callee->signature.param_count, (u64) expr->call.param_count, (u64) expr->pos.line
-                );
-                return false;
-            }
-
-            Expr_List* param_expr = expr->call.params;
-            for (u32 p = 0; p < expr->call.param_count; p += 1, param_expr = param_expr->next) {
-                u32 var_index = callee->signature.params[p].var_index;
-                u32 expected_type_index = callee->signature.params[p].type_index;
-
-                if (!typecheck_expr(context, func, scope, param_expr->expr, expected_type_index)) {
-                    return false;
-                }
-
-                u32 actual_type_index = param_expr->expr->type_index;
-                if (!type_cmp(context, expected_type_index, actual_type_index)) {
-                    u8* func_name = string_table_access(context->string_table, callee->name);
-                    printf("Invalid type for %n parameter to %s: Expected ", (u64) (p + 1), func_name);
-                    print_type(context, expected_type_index);
-                    printf(" but got ");
-                    print_type(context, actual_type_index);
-                    printf(" (Line %u)\n", (u64) expr->pos.line);
-
-                    return false;
-                }
-            }
-        } break;
-
-        case expr_cast: {
-            Primitive primitive = context->type_buf[expr->type_index];
-            assert(primitive >= primitive_u8 && primitive <= primitive_i64);
-            typecheck_expr(context, func, scope, expr->cast_from, expr->type_index);
-        } break;
-
-        case expr_address_of: {
-            if (!typecheck_expr(context, func, scope, expr->address_from, primitive_invalid)) {
-                return false;
-            }
-
-            if (!(expr->address_from->flags & EXPR_FLAG_ASSIGNABLE)) {
-                printf("Can't take address of ");
-                print_expr(context, func, expr->address_from);
-                printf(" (Line %u)\n", expr->pos.line);
-                return false;
-            }
-
-            expr->type_index = buf_length(context->type_buf);
-            buf_push(context->type_buf, primitive_pointer);
-            u32 duped = type_duplicate(context, expr->address_from->type_index);
-            assert(duped == expr->type_index + 1);
-        } break;
-
-        case expr_dereference: {
-            if (!typecheck_expr(context, func, scope, expr->dereference_from, primitive_invalid)) {
-                return false;
-            }
-
-            u8 child_primitive = context->type_buf[expr->dereference_from->type_index];
-            if (child_primitive != primitive_pointer) {
-                printf("Can't dereference non-pointer ");
-                print_expr(context, func, expr->dereference_from);
-                printf(" (Line %u)\n", expr->pos.line);
-                return false;
-            }
-
-            expr->type_index = expr->dereference_from->type_index + 1;
-
-            expr->flags |= EXPR_FLAG_ASSIGNABLE;
-        } break;
-
-        case expr_subscript: {
-            if (!typecheck_expr(context, func, scope, expr->subscript.array, primitive_invalid)) {
-                return false;
-            }
-
-            if (!typecheck_expr(context, func, scope, expr->subscript.index, primitive_u64)) {
-                return false;
-            }
-
-            bool bad = false;
-
-            u32 array_type_index = expr->subscript.array->type_index;
-            if (context->type_buf[array_type_index] == primitive_array) {
-                expr->type_index = array_type_index + sizeof(u64) + 1;
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
-            } else if (context->type_buf[array_type_index] == primitive_pointer && context->type_buf[array_type_index + 1] == primitive_array) {
-                expr->type_index = array_type_index + sizeof(u64) + 2;
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
-            } else {
-                printf("Can't index a ");
-                print_type(context, array_type_index);
-                printf(" (Line %u)\n", (u64) expr->pos.line);
-                bad = true;
-            }
-
-            u32 index_type_index = expr->subscript.index->type_index;
-            if (context->type_buf[index_type_index] != primitive_u64) {
-                // TODO should we allow other integer types and insert automatic promotions as neccesary here??
-                printf("Can only use u64 as an array index, not ");
-                print_type(context, index_type_index);
-                printf(" (Line %u)\n", (u64) expr->subscript.index->pos.line);
-                bad = true;
-            }
-
-            if (bad) return false;
-        } break;
-
-        default: assert(false);
-    }
-
-    return true;
-}
-
-bool typecheck_stmt(Context* context, Func* func, Scope* scope, Stmt* stmt) {
-    switch (stmt->kind) {
-        case stmt_assignment: {
-            if (!typecheck_expr(context, func, scope, stmt->assignment.left, primitive_invalid)) {
-                return false;
-            }
-            u32 left_type_index = stmt->assignment.left->type_index;
-
-            if (!typecheck_expr(context, func, scope, stmt->assignment.right, left_type_index)) {
-                return false;
-            }
-            u32 right_type_index = stmt->assignment.right->type_index;
-
-            if (!type_cmp(context, left_type_index, right_type_index)) {
-                printf("Types on left and right side of assignment don't match: ");
-                print_type(context, left_type_index);
-                printf(" vs ");
-                print_type(context, right_type_index);
-                printf(" (Line %u)\n", (u64) stmt->pos.line);
-                return false;
-            }
-
-            if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
-                printf("Can't assign to left hand side: ");
-                print_expr(context, func, stmt->assignment.left);
-                printf(" (Line %u)\n", (u64) stmt->pos.line);
-                return false;
-            }
-        } break;
-
-        case stmt_expr: {
-            if (!typecheck_expr(context, func, scope, stmt->expr, primitive_invalid)) {
-                return false;
-            }
-        } break;
-
-        case stmt_declaration: {
-            u32 var_index = stmt->declaration.var_index;
-            Var* var = &func->body.vars[var_index];
-            Expr* right = stmt->declaration.right;
-
-            assert(var->type_index != 0 || stmt->declaration.right != null);
-
-            bool bad_types = false;
-
-            if (right != null) {
-                u32 solidify_to;
-                if (var->type_index == 0) {
-                    solidify_to = DEFAULT_INTEGER_TYPE;
-                } else {
-                    solidify_to = var->type_index;
-                }
-
-                if (!typecheck_expr(context, func, scope, right, solidify_to)) {
-                    bad_types = true;
-                } else if (var->type_index == 0) {
-                    var->type_index = right->type_index;
-                } else if (!type_cmp(context, var->type_index, right->type_index)) {
-                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                    print_type(context, var->type_index);
-                    printf(" but got ");
-                    print_type(context, right->type_index);
-                    printf(" (Line %u)\n", stmt->pos.line);
-                    bad_types = true;
-                }
-            }
-
-            assert(!scope->map[stmt->declaration.var_index]);
-            scope->map[stmt->declaration.var_index] = true;
-
-            if (bad_types) return false;
-        } break;
-
-        case stmt_block: {
-            Scope* child_scope = scope_push(context, scope);
-            for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
-                if (!typecheck_stmt(context, func, child_scope, inner)) return false;
-            }
-        } break;
-
-        case stmt_if: {
-            if (!typecheck_expr(context, func, scope, stmt->conditional.condition, primitive_bool)) return false;
-
-            Primitive condition_primitive = context->type_buf[stmt->conditional.condition->type_index];
-            if (condition_primitive != primitive_bool) {
-                printf("Expected bool but got ");
-                print_type(context, stmt->conditional.condition->type_index);
-                printf(" in 'if'-statement (Line %u)\n", stmt->conditional.condition->pos.line);
-                return false;
-            }
-
-            Scope* then_scope = scope_push(context, scope);
-            for (Stmt* inner = stmt->conditional.then; inner->kind != stmt_end; inner = inner->next) {
-                if (!typecheck_stmt(context, func, then_scope, inner)) return false;
-            }
-
-            if (stmt->conditional.else_then != null) {
-                Scope* else_scope = scope_push(context, scope);
-                for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
-                    if (!typecheck_stmt(context, func, else_scope, inner)) return false;
-                }
-            }
-        } break;
-
-        case stmt_loop: {
-            if (stmt->loop.condition != null) {
-                if (!typecheck_expr(context, func, scope, stmt->loop.condition, primitive_bool)) return false;
-
-                Primitive condition_primitive = context->type_buf[stmt->loop.condition->type_index];
-                if (condition_primitive != primitive_bool) {
-                    printf("Expected bool but got ");
-                    print_type(context, stmt->loop.condition->type_index);
-                    printf(" in 'for'-loop (Line %u)\n", stmt->loop.condition->pos.line);
-                    return false;
-                }
-            }
-
-            Scope* body_scope = scope_push(context, scope);
-            for (Stmt* inner = stmt->loop.body; inner->kind != stmt_end; inner = inner->next) {
-                if (!typecheck_stmt(context, func, body_scope, inner)) return false;
-            }
-        } break;
-
-        default: assert(false);
-    }
-
-    return true;
-}
-
 bool typecheck(Context* context) {
     bool valid = true;
 
-    Scope global_scope = {0};
+    Typecheck_Info info = {0};
+    info.context = context;
 
-    arena_stack_push(&context->stack); // For eval_expr
+    // Global variables
     for (u32 g = 0; g < buf_length(context->global_vars); g += 1) {
         Global_Var* global = &context->global_vars[g];
-        assert(global->initial_expr != null || global->var.type_index != 0);
+        global->checked = true;
 
-        global->typechecked = global->var.type_index != 0;
+        bool resolved_type = global->var.type_index != 0;
 
         if (global->initial_expr != null) {
             u32 solidify_to;
@@ -4431,59 +4490,79 @@ bool typecheck(Context* context) {
                 solidify_to = global->var.type_index;
             }
 
-            if (!typecheck_expr(context, null, &global_scope, global->initial_expr, solidify_to)) {
-                global->typechecked = false;
-            } else if (global->var.type_index == 0) {
-                global->var.type_index = global->initial_expr->type_index;
-                global->typechecked = true;
-            } else if (!type_cmp(context, global->var.type_index, global->initial_expr->type_index)) {
-                printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                print_type(context, global->var.type_index);
-                printf(" but got ");
-                print_type(context, global->initial_expr->type_index);
-                printf(" (Line %u)\n", global->var.declaration_pos.line);
-                global->typechecked = false;
+            if (typecheck_expr(&info, global->initial_expr, solidify_to)) {
+                if (global->var.type_index == 0) {
+                    global->var.type_index = global->initial_expr->type_index;
+                    resolved_type = true;
+                } else if (!type_cmp(context, global->var.type_index, global->initial_expr->type_index)) {
+                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                    print_type(context, global->var.type_index);
+                    printf(" but got ");
+                    print_type(context, global->initial_expr->type_index);
+                    printf(" (Line %u)\n", global->var.declaration_pos.line);
+                } else {
+                    resolved_type = true;
+                }
             } else {
-                global->typechecked = true;
+                resolved_type = false;
             }
         }
 
-        if (!global->typechecked) valid = false;
+        if (!resolved_type) {
+            valid = false;
+            continue;
+        }
 
         u64 type_size = type_size_of(context, global->var.type_index);
         assert(type_size > 0);
 
         global->data_offset = add_exe_data(context, null, type_size, true);
-
         u8* result_into = &context->seg_rwdata[global->data_offset];
-        if (global->initial_expr == null) {
-        } else if (!eval_expr(context, global->initial_expr, result_into)) {
-            valid = false;
+
+        bool computed_value = true;
+
+        if (global->initial_expr != null) {
+            arena_stack_push(&context->stack);
+            bool could_init = eval_compile_time_expr(&info, global->initial_expr, result_into);
+            arena_stack_pop(&context->stack);
+
+            if (!could_init) computed_value = false;
+        }
+
+        if (resolved_type && computed_value) {
+            global->valid = true;
         }
     }
-    arena_stack_pop(&context->stack);
 
     if (!valid) return false;
 
+    buf_foreach (Global_Var, global, context->global_vars) {
+        u8* name = string_table_access(context->string_table, global->var.name);
+        printf("%s: ", name);
+        print_type(context, global->var.type_index);
+        printf(";\n");
+    }
+
+    // Functions
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
         arena_stack_push(&context->stack);
 
-        Func* func = context->funcs + f;
-        if (func->kind != func_kind_normal) continue;
+        info.func = context->funcs + f;
+        if (info.func->kind != func_kind_normal) continue;
 
-        Scope* scope = scope_new(context, func->body.var_count);
+        info.scope = scope_new(context, info.func->body.var_count);
 
         // output and parameters are allways in scope
-        if (func->signature.has_output) {
-            scope->map[func->body.output_var_index] = true;
+        if (info.func->signature.has_output) {
+            info.scope->map[info.func->body.output_var_index] = true;
         }
-        for (u32 i = 0; i < func->signature.param_count; i += 1) {
-            u32 var_index = func->signature.params[i].var_index;
-            scope->map[var_index] = true;
+        for (u32 i = 0; i < info.func->signature.param_count; i += 1) {
+            u32 var_index = info.func->signature.params[i].var_index;
+            info.scope->map[var_index] = true;
         }
 
-        for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
-            if (!typecheck_stmt(context, func, scope, stmt)) {
+        for (Stmt* stmt = info.func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
+            if (!typecheck_stmt(&info, stmt)) {
                 valid = false;
             }
         }
@@ -7610,18 +7689,22 @@ void print_verbose_info(Context* context) {
 }
 
 void main() {
+    u8* source_path = "W:/asm2/code.foo";
+    u8* exe_path = "out.exe";
+    printf("Compiling %s to %s\n", source_path, exe_path);
+
     //print_executable_info("build/tiny.exe");
 
     i64 start_time = perf_time();
 
     Context context = {0};
-    if (!build_ast(&context, "W:/asm2/code.foo")) return;
+    if (!build_ast(&context, source_path)) return;
     if (!typecheck(&context)) return;
     //print_verbose_info(&context);
     build_intermediate(&context);
     //eval_ops(&context); // TODO this wont really work any more now, we need to properly sandbox it so we can call imported functions
     build_machinecode(&context);
-    if (!write_executable("out.exe", &context)) return;
+    if (!write_executable(exe_path, &context)) return;
 
     {
         u64 total_ops = 0;
@@ -7638,7 +7721,7 @@ void main() {
     STARTUPINFO startup_info = {0};
     startup_info.size = sizeof(STARTUPINFO);
     PROCESSINFO process_info = {0};
-    bool result = CreateProcessA("out.exe", "", null, null, false, 0, null, null, &startup_info, &process_info);
+    bool result = CreateProcessA(exe_path, "", null, null, false, 0, null, null, &startup_info, &process_info);
     if (!result) {
         printf("Failed to start generated executable\n");
         return;
@@ -7646,5 +7729,5 @@ void main() {
     WaitForSingleObject(process_info.process, 0xffffffff);
 
     i64 end_time = perf_time();
-    printf("Ran in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
+    printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
 }
