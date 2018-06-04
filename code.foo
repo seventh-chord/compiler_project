@@ -6,6 +6,8 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
+const NULL = null;
+
 fn main() -> u8 {
     if (seventy_two() != 72) {
         ExitProcess(0);
@@ -92,10 +94,9 @@ fn print_u64(value: u64, base: u64) {
 
 
 fn sidewinder() { global = !global; }
-
 let global = 3 > 2;
 
-let big_boy: [4][4]u64 = {
+const BIG_BOY: [4][4]u64 = {
     { 0, 0, 0, 0 },
     { 0, 0, 0, 0 },
     { 0, 0, 2, 0 },
@@ -106,7 +107,7 @@ fn four() -> u8 {
     let empty = [4]u64 { 0, 0, 0, 0 };
 
     let small_boy = &empty;
-    *small_boy = big_boy[2];
+    *small_boy = BIG_BOY[2];
 
     let nice = small_boy[2];
     let nicer = empty[2];

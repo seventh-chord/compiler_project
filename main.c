@@ -770,6 +770,7 @@ typedef struct Token {
         token_keyword_fn,
         token_keyword_extern,
         token_keyword_let,
+        token_keyword_const,
         token_keyword_if,
         token_keyword_else,
         token_keyword_for,
@@ -838,6 +839,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_keyword_fn]           = "fn",
     [token_keyword_extern]       = "extern",
     [token_keyword_let]          = "let",
+    [token_keyword_const]        = "const",
     [token_keyword_if]           = "if",
     [token_keyword_else]         = "else",
     [token_keyword_for]          = "for",
@@ -864,7 +866,9 @@ typedef struct Var {
 typedef struct Global_Var {
     Var var;
     Expr* initial_expr;
-    u32 data_offset;
+
+    bool constant;
+    u32 data_offset; // either seg_rwdata or seg_rodata, depending on constant
 
     bool checked, valid;
 } Global_Var;
@@ -873,8 +877,9 @@ typedef struct Global_Var {
 typedef enum Primitive {
     primitive_invalid = 0,
 
-    primitive_void,
+    // NB by placing 'primitive_pointer' before 'primitive_void', we can use 'primitive_pointer' as the type index of a void pointer.
     primitive_pointer,
+    primitive_void,
     primitive_array, // followed by a 64 bit integer in the type buf
 
     primitive_unsolidified_int,
@@ -2673,6 +2678,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 case ')': case ']': case '}':
                 case token_assign:
                 case token_keyword_let:
+                case token_keyword_const:
                 case token_keyword_fn:
                 case token_add_assign:
                 case token_sub_assign:
@@ -3464,11 +3470,12 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    enum { KEYWORD_COUNT = 9 };
+    enum { KEYWORD_COUNT = 10 };
     u32 keyword_token_table[KEYWORD_COUNT][2] = {
         { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
         { token_keyword_extern, string_table_intern_cstr(&context->string_table, "extern") },
         { token_keyword_let,    string_table_intern_cstr(&context->string_table, "let") },
+        { token_keyword_const,  string_table_intern_cstr(&context->string_table, "const") },
         { token_keyword_if,     string_table_intern_cstr(&context->string_table, "if") },
         { token_keyword_else,   string_table_intern_cstr(&context->string_table, "else") },
         { token_keyword_for,    string_table_intern_cstr(&context->string_table, "for") },
@@ -4003,7 +4010,11 @@ bool build_ast(Context* context, u8* path) {
             t += length;
         } break;
 
-        case token_keyword_let: {
+        case token_keyword_let:
+        case token_keyword_const:
+        {
+            bool constant = t->kind == token_keyword_const;
+
             File_Pos start_pos = t->pos;
             t += 1;
 
@@ -4050,6 +4061,7 @@ bool build_ast(Context* context, u8* path) {
             global.var.name = name_index;
             global.var.declaration_pos = start_pos;
             global.var.type_index = type_index;
+            global.constant = constant;
             global.initial_expr = expr;
             buf_push(context->global_vars, global);
 
@@ -4150,7 +4162,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                     if (solidify_to_primitive == primitive_pointer) {
                         expr->type_index = solidify_to;
                     } else {
-                        expr->type_index = primitive_invalid;
+                        expr->type_index = primitive_pointer;
                     }
                 } break;
 
@@ -4215,6 +4227,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
         case expr_variable: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                bool assignable = true;
                 u32 var_index = find_var(info->context, info->func, expr->variable.unresolved_name);
 
                 if (var_index == U32_MAX) {
@@ -4243,6 +4256,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
                         return false;
                     }
+
+                    if (global->constant) {
+                        assignable = false;
+                    }
                 } else if (info->scope->map[var_index] == false) {
                     Var* var = &info->func->body.vars[var_index];
                     u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
@@ -4267,6 +4284,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
                 expr->variable.index = var_index;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
+
+                if (assignable) {
+                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
+                }
             }
 
             if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
@@ -4275,8 +4296,6 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             } else {
                 expr->type_index = info->func->body.vars[expr->variable.index].type_index;
             }
-
-            expr->flags |= EXPR_FLAG_ASSIGNABLE;
         } break;
 
         case expr_binary: {
@@ -4478,6 +4497,14 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                         return false;
                     }
 
+                    Primitive pointer_to = info->context->type_buf[expr->unary.inner->type_index + 1];
+                    if (pointer_to == primitive_void) {
+                        printf("Can't dereference the void pointer ");
+                        print_expr(info->context, info->func, expr->unary.inner);
+                        printf(" (Line %u)\n", expr->pos.line);
+                        return false;
+                    }
+
                     expr->type_index = expr->unary.inner->type_index + 1;
                     expr->flags |= EXPR_FLAG_ASSIGNABLE;
                 } break;
@@ -4514,15 +4541,17 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             u32 array_type_index = expr->subscript.array->type_index;
             if (info->context->type_buf[array_type_index] == primitive_array) {
                 expr->type_index = array_type_index + sizeof(u64) + 1;
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             } else if (info->context->type_buf[array_type_index] == primitive_pointer && info->context->type_buf[array_type_index + 1] == primitive_array) {
                 expr->type_index = array_type_index + sizeof(u64) + 2;
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             } else {
                 printf("Can't index a ");
                 print_type(info->context, array_type_index);
                 printf(" (Line %u)\n", (u64) expr->pos.line);
                 bad = true;
+            }
+
+            if (!bad && (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE)) {
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             }
 
             u32 index_type_index = expr->subscript.index->type_index;
@@ -4834,7 +4863,7 @@ bool typecheck(Context* context) {
                     global->var.type_index = global->initial_expr->type_index;
                     resolved_type = true;
                 } else if (!type_cmp(context, global->var.type_index, global->initial_expr->type_index)) {
-                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                    printf("Right hand side of %s declaration doesn't have correct type. Expected ", global->constant? "constant" : "variable");
                     print_type(context, global->var.type_index);
                     printf(" but got ");
                     print_type(context, global->initial_expr->type_index);
@@ -4855,8 +4884,14 @@ bool typecheck(Context* context) {
         u64 type_size = type_size_of(context, global->var.type_index);
         assert(type_size > 0);
 
-        global->data_offset = add_exe_data(context, null, type_size, true);
-        u8* result_into = &context->seg_rwdata[global->data_offset];
+        u8* result_into;
+        if (global->constant) {
+            global->data_offset = add_exe_data(context, null, type_size, false);
+            result_into = &context->seg_rodata[global->data_offset];
+        } else {
+            global->data_offset = add_exe_data(context, null, type_size, true);
+            result_into = &context->seg_rwdata[global->data_offset];
+        }
 
         bool computed_value = true;
 
@@ -6290,7 +6325,7 @@ void instruction_lea_mem(Context* context, Func* func, Local local, X64_Reg reg)
     switch (local.kind) {
         case local_global: {
             Global_Var* global = &context->global_vars[local.value];
-            instruction_lea_data(context, global->data_offset, true, reg);
+            instruction_lea_data(context, global->data_offset, !global->constant, reg);
         } break;
 
         case local_variable:
@@ -6468,7 +6503,7 @@ void instruction_mov_mem(Context* context, Func* func, Mov_Mode mode, Local loca
     switch (local.kind) {
         case local_global: {
             Global_Var* global = &context->global_vars[local.value];
-            instruction_mov_data(context, mode, global->data_offset, true, reg, bytes);
+            instruction_mov_data(context, mode, global->data_offset, !global->constant, reg, bytes);
         } break;
 
         case local_variable:
