@@ -1065,6 +1065,7 @@ typedef enum Unary_Op {
     unary_op_invalid = 0,
 
     unary_not,
+    unary_neg,
     unary_dereference,
     unary_address_of,
 
@@ -1073,6 +1074,7 @@ typedef enum Unary_Op {
 
 u8* UNARY_OP_SYMBOL[UNARY_OP_COUNT] = {
     [unary_not]         = "!",
+    [unary_neg]         = "-",
     [unary_dereference] = "*",
     [unary_address_of]  = "&",
 };
@@ -1299,6 +1301,7 @@ typedef enum Op_Kind {
 
     // 'unary'
     op_neg,
+    op_not,
     
     // 'binary'
     op_set,
@@ -1325,6 +1328,7 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_jump] = "jump",
     [op_load_data] = "load_data",
     [op_neg] = "neg",
+    [op_not] = "not",
     [op_set] = "set",
     [op_add] = "add",
     [op_sub] = "sub",
@@ -2009,7 +2013,7 @@ void print_local(Context* context, Func* func, Local local) {
 
 void print_op(Context* context, Func* func, Op* op) {
     switch (op->kind) {
-        case op_neg:
+        case op_neg: case op_not:
         {
             printf("(%s) %s ", primitive_name(op->primitive), OP_NAMES[op->kind]);
             print_local(context, func, op->unary);
@@ -2569,6 +2573,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         case token_and: op = unary_address_of; break;
                         case token_mul: op = unary_dereference; break;
                         case token_not: op = unary_not; break;
+                        case token_sub: op = unary_neg; break;
                     }
 
                     if (op != unary_op_invalid) {
@@ -4273,6 +4278,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             u32 inner_solidify_to;
             switch (expr->unary.op) {
                 case unary_not:         inner_solidify_to = solidify_to; break;
+                case unary_neg:         inner_solidify_to = solidify_to; break;
                 case unary_dereference: inner_solidify_to = primitive_invalid; break;
                 case unary_address_of:  inner_solidify_to = primitive_invalid; break;
                 default: assert(false);
@@ -4287,7 +4293,19 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                     // TODO allow using unary_not to do a bitwise not on integers
                     Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
                     if (child_primitive != primitive_bool) {
-                        printf("Can only negatve a 'bool' not a ");
+                        printf("Can only 'not' a 'bool', not a ");
+                        print_type(info->context, expr->unary.inner->type_index);
+                        printf(" (Line %u)\n", expr->unary.inner->pos.line);
+                        return false;
+                    }
+
+                    expr->type_index = expr->unary.inner->type_index;
+                } break;
+
+                case unary_neg: {
+                    Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
+                    if (!primitive_is_integer(child_primitive)) {
+                        printf("Can only negatve integers, not a ");
                         print_type(info->context, expr->unary.inner->type_index);
                         printf(" (Line %u)\n", expr->unary.inner->pos.line);
                         return false;
@@ -5091,6 +5109,18 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     linearize_expr(context, expr->unary.inner, assign_to, false);
 
                     Op op = {0};
+                    op.kind = op_not;
+                    op.unary = assign_to;
+                    op.primitive = context->type_buf[expr->type_index];
+                    buf_push(context->tmp_ops, op);
+                } break;
+
+                case unary_neg: {
+                    assert(!get_address);
+                    
+                    linearize_expr(context, expr->unary.inner, assign_to, false);
+
+                    Op op = {0};
                     op.kind = op_neg;
                     op.unary = assign_to;
                     op.primitive = context->type_buf[expr->type_index];
@@ -5429,11 +5459,12 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             Local bool_local = intermediate_allocate_temporary(context, 1);
             linearize_expr(context, stmt->conditional.condition, bool_local, false);
 
-            Op* if_jump_op = buf_end(context->tmp_ops);
-            buf_push(context->tmp_ops, ((Op) {0}));
-            if_jump_op->kind = op_jump;
-            if_jump_op->jump.conditional = true;
-            if_jump_op->jump.condition = bool_local;
+            Op if_jump_op = {0};
+            if_jump_op.kind = op_jump;
+            if_jump_op.jump.conditional = true;
+            if_jump_op.jump.condition = bool_local;
+            u64 if_jump_op_index = buf_length(context->tmp_ops);
+            buf_push(context->tmp_ops, if_jump_op);
 
             intermediate_deallocate_temporary(context, bool_local);
 
@@ -5441,38 +5472,40 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
                 linearize_stmt(context, func, inner);
             } 
 
-            if_jump_op->jump.to_op = buf_length(context->tmp_ops);
+            Op* if_jump_op_pointer = &context->tmp_ops[if_jump_op_index];
+            if_jump_op_pointer->jump.to_op = buf_length(context->tmp_ops);
 
             if (stmt->conditional.else_then != null) {
-                if_jump_op->jump.to_op += 1; // Also jump past else_jump_op
+                if_jump_op_pointer->jump.to_op += 1; // Also jump past else_jump_op
 
-                Op* else_jump_op = buf_end(context->tmp_ops);
-                buf_push(context->tmp_ops, ((Op) {0}));
-                else_jump_op->kind = op_jump;
-                else_jump_op->jump.conditional = false;
+                Op else_jump_op = {0};
+                else_jump_op.kind = op_jump;
+                else_jump_op.jump.conditional = false;
+                u64 else_jump_op_index = buf_length(context->tmp_ops);
+                buf_push(context->tmp_ops, else_jump_op);
 
                 for (Stmt* inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
                     linearize_stmt(context, func, inner);
                 }
 
-                else_jump_op->jump.to_op = buf_length(context->tmp_ops);
+                Op* else_jump_op_pointer = &context->tmp_ops[else_jump_op_index];
+                else_jump_op_pointer->jump.to_op = buf_length(context->tmp_ops);
             }
         } break;
 
         case stmt_loop: {
+            u64 initial_jump = U64_MAX;
             u64 loop_start = buf_length(context->tmp_ops);
 
-            u32* loop_end;
             if (stmt->loop.condition != null) {
                 Local bool_local = intermediate_allocate_temporary(context, 1);
                 linearize_expr(context, stmt->conditional.condition, bool_local, false);
 
+                initial_jump = buf_length(context->tmp_ops);
                 buf_push(context->tmp_ops, ((Op) {
                     op_jump,
                     .jump = { .conditional = true, .condition = bool_local },
                 }));
-
-                loop_end = &(buf_end(context->tmp_ops) - 1)->jump.to_op;
 
                 intermediate_deallocate_temporary(context, bool_local);
             }
@@ -5490,7 +5523,9 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             }));
 
             if (stmt->loop.condition != null) {
-                *loop_end = buf_length(context->tmp_ops);
+                Op* initial_jump_pointer = &context->tmp_ops[initial_jump];
+                assert(initial_jump_pointer->kind == op_jump);
+                initial_jump_pointer->jump.to_op = buf_length(context->tmp_ops);
             }
         } break;
 
@@ -5607,7 +5642,8 @@ u8* BINARY_INSTRUCTION_OP_NAMES[BINARY_INSTRUCTION_COUNT] = {
 typedef enum X64_Instruction_Unary {
     instruction_mul,
     instruction_div,
-    instruction_not,
+    instruction_not, // ones-complement negation
+    instruction_neg, // twos-complement negation
     UNARY_INSTRUCTION_COUNT,
 } X64_Instruction_Unary;
 
@@ -5615,11 +5651,13 @@ u8 UNARY_INSTRUCTION_REG[UNARY_INSTRUCTION_COUNT] = {
     [instruction_mul] = 4,
     [instruction_div] = 6,
     [instruction_not] = 2,
+    [instruction_neg] = 3,
 };
 u8* UNARY_INSTRUCTION_OP_NAMES[UNARY_INSTRUCTION_COUNT] = {
     [instruction_mul] = "mul",
     [instruction_div] = "div",
     [instruction_not] = "not",
+    [instruction_neg] = "neg",
 };
 
 void instruction_general_reg_reg(u8** b, X64_Instruction_Binary instruction, X64_Reg a_reg, X64_Reg b_reg, u8 bytes) {
@@ -5730,17 +5768,6 @@ void instruction_xor_reg_imm(u8** b, X64_Reg reg, u32 immediate, u8 bytes) {
 }
 
 void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-
     u8 modrm =
         0xc0 |
         ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
@@ -5770,17 +5797,6 @@ void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
     u8* reg_name = reg_names[reg];
     printf("movzx %s %s (8 -> %u)\n", reg_name, reg_name, target_bytes*8);
     #endif
-
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
-    instruction_nop(b);
 }
 
 void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) {
@@ -6203,14 +6219,28 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
     #endif
 
     switch (op->kind) {
-        case op_neg: {
+        case op_neg:
+        case op_not:
+        {
             u8 primitive_size = primitive_size_of(op->primitive);
 
             instruction_load_local(context, func, op->unary, reg_rax, primitive_size);
 
-            // NB this only works if we assume the bools value initialy was one
-            assert(op->primitive == primitive_bool);
-            instruction_xor_reg_imm(&context->seg_text, reg_rax, 1, primitive_size);
+            switch (op->kind) {
+                case op_neg: {
+                    // NB we use the same logic for signed and usigned integers!
+                    assert(primitive_is_integer(op->primitive));
+                    instruction_general_reg(&context->seg_text, instruction_neg, reg_rax, primitive_size);
+                } break;
+
+                case op_not: {
+                    // NB this only works if we assume the bools value was either 1 or 0
+                    assert(op->primitive == primitive_bool);
+                    instruction_xor_reg_imm(&context->seg_text, reg_rax, 1, primitive_size);
+                } break;
+
+                default: assert(false);
+            }
 
             if (op->unary.as_reference) {
                 instruction_mov_mem(context, func, mov_from, op->unary, reg_rcx, POINTER_SIZE);
@@ -7289,12 +7319,19 @@ bool write_executable(u8* path, Context* context) {
     image.minor_os_version = 0;
     image.major_subsystem_version = 6;
     image.minor_subsystem_version = 0;
+
+    // TODO switching this disables address-space randomization, which might be nice for debugging
+    #if 1
     image.dll_flags =
         IMAGE_DLL_FLAGS_TERMINAL_SERVER_AWARE |
         IMAGE_DLL_FLAGS_NX_COMPAT |
         IMAGE_DLL_FLAGS_DYNAMIC_BASE |
         //IMAGE_DLL_FLAGS_NO_SEH |
         IMAGE_DLL_FLAGS_64_BIT_VA;
+    #else
+    image.dll_flags = 0;
+    #endif
+
     image.file_alignment = in_file_alignment;
     image.section_alignment = in_memory_alignment;
     image.size_of_headers = header_space;

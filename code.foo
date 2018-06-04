@@ -9,7 +9,8 @@ extern "kernel32.lib" {
 let stdout_handle: u64;
 fn print(string: *u8) {
     if (stdout_handle == 0) {
-        stdout_handle = GetStdHandle(4294967285);
+        //stdout_handle = GetStdHandle(4294967285);
+        stdout_handle = GetStdHandle(-11);
     }
 
     let length: u32 = 0;
@@ -23,6 +24,40 @@ fn print(string: *u8) {
     WriteFile(stdout_handle, string, length, &written, null);
 }
 
+fn print_u64(value: u64, base: u64) {
+    let buffer: [30]u8; // TODO make this a global, it looks like that just works
+
+    if (value == 0) {
+        buffer[0] = 48; // TODO hex literals
+    } else {
+        let i: u64 = 0;
+        for (value > 0) {
+            let char = u8(value % base);
+            if (char <= 9) {
+                buffer[i] = 48 + char;
+            } else {
+                buffer[i] = 97 + (char - 10);
+            }
+            value = value / base; // TODO operator /=
+            i += 1;
+        }
+        buffer[i] = 0;
+        i -= 1;
+
+        let j: u64 = 0;
+        for (j < i) {
+            let temp = buffer[j];
+            buffer[j] = buffer[i];
+            buffer[i] = temp;
+
+            i -= 1;
+            j += 1;
+        }
+    }
+
+    print(&buffer);
+}
+
 
 fn sidewinder() { global = !global; }
 
@@ -33,6 +68,14 @@ fn main() -> u8 {
     let ho = "Ho";
 
     // This will crash now, since we put strings in a read-only section
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
+    // TODO TODO Reenable this function so that we test it
     //*(hi + 0) = seventy_two();
 
     let a: u8 = 10;
@@ -53,6 +96,9 @@ fn main() -> u8 {
     if (global) { print("thats not "); }
     sidewinder();
     if (global) { print("nice\n"); }
+
+    print_u64(16045690984503098046, 16); print("\n");
+    print_u64(u64(-u32(11)), 10); print("\n");
 
     ExitProcess(0);
 }
@@ -131,6 +177,7 @@ size_of, align_of, type_of
 more operators      <<   >>   |   &   ~   ||   &&
 assignment operators += -= etc
 hex literals
+character literals
 variable shadowing
 
 .pdata and unwind info
