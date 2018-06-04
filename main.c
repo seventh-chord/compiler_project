@@ -4548,25 +4548,23 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
             u64 child_size = type_size_of(info->context, expr->binary.left->type_index);
 
             assert(type_size <= 8 && child_size <= 8);
+            u64 left_result, right_result;
 
-            u8* mem = arena_alloc(&info->context->stack, 2*child_size);
-            u8* left_result = mem;
-            u8* right_result = mem + child_size;
-
-            if (!eval_compile_time_expr(info, expr->binary.left, left_result)) return false;
-            if (!eval_compile_time_expr(info, expr->binary.right, right_result)) return false;
+            if (!eval_compile_time_expr(info, expr->binary.left, (u8*) &left_result)) return false;
+            if (!eval_compile_time_expr(info, expr->binary.right, (u8*) &right_result)) return false;
 
             bool is_signed = primitive_is_signed(info->context->type_buf[expr->binary.left->type_index]);
 
             u64 result = 0;
 
             if (is_signed) {
-                i64 left, right;
+                i64 left  = *((i64*) &left_result);
+                i64 right = *((i64*) &right_result);
                 switch (child_size) {
-                    case 1: left = (i64) *((i8*)  left_result); right = (i64) *((i8*)  right_result); break;
-                    case 2: left = (i64) *((i16*) left_result); right = (i64) *((i16*) right_result); break;
-                    case 4: left = (i64) *((i32*) left_result); right = (i64) *((i32*) right_result); break;
-                    case 8: left = (i64) *((i64*) left_result); right = (i64) *((i64*) right_result); break;
+                    case 1: left = (i64) ((i8)  left_result); right = (i64) ((i8)  right); break;
+                    case 2: left = (i64) ((i16) left_result); right = (i64) ((i16) right); break;
+                    case 4: left = (i64) ((i32) left_result); right = (i64) ((i32) right); break;
+                    case 8: break;
                     default: assert(false);
                 }
 
@@ -4584,12 +4582,13 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
                     case binary_lteq: result = left <= right; break;
                 }
             } else {
-                u64 left, right;
+                u64 left = left_result;
+                u64 right = right_result;
                 switch (child_size) {
-                    case 1: left = (u64) *((u8*)  left_result); right = (u64) *((u8*)  right_result); break;
-                    case 2: left = (u64) *((u16*) left_result); right = (u64) *((u16*) right_result); break;
-                    case 4: left = (u64) *((u32*) left_result); right = (u64) *((u32*) right_result); break;
-                    case 8: left = (u64) *((u64*) left_result); right = (u64) *((u64*) right_result); break;
+                    case 1: left = (u64) ((u8)  left_result); right = (u64) ((u8)  right); break;
+                    case 2: left = (u64) ((u16) left_result); right = (u64) ((u16) right); break;
+                    case 4: left = (u64) ((u32) left_result); right = (u64) ((u32) right); break;
+                    case 8: break;
                     default: assert(false);
                 }
 
