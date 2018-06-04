@@ -5185,14 +5185,16 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             Local offset = intermediate_allocate_temporary(context, index_size);
             linearize_expr(context, expr->subscript.index, offset, false);
 
+            if (stride > 1) {
+                Op op = {0};
+                op.kind = op_mul;
+                op.primitive = primitive_pointer;
+                op.binary.source = (Local) { local_literal, false, stride };
+                op.binary.target = offset;
+                buf_push(context->tmp_ops, op);
+            }
+
             Op op = {0};
-
-            op.kind = op_mul;
-            op.primitive = primitive_pointer;
-            op.binary.source = (Local) { local_literal, false, stride };
-            op.binary.target = offset;
-            buf_push(context->tmp_ops, op);
-
             op.kind = op_add;
             op.primitive = primitive_pointer;
             op.binary.source = offset;

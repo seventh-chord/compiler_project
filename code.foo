@@ -64,19 +64,12 @@ fn sidewinder() { global = !global; }
 let global = 3 > 2;
 
 fn main() -> u8 {
+    if (seventy_two() != 72) {
+        ExitProcess(0);
+    }
+
     let hi = "Hi";
     let ho = "Ho";
-
-    // This will crash now, since we put strings in a read-only section
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    // TODO TODO Reenable this function so that we test it
-    //*(hi + 0) = seventy_two();
 
     let a: u8 = 10;
     for (a > 0) {
