@@ -4783,6 +4783,25 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
             mem_copy((u8*) &result, result_into, type_size);
             return true;
         } break;
+
+        case expr_compound_literal: {
+            Primitive primitive = info->context->type_buf[expr->type_index];
+
+            if (primitive == primitive_array) {
+                u32 child_type_index = expr->type_index + 1 + sizeof(u64);
+                u64 child_size = type_size_of(info->context, child_type_index);
+
+                u8* mem = result_into;
+                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
+                    if (!eval_compile_time_expr(info, node->expr, mem)) return false;
+                    mem += child_size;
+                }
+            } else {
+                assert(false);
+            }
+
+            return true;
+        } break;
     }
 
     printf("Can't evaluate this expression at compile time yet (Line %u)\n", expr->pos.line);

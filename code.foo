@@ -6,63 +6,6 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-let stdout_handle: u64;
-fn print(string: *u8) {
-    if (stdout_handle == 0) {
-        //stdout_handle = GetStdHandle(4294967285);
-        stdout_handle = GetStdHandle(-11);
-    }
-
-    let length: u32 = 0;
-    let s = string;
-    for (*s != 0) {
-        s += 1;
-        length += 1;
-    }
-
-    let written: u32;
-    WriteFile(stdout_handle, string, length, &written, null);
-}
-
-fn print_u64(value: u64, base: u64) {
-    // TODO make this a global, it looks like that just works
-    let buffer: [30]u8;
-
-    if (value == 0) {
-        buffer[0] = 0x30; // TODO character literals
-    } else {
-        let i: u64 = 0;
-        for (value > 0) {
-            let char = u8(value % base);
-            if (char <= 9) {
-                buffer[i] = 0x30 + char;
-            } else {
-                buffer[i] = 0x61 + (char - 10);
-            }
-            value = value / base; // TODO operator /=
-            i += 1;
-        }
-        i -= 1;
-
-        let j: u64 = 0;
-        for (j < i) {
-            let temp = buffer[j];
-            buffer[j] = buffer[i];
-            buffer[i] = temp;
-
-            i -= 1;
-            j += 1;
-        }
-    }
-
-    print(&buffer);
-}
-
-
-fn sidewinder() { global = !global; }
-
-let global = 3 > 2;
-
 fn main() -> u8 {
     if (seventy_two() != 72) {
         ExitProcess(0);
@@ -96,21 +39,79 @@ fn main() -> u8 {
     ExitProcess(0);
 }
 
-fn four() -> u8 {
-    let big_boy: [4][4]u64 = {
-        { 0, 0, 0, 0 },
-        { 0, 0, 0, 0 },
-        { 0, 0, 2, 0 },
-        { 0, 0, 0, 0 },
-    };
+let stdout_handle: u64;
+fn print(string: *u8) {
+    if (stdout_handle == 0) {
+        //stdout_handle = GetStdHandle(4294967285);
+        stdout_handle = GetStdHandle(-11);
+    }
 
+    let length: u32 = 0;
+    let s = string;
+    for (*s != 0) {
+        s += 1;
+        length += 1;
+    }
+
+    let written: u32;
+    WriteFile(stdout_handle, string, length, &written, null);
+}
+
+let print_u64_buffer: [30]u8;
+fn print_u64(value: u64, base: u64) {
+
+    if (value == 0) {
+        print_u64_buffer[0] = 0x30; // TODO character literals
+    } else {
+        let i: u64 = 0;
+        for (value > 0) {
+            let char = u8(value % base);
+            if (char <= 9) {
+                print_u64_buffer[i] = 0x30 + char;
+            } else {
+                print_u64_buffer[i] = 0x61 + (char - 10);
+            }
+            value = value / base; // TODO operator /=
+            i += 1;
+        }
+        i -= 1;
+
+        let j: u64 = 0;
+        for (j < i) {
+            let temp = print_u64_buffer[j];
+            print_u64_buffer[j] = print_u64_buffer[i];
+            print_u64_buffer[i] = temp;
+
+            i -= 1;
+            j += 1;
+        }
+    }
+
+    print(&print_u64_buffer);
+}
+
+
+fn sidewinder() { global = !global; }
+
+let global = 3 > 2;
+
+let big_boy: [4][4]u64 = {
+    { 0, 0, 0, 0 },
+    { 0, 0, 0, 0 },
+    { 0, 0, 2, 0 },
+    { 0, 0, 0, 0 },
+};
+
+fn four() -> u8 {
     let empty = [4]u64 { 0, 0, 0, 0 };
 
     let small_boy = &empty;
     *small_boy = big_boy[2];
 
-    let nice = big_boy[2][2];
-    output = u8(nice) + u8(empty[2]);
+    let nice = small_boy[2];
+    let nicer = empty[2];
+
+    output = u8(nice) + u8(nicer);
 }
 
 fn swanky() -> u8 {
