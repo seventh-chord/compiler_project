@@ -25,11 +25,11 @@ fn print(string: *u8) {
 }
 
 fn print_u64(value: u64, base: u64) {
-    let buffer: [30]u8; // TODO make this a global, it looks like that just works
+    // TODO make this a global, it looks like that just works
+    let buffer: [30]u8;
 
     if (value == 0) {
-        buffer[0] = 0x30;
-        buffer[1] = 0;
+        buffer[0] = 0x30; // TODO character literals
     } else {
         let i: u64 = 0;
         for (value > 0) {
@@ -42,7 +42,6 @@ fn print_u64(value: u64, base: u64) {
             value = value / base; // TODO operator /=
             i += 1;
         }
-        buffer[i] = 0;
         i -= 1;
 
         let j: u64 = 0;

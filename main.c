@@ -1299,6 +1299,8 @@ typedef enum Op_Kind {
     op_jump,
     op_load_data,
 
+    op_builtin_mem_clear,
+
     // 'unary'
     op_neg,
     op_not,
@@ -1327,6 +1329,8 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_cast] = "cast",
     [op_jump] = "jump",
     [op_load_data] = "load_data",
+    [op_builtin_mem_clear] = "builtin_mem_clear",
+
     [op_neg] = "neg",
     [op_not] = "not",
     [op_set] = "set",
@@ -1398,6 +1402,11 @@ typedef struct Op {
             u32 data_offset;
             bool writable; // selects seg_rodata or seg_rwdata
         } load_data;
+
+        struct {
+            Local pointer;
+            u64 size;
+        } builtin_mem_clear;
     };
 
     u32 text_start;
@@ -1461,6 +1470,7 @@ typedef struct Fixup {
 
 typedef struct Call_Fixup {
     u64 text_location;
+    bool builtin;
     u32 func_index;
 } Call_Fixup;
 
@@ -1503,8 +1513,7 @@ typedef struct Func {
             Tmp* tmps;
             u32 tmp_count;
 
-            Mem_Layout mem_layout; // used for eval_ops
-            Mem_Layout stack_layout; // for machinecode generations
+            Mem_Layout stack_layout;
 
             Stmt* first_stmt;
 
@@ -2111,6 +2120,12 @@ void print_op(Context* context, Func* func, Op* op) {
             printf("address of ");
             print_local(context, func, op->load_data.local);
             printf(", %s + %u into ", op->load_data.writable? ".data" : ".rdata", (u64) op->load_data.data_offset);
+        } break;
+
+        case op_builtin_mem_clear: {
+            printf("builtin mem clear ");
+            print_local(context, func, op->builtin_mem_clear.pointer);
+            printf(" (%u bytes)", op->builtin_mem_clear.size);
         } break;
 
         default: assert(false);
@@ -3259,12 +3274,10 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     }
     u32 name_index = t->identifier_string_table_index;
 
-    buf_foreach (Func, func, context->funcs) {
-        if (func->name == name_index) {
-            u8* name = string_table_access(context->string_table, name_index);
-            printf("Second definition of function %s on line %u\n", name, (u64) declaration_pos.line);
-            valid = false;
-        }
+    if (find_func(context, name_index) != U32_MAX) {
+        u8* name = string_table_access(context->string_table, name_index);
+        printf("Second definition of function %s on line %u\n", name, (u64) declaration_pos.line);
+        valid = false;
     }
 
     // NB we use these while parsing, and then copy them into the memory arena
@@ -4963,7 +4976,7 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
                 },
             }));
 
-            // TODO TODO TODO TODO Once we get control flow, this should be a loop
+            // TODO TODO TODO TODO Once we get control flow, this should be a loop in machinecode
             for (u64 i = 0; i < array_size; i += 1) {
                 offset_source.as_reference = true;
                 offset_target.as_reference = true;
@@ -5000,6 +5013,42 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
         buf_push(context->tmp_ops, op);
     }
 }
+
+void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
+    Var* var = &func->body.vars[var_index];
+    Primitive primitive = context->type_buf[var->type_index];
+
+    if (primitive_is_compound(primitive)) {
+        Local pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+        u64 type_size = type_size_of(context, var->type_index);
+
+        Op op = {0};
+
+        op.kind = op_address_of;
+        op.binary.source = (Local) { local_variable, false, var_index };
+        op.binary.target = pointer;
+        buf_push(context->tmp_ops, op);
+
+        pointer.as_reference = true;
+
+        op.kind = op_builtin_mem_clear;
+        op.builtin_mem_clear.pointer = pointer;
+        op.builtin_mem_clear.size = type_size;
+        buf_push(context->tmp_ops, op);
+
+        intermediate_deallocate_temporary(context, pointer);
+    } else {
+        u8 size = primitive_size_of(primitive);
+
+        Op op = {0};
+        op.kind = op_set;
+        op.primitive = primitive;
+        op.binary.source = (Local) { local_literal, false, 0 };
+        op.binary.target = (Local) { local_variable, false, var_index };
+        buf_push(context->tmp_ops, op);
+    }
+}
+
 
 void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_address) {
     Primitive target_primitive = context->type_buf[expr->type_index];
@@ -5661,6 +5710,8 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
                 left.pos = stmt->pos;
 
                 linearize_assignment(context, &left, stmt->declaration.right);
+            } else {
+                intermediate_zero_out_var(context, func, stmt->declaration.var_index);
             }
         } break;
 
@@ -5773,6 +5824,12 @@ void build_intermediate(Context* context) {
     }
 }
 
+
+
+enum {
+    builtin_mem_clear,
+    BUILTIN_COUNT,
+};
 
 enum {
     REX_BASE = 0x40,
@@ -5970,7 +6027,7 @@ void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
         ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
     u8 rex = REX_BASE;
 
-    if (reg > reg_r8) {
+    if (reg >= reg_r8) {
         rex |= REX_R | REX_B;
     }
 
@@ -6115,6 +6172,41 @@ u64 instruction_jmp_i32(u8** b) {
     #endif
 
     return buf_length(*b) - sizeof(i32);
+}
+
+// Returns offset into *b where an i8 should be written
+u64 instruction_jmp_i8(u8** b) {
+    buf_push(*b, 0xeb);
+    buf_push(*b, 0x00);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("jmp ??\n");
+    #endif
+
+    return buf_length(*b) - sizeof(i8);
+}
+
+void instruction_inc_or_dec(u8** b, bool inc, X64_Reg reg, u8 op_size) {
+    u8 rex = REX_BASE;
+    u8 opcode = 0xff;
+    u8 modrm = inc? 0xc0 : 0xc8;
+
+    modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+    if (reg >= reg_r8) rex |= REX_B;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(*b, 0x66); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, opcode);
+    buf_push(*b, modrm);
 }
 
 Mem_Item* get_stack_item(Func* func, Local local) {
@@ -6658,6 +6750,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
                     Call_Fixup fixup = {0};
                     fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
+                    fixup.builtin = false;
                     fixup.func_index = op->call.func_index;
                     buf_push(context->call_fixups, fixup);
                 } break;
@@ -6786,6 +6879,27 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             }
         } break;
 
+        case op_builtin_mem_clear: {
+            Local pointer = op->builtin_mem_clear.pointer;
+            u64 size = op->builtin_mem_clear.size;
+
+            assert(pointer.as_reference);
+            instruction_mov_mem(context, func, mov_from, pointer, reg_rax, POINTER_SIZE);
+            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(primitive_u64));
+
+            buf_push(context->seg_text, 0xe8);
+            buf_push(context->seg_text, 0xde);
+            buf_push(context->seg_text, 0xad);
+            buf_push(context->seg_text, 0xbe);
+            buf_push(context->seg_text, 0xef);
+
+            Call_Fixup fixup = {0};
+            fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
+            fixup.builtin = true;
+            fixup.func_index = builtin_mem_clear;
+            buf_push(context->call_fixups, fixup);
+        } break;
+
         case op_end_of_function: assert(false);
 
         default: assert(false);
@@ -6793,8 +6907,32 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 }
 
 void build_machinecode(Context* context) {
-    arena_stack_push(&context->stack);
+    // Builtins
+    u32 builtin_text_starts[BUILTIN_COUNT] = {0};
 
+    { // builtin mem clear
+        // TODO we could optimize this by using a bigger mov and looping fewer times
+
+        builtin_text_starts[builtin_mem_clear] = buf_length(context->seg_text);
+
+        u64 loop_start = buf_length(context->seg_text);
+        u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
+        u64 forward_jump_from = buf_length(context->seg_text);
+        // mov8 [rax], 0
+        buf_push(context->seg_text, 0xc6); buf_push(context->seg_text, 0x00); buf_push(context->seg_text, 0x00);
+        instruction_inc_or_dec(&context->seg_text, true, reg_rax, 8);
+        instruction_inc_or_dec(&context->seg_text, false, reg_rcx, 8);
+        u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
+        u64 jump_end = buf_length(context->seg_text);
+
+        *((i8*) &context->seg_text[forward_jump_index]) = (i8) (jump_end - forward_jump_from);
+        *((i8*) &context->seg_text[backward_jump_index]) = -((i8) (jump_end - loop_start));
+
+        // ret
+        buf_push(context->seg_text, 0xc3);
+    }
+
+    // Normal functions
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
     if (main_func_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
@@ -7011,16 +7149,19 @@ void build_machinecode(Context* context) {
         i32* target = (i32*) (context->seg_text + fixup->text_location);
         assert(*target == 0xefbeadde);
 
-        Func* callee = &context->funcs[fixup->func_index];
-        assert(callee->kind == func_kind_normal);
+        u32 jump_to;
+        if (fixup->builtin) {
+            jump_to = builtin_text_starts[fixup->func_index];
+        } else {
+            Func* callee = &context->funcs[fixup->func_index];
+            assert(callee->kind == func_kind_normal);
+            jump_to = callee->body.text_start;
+        }
 
-        u32 jump_to = callee->body.text_start;
         u32 jump_from = fixup->text_location + sizeof(i32);
         i32 jump_by = ((i32) jump_to) - ((i32) jump_from);
         *target = jump_by;
     }
-
-    arena_stack_pop(&context->stack);
 }
 
 typedef struct COFF_Header {
@@ -7672,26 +7813,29 @@ void print_verbose_info(Context* context) {
         u8* name = string_table_access(context->string_table, func->name);
         printf("  fn %s\n", name);
 
-        if (func->kind == func_kind_normal) {
-            printf("    %u variables: ", (u64) func->body.var_count);
-            for (u32 v = 0; v < func->body.var_count; v += 1) {
-                Var* var = &func->body.vars[v];
-                u8* name = string_table_access(context->string_table, var->name);
+        switch (func->kind) {
+            case func_kind_normal:
+            {
+                printf("    %u variables: ", (u64) func->body.var_count);
+                for (u32 v = 0; v < func->body.var_count; v += 1) {
+                    Var* var = &func->body.vars[v];
+                    u8* name = string_table_access(context->string_table, var->name);
 
-                if (v == 0) {
-                    printf("%s", name);
-                } else {
-                    printf(", %s", name);
+                    if (v == 0) {
+                        printf("%s", name);
+                    } else {
+                        printf(", %s", name);
+                    }
                 }
-            }
-            printf("\n");
+                printf("\n");
 
-            printf("    Statements:\n");
-            print_stmts(context, func, func->body.first_stmt, 2);
-        } else if (func->kind == func_kind_imported) {
-            printf("    (Imported)\n");
-        } else {
-            assert(false);
+                printf("    Statements:\n");
+                print_stmts(context, func, func->body.first_stmt, 2);
+            } break;
+
+            case func_kind_imported: {
+                printf("    (Imported)\n");
+            } break;
         }
     }
 }
