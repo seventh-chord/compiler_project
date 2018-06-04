@@ -3473,25 +3473,59 @@ bool build_ast(Context* context, u8* path) {
             
             u64 value = 0;
 
-            for (; i < file_length; i += 1) {
-                switch (file[i]) {
-                    DIGIT {
-                        last = i;
+            if (i + 2 < file_length && file[i] == '0' && file[i + 1] == 'x') {
+                i += 2;
 
-                        u64 previous_value = value;
+                for (; i < file_length; i += 1) {
+                    u64 previous_value = value;
+                    u64 digit;
 
-                        u64 digit = file[i] - '0';
-                        value *= 10;
-                        value += digit;
+                    switch (file[i]) {
+                        case '0': digit = 0x0; break; case '1': digit = 0x1; break;
+                        case '2': digit = 0x2; break; case '3': digit = 0x3; break;
+                        case '4': digit = 0x4; break; case '5': digit = 0x5; break;
+                        case '6': digit = 0x6; break; case '7': digit = 0x7; break;
+                        case '8': digit = 0x8; break; case '9': digit = 0x9; break;
+                        case 'a': digit = 0xa; break; case 'b': digit = 0xb; break;
+                        case 'c': digit = 0xc; break; case 'd': digit = 0xd; break;
+                        case 'e': digit = 0xe; break; case 'f': digit = 0xf; break;
+                        case 'A': digit = 0xA; break; case 'B': digit = 0xB; break;
+                        case 'C': digit = 0xC; break; case 'D': digit = 0xD; break;
+                        case 'E': digit = 0xE; break; case 'F': digit = 0xF; break;
+                        default: goto done_with_literal;
+                    }
 
-                        if (value < previous_value) {
-                            overflow = true;
-                        }
+                    last = i;
 
-                    } break;
-                    default: goto done_with_literal;
+                    value <<= 4;
+                    value += digit;
+
+                    if (value < previous_value) {
+                        overflow = true;
+                    }
+                }
+            } else {
+                for (; i < file_length; i += 1) {
+                    switch (file[i]) {
+                        DIGIT {
+                            last = i;
+
+                            u64 previous_value = value;
+
+                            u64 digit = file[i] - '0';
+                            value *= 10;
+                            value += digit;
+
+                            if (value < previous_value) {
+                                overflow = true;
+                            }
+
+                        } break;
+                        default: goto done_with_literal;
+                    }
                 }
             }
+
             done_with_literal:
 
             if (overflow) {
