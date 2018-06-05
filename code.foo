@@ -6,8 +6,8 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-const SEVEN = u64(u8(u64(3074504259546010887))); // evaluates to 7
-const EIGHT = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
+let SEVEN = u64(u8(u64(3074504259546010887))); // evaluates to 7
+let EIGHT = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
 
 fn main() -> u8 {
     if (seventy_two() != 72) {
@@ -48,7 +48,7 @@ fn main() -> u8 {
     ExitProcess(0);
 }
 
-const STDOUT_KEY = u32(-11);
+let STDOUT_KEY = u32(-11);
 let stdout_handle: u64;
 
 fn print(string: *u8) {
@@ -104,7 +104,7 @@ fn print_u64(value: u64, base: u64) {
 fn sidewinder() { global = !global; }
 let global = 3 > 2;
 
-const BIG_BOY: [4][4]u64 = {
+let BIG_BOY: [4][4]u64 = {
     { 0, 0, 0, 0 },
     { 0, 0, 0, 0 },
     { 0, 0, 2, 0 },

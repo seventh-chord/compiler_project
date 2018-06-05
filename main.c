@@ -771,7 +771,6 @@ typedef struct Token {
         token_keyword_fn,
         token_keyword_extern,
         token_keyword_let,
-        token_keyword_const,
         token_keyword_if,
         token_keyword_else,
         token_keyword_for,
@@ -840,7 +839,6 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_keyword_fn]           = "fn",
     [token_keyword_extern]       = "extern",
     [token_keyword_let]          = "let",
-    [token_keyword_const]        = "const",
     [token_keyword_if]           = "if",
     [token_keyword_else]         = "else",
     [token_keyword_for]          = "for",
@@ -868,8 +866,7 @@ typedef struct Global_Var {
     Var var;
     Expr* initial_expr;
 
-    bool constant;
-    u32 data_offset; // either seg_rwdata or seg_rodata, depending on constant
+    u32 data_offset;
 
     bool checked;
     bool valid;
@@ -1407,7 +1404,6 @@ typedef struct Op {
         struct {
             Local local;
             u32 data_offset;
-            bool writable; // selects seg_rodata or seg_rwdata
         } load_data;
 
         struct {
@@ -1465,8 +1461,7 @@ typedef struct Fixup {
 
     enum {
         fixup_imported_function,
-        fixup_rwdata,
-        fixup_rodata,
+        fixup_data,
     } kind;
 
     union {
@@ -1613,8 +1608,7 @@ typedef struct Context {
 
     // Low level representation
     u8* seg_text; // stretchy-buffer
-    u8* seg_rwdata; // stretchy-buffer
-    u8* seg_rodata; // stretchy-buffer
+    u8* seg_data; // stretchy-buffer
     Fixup* fixups; // stretchy-buffer
 
     Library_Import* imports; // stretchy-buffer
@@ -1659,20 +1653,13 @@ Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
     return index;
 }
 
-u64 add_exe_data(Context* context, u8* data, u64 length, bool writable) {
-    u8** buffer;
-    if (writable) {
-        buffer = &context->seg_rwdata;
-    } else {
-        buffer = &context->seg_rodata;
-    }
-
-    u64 data_offset = buf_length(*buffer);
+u64 add_exe_data(Context* context, u8* data, u64 length) {
+    u64 data_offset = buf_length(context->seg_data);
 
     if (data == null) {
-        str_push_zeroes(buffer, length);
+        str_push_zeroes(&context->seg_data, length);
     } else {
-        str_push_str(buffer, data, length);
+        str_push_str(&context->seg_data, data, length);
     }
 
     return data_offset;
@@ -2128,7 +2115,7 @@ void print_op(Context* context, Func* func, Op* op) {
         case op_load_data: {
             printf("address of ");
             print_local(context, func, op->load_data.local);
-            printf(", %s + %u into ", op->load_data.writable? ".data" : ".rdata", (u64) op->load_data.data_offset);
+            printf(", .data + %u into ", (u64) op->load_data.data_offset);
         } break;
 
         case op_builtin_mem_clear: {
@@ -2721,7 +2708,6 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 case ')': case ']': case '}':
                 case token_assign:
                 case token_keyword_let:
-                case token_keyword_const:
                 case token_keyword_fn:
                 case token_add_assign:
                 case token_sub_assign:
@@ -3513,12 +3499,11 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    enum { KEYWORD_COUNT = 10 };
+    enum { KEYWORD_COUNT = 9 };
     u32 keyword_token_table[KEYWORD_COUNT][2] = {
         { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
         { token_keyword_extern, string_table_intern_cstr(&context->string_table, "extern") },
         { token_keyword_let,    string_table_intern_cstr(&context->string_table, "let") },
-        { token_keyword_const,  string_table_intern_cstr(&context->string_table, "const") },
         { token_keyword_if,     string_table_intern_cstr(&context->string_table, "if") },
         { token_keyword_else,   string_table_intern_cstr(&context->string_table, "else") },
         { token_keyword_for,    string_table_intern_cstr(&context->string_table, "for") },
@@ -4054,11 +4039,7 @@ bool build_ast(Context* context, u8* path) {
             t += length;
         } break;
 
-        case token_keyword_let:
-        case token_keyword_const:
-        {
-            bool constant = t->kind == token_keyword_const;
-
+        case token_keyword_let: {
             File_Pos start_pos = t->pos;
             t += 1;
 
@@ -4105,7 +4086,6 @@ bool build_ast(Context* context, u8* path) {
             global.var.name = name_index;
             global.var.declaration_pos = start_pos;
             global.var.type_index = type_index;
-            global.constant = constant;
             global.initial_expr = expr;
             buf_push(context->global_vars, global);
 
@@ -4299,10 +4279,6 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                         }
 
                         return false;
-                    }
-
-                    if (global->constant) {
-                        assignable = false;
                     }
                 } else if (info->scope->map[var_index] == false) {
                     Var* var = &info->func->body.vars[var_index];
@@ -4809,7 +4785,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                 } else if (global->valid) {
                     u64 other_size = type_size_of(info->context, global->var.type_index);
                     assert(other_size == type_size);
-                    u8* other_value = &info->context->seg_rwdata[global->data_offset];
+                    u8* other_value = &info->context->seg_data[global->data_offset];
                     mem_copy(other_value, result_into, type_size);
                     return eval_ok;
                 } else {
@@ -5070,7 +5046,7 @@ bool typecheck(Context* context) {
                     global->var.type_index = global->initial_expr->type_index;
                     resolved_type = true;
                 } else if (!type_cmp(context, global->var.type_index, global->initial_expr->type_index)) {
-                    printf("Right hand side of %s declaration doesn't have correct type. Expected ", global->constant? "constant" : "variable");
+                    printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
                     print_type(context, global->var.type_index);
                     printf(" but got ");
                     print_type(context, global->initial_expr->type_index);
@@ -5091,14 +5067,8 @@ bool typecheck(Context* context) {
         u64 type_size = type_size_of(context, global->var.type_index);
         assert(type_size > 0);
 
-        u8* result_into;
-        if (global->constant) {
-            global->data_offset = add_exe_data(context, null, type_size, false);
-            result_into = &context->seg_rodata[global->data_offset];
-        } else {
-            global->data_offset = add_exe_data(context, null, type_size, true);
-            result_into = &context->seg_rwdata[global->data_offset];
-        }
+        global->data_offset = add_exe_data(context, null, type_size);
+        u8* result_into = &context->seg_data[global->data_offset];
 
         if (global->initial_expr != null) {
             arena_stack_push(&context->stack);
@@ -5116,13 +5086,8 @@ bool typecheck(Context* context) {
                 } break;
 
                 case eval_do_at_runtime: {
-                    if (global->constant) {
-                        global->valid = true;
-                        global->compute_at_runtime = true;
-                    } else {
-                        global->valid = true;
-                        global->compute_at_runtime = true;
-                    }
+                    global->valid = true;
+                    global->compute_at_runtime = true;
                 } break;
             }
         } else {
@@ -5377,14 +5342,13 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_string_literal: {
             assert(!get_address);
 
-            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, false);
+            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1);
             assert(data_offset <= U32_MAX);
 
             Op op = {0};
             op.kind = op_load_data;
             op.load_data.local = assign_to;
             op.load_data.data_offset = (u32) data_offset;
-            op.load_data.writable = false;
             buf_push(context->tmp_ops, op);
         } break;
 
@@ -6588,7 +6552,7 @@ void instruction_lea_stack(u8** b, u32 offset, X64_Reg reg) {
     #endif
 }
 
-void instruction_lea_data(Context* context, u32 data_offset, bool writable, X64_Reg reg) {
+void instruction_lea_data(Context* context, u32 data_offset, X64_Reg reg) {
     buf_push(context->seg_text, 0x48);
     buf_push(context->seg_text, 0x8d);
     buf_push(context->seg_text, 0x05);
@@ -6598,7 +6562,7 @@ void instruction_lea_data(Context* context, u32 data_offset, bool writable, X64_
     buf_push(context->seg_text, 0xef);
 
     Fixup fixup = {0};
-    fixup.kind = writable? fixup_rwdata : fixup_rodata;
+    fixup.kind = fixup_data;
     fixup.text_location = buf_length(context->seg_text) - sizeof(u32);
     fixup.data_offset = data_offset;
     buf_push(context->fixups, fixup);
@@ -6612,7 +6576,7 @@ void instruction_lea_mem(Context* context, Func* func, Local local, X64_Reg reg)
     switch (local.kind) {
         case local_global: {
             Global_Var* global = &context->global_vars[local.value];
-            instruction_lea_data(context, global->data_offset, !global->constant, reg);
+            instruction_lea_data(context, global->data_offset, reg);
         } break;
 
         case local_variable:
@@ -6737,7 +6701,7 @@ void instruction_mov_stack(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 by
     #endif
 }
 
-void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, bool writable, X64_Reg reg, u8 bytes) {
+void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, X64_Reg reg, u8 bytes) {
     u8 rex = REX_BASE;
     u8 opcode = 0x8d;
     u8 modrm = 0x05;
@@ -6772,7 +6736,7 @@ void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, bool
     buf_push(context->seg_text, 0xef);
 
     Fixup fixup = {0};
-    fixup.kind = writable? fixup_rwdata : fixup_rodata;
+    fixup.kind = fixup_data;
     fixup.text_location = buf_length(context->seg_text) - sizeof(u32);
     fixup.data_offset = data_offset;
     buf_push(context->fixups, fixup);
@@ -6790,7 +6754,7 @@ void instruction_mov_mem(Context* context, Func* func, Mov_Mode mode, Local loca
     switch (local.kind) {
         case local_global: {
             Global_Var* global = &context->global_vars[local.value];
-            instruction_mov_data(context, mode, global->data_offset, !global->constant, reg, bytes);
+            instruction_mov_data(context, mode, global->data_offset, reg, bytes);
         } break;
 
         case local_variable:
@@ -7199,7 +7163,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         } break;
 
         case op_load_data: {
-            instruction_lea_data(context, op->load_data.data_offset, op->load_data.writable, reg_rax);
+            instruction_lea_data(context, op->load_data.data_offset, reg_rax);
 
             Local local = op->load_data.local;
             if (local.as_reference) {
@@ -7804,15 +7768,13 @@ bool parse_library(Context* context, Library_Import* import) {
 }
 
 bool write_executable(u8* path, Context* context) {
-    enum { MAX_SECTION_COUNT = 5 }; // So we can use it as an array length
+    enum { MAX_SECTION_COUNT = 4 }; // So we can use it as an array length
 
     u64 text_length = buf_length(context->seg_text);
-    u64 rodata_length = buf_length(context->seg_rodata);
-    u64 rwdata_length = buf_length(context->seg_rwdata);
+    u64 data_length = buf_length(context->seg_data);
 
     u32 section_count = 3;
-    if (rwdata_length > 0) section_count += 1;
-    if (rodata_length > 0) section_count += 1;
+    if (data_length > 0) section_count += 1;
 
     u64 in_file_alignment = 0x200;
     u64 in_memory_alignment = 0x1000;
@@ -7831,17 +7793,15 @@ bool write_executable(u8* path, Context* context) {
     // NB sections data needs to be in the same order as section headers!
     u64 header_space = round_to_next(total_header_size, in_file_alignment);
 
-    u64 text_file_start   = header_space;
-    u64 rwdata_file_start = text_file_start   + round_to_next(text_length,   in_file_alignment);
-    u64 rodata_file_start = rwdata_file_start + round_to_next(rwdata_length, in_file_alignment);
-    u64 pdata_file_start  = rodata_file_start + round_to_next(rodata_length, in_file_alignment);
-    u64 idata_file_start  = pdata_file_start  + round_to_next(pdata_length,  in_file_alignment);
+    u64 text_file_start  = header_space;
+    u64 data_file_start  = text_file_start  + round_to_next(text_length,  in_file_alignment);
+    u64 pdata_file_start = data_file_start  + round_to_next(data_length,  in_file_alignment);
+    u64 idata_file_start = pdata_file_start + round_to_next(pdata_length, in_file_alignment);
 
-    u64 text_memory_start   = round_to_next(total_header_size, in_memory_alignment);
-    u64 rwdata_memory_start = text_memory_start   + round_to_next(text_length,   in_memory_alignment);
-    u64 rodata_memory_start = rwdata_memory_start + round_to_next(rwdata_length, in_memory_alignment);
-    u64 pdata_memory_start  = rodata_memory_start + round_to_next(rodata_length, in_memory_alignment);
-    u64 idata_memory_start  = pdata_memory_start  + round_to_next(pdata_length,  in_memory_alignment);
+    u64 text_memory_start  = round_to_next(total_header_size, in_memory_alignment);
+    u64 data_memory_start  = text_memory_start  + round_to_next(text_length,  in_memory_alignment);
+    u64 pdata_memory_start = data_memory_start  + round_to_next(data_length,  in_memory_alignment);
+    u64 idata_memory_start = pdata_memory_start + round_to_next(pdata_length, in_memory_alignment);
 
     // Verify that fixups are not bogus data, so we don't have to do that later...
     buf_foreach (Fixup, fixup, context->fixups) {
@@ -7863,8 +7823,9 @@ bool write_executable(u8* path, Context* context) {
                 assert(f < buf_length(context->imports[l].function_names));
             } break;
 
-            case fixup_rwdata: assert(fixup->data_offset < rwdata_length); break;
-            case fixup_rodata: assert(fixup->data_offset < rodata_length); break;
+            case fixup_data: {
+                assert(fixup->data_offset < data_length);
+            } break;
 
             default: assert(false);
         }
@@ -7950,13 +7911,8 @@ bool write_executable(u8* path, Context* context) {
         switch (fixup->kind) {
             case fixup_imported_function: break;
 
-            case fixup_rodata: {
-                *text_value = rodata_memory_start + fixup->data_offset;
-                *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
-            } break;
-
-            case fixup_rwdata: {
-                *text_value = rwdata_memory_start + fixup->data_offset;
+            case fixup_data: {
+                *text_value = data_memory_start + fixup->data_offset;
                 *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
             } break;
 
@@ -7977,27 +7933,15 @@ bool write_executable(u8* path, Context* context) {
     text_header->size_of_raw_data = round_to_next(text_length, in_file_alignment);
     text_header->pointer_to_raw_data = text_file_start;
 
-    if (rwdata_length > 0) {
-        Section_Header* rwdata_header = &section_headers[section_index];
+    if (data_length > 0) {
+        Section_Header* data_header = &section_headers[section_index];
         section_index += 1;
-        mem_copy(".data", rwdata_header->name, 5);
-        rwdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
-        rwdata_header->virtual_size = rwdata_length;
-        rwdata_header->virtual_address = rwdata_memory_start;
-        rwdata_header->size_of_raw_data = round_to_next(rwdata_length, in_file_alignment);
-        rwdata_header->pointer_to_raw_data = rwdata_file_start;
-    }
-
-    if (rodata_length > 0) {
-        Section_Header* rodata_header = &section_headers[section_index];
-        section_index += 1;
-        mem_copy(".rdata", rodata_header->name, 6);
-        //rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
-        rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
-        rodata_header->virtual_size = rodata_length;
-        rodata_header->virtual_address = rodata_memory_start;
-        rodata_header->size_of_raw_data = round_to_next(rodata_length, in_file_alignment);
-        rodata_header->pointer_to_raw_data = rodata_file_start;
+        mem_copy(".data", data_header->name, 5);
+        data_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
+        data_header->virtual_size = data_length;
+        data_header->virtual_address = data_memory_start;
+        data_header->size_of_raw_data = round_to_next(data_length, in_file_alignment);
+        data_header->pointer_to_raw_data = data_file_start;
     }
 
     Section_Header* pdata_header = &section_headers[section_index];
@@ -8074,7 +8018,7 @@ bool write_executable(u8* path, Context* context) {
     coff.section_count = section_count;
 
     image.size_of_code = text_length;
-    image.size_of_initialized_data = rodata_length + rwdata_length + idata_length + pdata_length;
+    image.size_of_initialized_data = data_length + idata_length + pdata_length;
     image.size_of_uninitialized_data = 0;
 
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
@@ -8112,8 +8056,7 @@ bool write_executable(u8* path, Context* context) {
 
     // Write data
     mem_copy(context->seg_text, output_file + text_file_start, text_length);
-    mem_copy(context->seg_rwdata, output_file + rwdata_file_start, rwdata_length);
-    mem_copy(context->seg_rodata, output_file + rodata_file_start, rodata_length);
+    mem_copy(context->seg_data, output_file + data_file_start, data_length);
     mem_copy(pdata, output_file + pdata_file_start, pdata_length);
     mem_copy(idata, output_file + idata_file_start, idata_length);
 
