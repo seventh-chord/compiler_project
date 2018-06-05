@@ -6,10 +6,19 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
+fn assert(condition: bool) {
+    if (!condition) {
+        print("Assertion failed\n");
+        ExitProcess(0);
+    }
+}
+
 let SEVEN = u64(u8(u64(3074504259546010887))); // evaluates to 7
 let EIGHT = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
+let NINE = nine();
+fn nine() -> u16 { return 3 * 3; }
 
-fn main() -> u8 {
+fn main() {
     //let nasty = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
     //let nasty = [3]u8 { 1, 2, 3 }[2];
 
@@ -41,24 +50,19 @@ fn main() -> u8 {
 
     print_u64(16045690984503098046, 16); print("\n");
     print_u64(u64(-u32(11)), 10); print("\n");
-    print_u64(u64(SEVEN), 10); print("\n");
-    print_u64(u64(EIGHT), 10); print("\n");
+    print_u64(u64(SEVEN), 10); print(", ");
+    print_u64(u64(EIGHT), 10); print(", ");
+    print_u64(u64(NINE), 10); print("\n");
 
     test_fancy_casts();
-
     say_my_name();
+    test_is_prime();
 
     ExitProcess(0);
 }
 
-let STDOUT_KEY = u32(-11);
-let stdout_handle: u64;
-
+let stdout_handle = GetStdHandle(u32(-11));
 fn print(string: *u8) {
-    if (stdout_handle == 0) {
-        stdout_handle = GetStdHandle(STDOUT_KEY);
-    }
-
     let length: u32 = 0;
     let s = string;
     for (*s != 0) {
@@ -188,12 +192,32 @@ fn test_fancy_casts() {
 }
 
 
-let my_name_a = "foo\n";
+let my_name_a = "my name is \n\0 this won't show up due to the \0 earlier";
 let my_name_b = "__seventh-chord\n" + 2;
 
 fn say_my_name() {
     print(my_name_a);
     print(my_name_b);
+}
+
+fn test_is_prime() {
+    assert(is_prime(53));
+    assert(is_prime(139));
+    assert(is_prime(367));
+    assert(!is_prime(65));
+    assert(!is_prime(84));
+    assert(!is_prime(33));
+}
+
+fn is_prime(a: u64) -> bool {
+    let b = a - 1;
+    for (b > 1) {
+        if (a % b == 0) {
+            return false;
+        }
+        b -= 1;
+    }
+    return true;
 }
 
 /*

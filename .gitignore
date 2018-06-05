@@ -2,5 +2,4 @@
 .vscode
 build
 out.exe
-print.exe
 reference/*.pdf

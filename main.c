@@ -774,6 +774,9 @@ typedef struct Token {
         token_keyword_if,
         token_keyword_else,
         token_keyword_for,
+        token_keyword_return,
+        token_keyword_continue,
+        token_keyword_break,
         token_keyword_null,
         token_keyword_true,
         token_keyword_false,
@@ -842,6 +845,9 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_keyword_if]           = "if",
     [token_keyword_else]         = "else",
     [token_keyword_for]          = "for",
+    [token_keyword_return]       = "return",
+    [token_keyword_continue]     = "continue",
+    [token_keyword_break]        = "break",
     [token_keyword_true]         = "true",
     [token_keyword_false]        = "false",
     [token_keyword_null]         = "null",
@@ -1241,6 +1247,10 @@ struct Stmt {
         stmt_block,
         stmt_if,
         stmt_loop,
+
+        stmt_return,
+        stmt_break,
+        stmt_continue,
     } kind;
 
     union {
@@ -1270,6 +1280,8 @@ struct Stmt {
             Expr* condition;
             Stmt* body;
         } loop;
+
+        Expr* return_value;
     };
 
     File_Pos pos;
@@ -1528,6 +1540,13 @@ typedef struct Func {
 } Func;
 
 
+typedef struct On_Scope_Exit On_Scope_Exit;
+struct On_Scope_Exit {
+    u32 op_index;
+    On_Scope_Exit* next;
+};
+
+
 typedef enum X64_Reg {
     reg_rax, reg_rcx, reg_rdx, reg_rbx,
     reg_rsp, reg_rbp, reg_rsi, reg_rdi,
@@ -1599,6 +1618,7 @@ typedef struct Context {
     Var* tmp_vars; // stretchy-buffer
     Op* tmp_ops; // stretchy-buffer, linearized from of stmts
     Tmp* tmp_tmps; // stretchy-buffer, also built during op generation
+    On_Scope_Exit* on_scope_exit;
 
     // NB the first 'PRIMITIVE_COUNT' elements are the respective primitives, which
     // simplifies refering directly to primitives: A type index of 'primitive_i64' points
@@ -1616,6 +1636,12 @@ typedef struct Context {
     Jump_Fixup* jump_fixups; // stretchy-buffer
 } Context;
 
+
+
+void add_on_scope_exit(Context* context, On_Scope_Exit* new) {
+    new->next = context->on_scope_exit;
+    context->on_scope_exit = new;
+}
 
 // NB This currently just assumes we are trying to import a function. In the future we might want to support importing
 // other items, though we probably want to find an example of that first, so we know what we are doing!
@@ -1993,6 +2019,19 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
             printf("}");
         } break;
+
+        case stmt_return: {
+            if (stmt->return_value != null) {
+                printf("return ");
+                print_expr(context, func, stmt->return_value);
+                printf(";");
+            } else {
+                printf("return;");
+            }
+        } break;
+
+        case stmt_continue: printf("continue;"); break;
+        case stmt_break:    printf("break;"); break;
 
         case stmt_end: printf("<end>"); break;
 
@@ -2671,9 +2710,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                         could_parse = true;
                         expect_value = true;
+                        t += 1;
                     }
-
-                    t += 1;
                 } break;
             }
         } else {
@@ -2744,9 +2782,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         shunting_yard_push_op(context, yard, op);
                         could_parse = true;
                         expect_value = true;
+                        t += 1;
                     }
-
-                    t += 1;
                 } break;
             }
         }
@@ -2763,6 +2800,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
             printf(" but got ");
             print_token(context->string_table, t);
             printf(" (Line %u)\n", (u64) t->pos.line);
+
+            t += 1;
             *length = t - t_start;
             return null;
         }
@@ -2884,308 +2923,352 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
 
     while (true) {
         // Semicolons are just empty statements, skip them
-        if (t->kind == token_semicolon) {
+        while (t->kind == token_semicolon) {
             t += 1;
             continue;
         }
 
         Token* t_start = t;
+        stmt->pos = t->pos;
 
-        // End of a block
-        if (t->kind == token_bracket_curly_close) {
-            stmt->kind = stmt_end;
+        switch (t->kind) {
+            case token_bracket_curly_close: {
+                stmt->kind = stmt_end;
+            } break;
 
-        // Basic blocks
-        } else if (t->kind == token_bracket_curly_open) {
-            u32 block_length = 0;
-            Stmt* inner = parse_basic_block(context, t, &block_length);
-            t += block_length;
-            if (inner == null) {
-                *length = t - t_first_stmt_start;
-                return null;
-            }
-
-            stmt->kind = stmt_block;
-            stmt->block.inner = inner;
-
-        // Control flow - if
-        } else if (t->kind == token_keyword_if) {
-            Stmt* if_stmt = stmt;
-
-            while (true) {
-                if_stmt->kind = stmt_if;
-
-                t += 1;
-
-                if (!expect_single_token(context, t, '(', "before condition")) {
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-
-                t += 1;
-
-                u32 condition_length = 0;
-                if_stmt->conditional.condition = parse_expr(context, t, &condition_length);
-                t += condition_length;
-                if (if_stmt->conditional.condition == null) {
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-
-                if (!expect_single_token(context, t, ')', "after condition")) {
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-
-                t += 1;
-
+            case token_bracket_curly_open: {
                 u32 block_length = 0;
-                if_stmt->conditional.then = parse_basic_block(context, t, &block_length);
+                Stmt* inner = parse_basic_block(context, t, &block_length);
                 t += block_length;
-                if (if_stmt->conditional.then == null) {
+                if (inner == null) {
                     *length = t - t_first_stmt_start;
                     return null;
                 }
 
-                bool parse_another_if = false;
-                if (t->kind == token_keyword_else) {
+                stmt->kind = stmt_block;
+                stmt->block.inner = inner;
+            } break;
+
+            case token_keyword_if: {
+                Stmt* if_stmt = stmt;
+
+                while (true) {
+                    if_stmt->kind = stmt_if;
+
                     t += 1;
 
-                    switch (t->kind) {
-                        case token_bracket_curly_open: {
-                            u32 block_length = 0;
-                            if_stmt->conditional.else_then = parse_basic_block(context, t, &block_length);
-                            t += block_length;
-                            if (if_stmt->conditional.else_then == null) {
+                    if (!expect_single_token(context, t, '(', "before condition")) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    t += 1;
+
+                    u32 condition_length = 0;
+                    if_stmt->conditional.condition = parse_expr(context, t, &condition_length);
+                    t += condition_length;
+                    if (if_stmt->conditional.condition == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    if (!expect_single_token(context, t, ')', "after condition")) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    t += 1;
+
+                    u32 block_length = 0;
+                    if_stmt->conditional.then = parse_basic_block(context, t, &block_length);
+                    t += block_length;
+                    if (if_stmt->conditional.then == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    bool parse_another_if = false;
+                    if (t->kind == token_keyword_else) {
+                        t += 1;
+
+                        switch (t->kind) {
+                            case token_bracket_curly_open: {
+                                u32 block_length = 0;
+                                if_stmt->conditional.else_then = parse_basic_block(context, t, &block_length);
+                                t += block_length;
+                                if (if_stmt->conditional.else_then == null) {
+                                    *length = t - t_first_stmt_start;
+                                    return null;
+                                }
+                            } break;
+
+                            case token_keyword_if: {
+                                parse_another_if = true;
+
+                                Stmt* next_if_stmt = arena_new(&context->arena, Stmt);
+                                next_if_stmt->next = arena_new(&context->arena, Stmt); // Sentinel
+
+                                if_stmt->conditional.else_then = next_if_stmt;
+                                if_stmt = next_if_stmt;
+                            } break;
+
+                            default: {
+                                printf("Expected another if-statmenet or a basic block after else, but got ");
+                                print_token(context->string_table, t);
+                                printf(" (Line %u)\n", t->pos.line);
                                 *length = t - t_first_stmt_start;
                                 return null;
-                            }
-                        } break;
+                            } break;
+                        }
+                    }
 
-                        case token_keyword_if: {
-                            parse_another_if = true;
+                    if(!parse_another_if) break;
+                }
+            } break;
 
-                            Stmt* next_if_stmt = arena_new(&context->arena, Stmt);
-                            next_if_stmt->next = arena_new(&context->arena, Stmt); // Sentinel
+            case token_keyword_for: {
+                t += 1;
 
-                            if_stmt->conditional.else_then = next_if_stmt;
-                            if_stmt = next_if_stmt;
-                        } break;
-
-                        default: {
-                            printf("Expected another if-statmenet or a basic block after else, but got ");
-                            print_token(context->string_table, t);
-                            printf(" (Line %u)\n", t->pos.line);
+                switch (t->kind) {
+                    // Infinite loop
+                    case '{': {
+                        u32 body_length = 0;
+                        Stmt* body = parse_basic_block(context, t, &body_length);
+                        t += body_length;
+                        if (body == null) {
                             *length = t - t_first_stmt_start;
                             return null;
-                        } break;
+                        }
+
+                        stmt->kind = stmt_loop;
+                        stmt->loop.condition = null;
+                        stmt->loop.body = body;
+                    } break;
+
+                    case '(': {
+                        t += 1;
+
+                        u32 first_length = 0;
+                        Expr* first = parse_expr(context, t, &first_length);
+                        t += first_length;
+                        if (first == null) {
+                            *length = t - t_first_stmt_start;
+                            return null;
+                        }
+                        
+                        // TODO for-each and c-style loops
+
+                        if (!expect_single_token(context, t, ')', "after loop condition")) {
+                            *length = t - t_first_stmt_start;
+                            return null;
+                        }
+                        t += 1;
+
+                        u32 body_length = 0;
+                        Stmt* body = parse_basic_block(context, t, &body_length);
+                        t += body_length;
+                        if (body == null) {
+                            *length = t - t_first_stmt_start;
+                            return null;
+                        }
+
+                        stmt->kind = stmt_loop;
+                        stmt->loop.condition = first;
+                        stmt->loop.body = body;
+                    } break;
+
+                    default: {
+                        printf("Expected opening parenthesis '(' or curly brace '{' after for, but got ");
+                        print_token(context->string_table, t);
+                        printf(" (Line %u)\n", t->pos.line);
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    } break;
+                }
+            } break;
+
+            case token_keyword_return: {
+                stmt->kind = stmt_return;
+                t += 1;
+
+                if (t->kind != token_semicolon) {
+                    u32 expr_length = 0;
+                    stmt->return_value = parse_expr(context, t, &expr_length);
+                    t += expr_length;
+                    if (stmt->return_value == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
                     }
                 }
 
-                if(!parse_another_if) break;
-            }
+                if (!expect_single_token(context, t, token_semicolon, "after variable declaration")) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+                t += 1;
+            } break;
 
-        // Control flow - for
-        } else if (t->kind == token_keyword_for) {
-            t += 1;
+            case token_keyword_break: {
+                stmt->kind = stmt_break;
+                t += 1;
 
-            switch (t->kind) {
-                // Infinite loop
-                case '{': {
-                    u32 body_length = 0;
-                    Stmt* body = parse_basic_block(context, t, &body_length);
-                    t += body_length;
-                    if (body == null) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
+                if (!expect_single_token(context, t, token_semicolon, "after variable declaration")) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+                t += 1;
+            } break;
 
-                    stmt->kind = stmt_loop;
-                    stmt->loop.condition = null;
-                    stmt->loop.body = body;
-                } break;
+            case token_keyword_continue: {
+                stmt->kind = stmt_continue;
+                t += 1;
 
-                case '(': {
-                    t += 1;
+                if (!expect_single_token(context, t, token_semicolon, "after variable declaration")) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+                t += 1;
+            } break;
 
-                    u32 first_length = 0;
-                    Expr* first = parse_expr(context, t, &first_length);
-                    t += first_length;
-                    if (first == null) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-                    
-                    // TODO for-each and c-style loops
+            case token_keyword_let: {
+                t += 1;
 
-                    if (!expect_single_token(context, t, ')', "after loop condition")) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-                    t += 1;
-
-                    u32 body_length = 0;
-                    Stmt* body = parse_basic_block(context, t, &body_length);
-                    t += body_length;
-                    if (body == null) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-
-                    stmt->kind = stmt_loop;
-                    stmt->loop.condition = first;
-                    stmt->loop.body = body;
-                } break;
-
-                default: {
-                    printf("Expected opening parenthesis '(' or curly brace '{' after for, but got ");
+                if (t->kind != token_identifier) {
+                    printf("Expected variable name, but found ");
                     print_token(context->string_table, t);
                     printf(" (Line %u)\n", t->pos.line);
                     *length = t - t_first_stmt_start;
                     return null;
-                } break;
-            }
-
-        // Variable declaration
-        } else if (t->kind == token_keyword_let) {
-            t += 1;
-
-            if (t->kind != token_identifier) {
-                printf("Expected variable name, but found ");
-                print_token(context->string_table, t);
-                printf(" (Line %u)\n", t->pos.line);
-                *length = t - t_first_stmt_start;
-                return null;
-            }
-            u32 name_index = t->identifier_string_table_index;
-            t += 1;
-
-            u32 type_index = 0;
-            if (t->kind == token_colon) {
+                }
+                u32 name_index = t->identifier_string_table_index;
                 t += 1;
 
-                u32 type_length = 0;
-                type_index = parse_type(context, t, &type_length);
-                if (type_index == U32_MAX) {
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-                t += type_length;
-            }
-
-            Expr* expr = null;
-            if (t->kind == token_assign) {
-                t += 1;
-
-                u32 right_length = 0;
-                expr = parse_expr(context, t, &right_length); 
-                if (expr == null) {
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-                t += right_length;
-            }
-
-            if (expr == null && type_index == null) {
-                u8* name = string_table_access(context->string_table, name_index);
-                printf("Declared variable '%s' without specifying type or initial value. Hence can't infer type (Line %u)\n", name, t->pos.line);
-                *length = t - t_first_stmt_start;
-                return null;
-            }
-
-            u32 var_index = buf_length(context->tmp_vars);
-            buf_push(context->tmp_vars, ((Var) {
-                .name = name_index,
-                .declaration_pos = stmt->pos,
-                .type_index = type_index,
-            }));
-
-            assert(buf_length(context->tmp_vars) < MAX_LOCAL_VARS);
-
-            stmt->kind = stmt_declaration;
-            stmt->declaration.var_index = var_index;
-            stmt->declaration.right = expr;
-
-            if (!expect_single_token(context, t, token_semicolon, "after variable declaration")) {
-                *length = t - t_first_stmt_start;
-                return null;
-            }
-
-            t += 1;
-
-        // Assignment or free standing expression
-        } else {
-            u32 left_length = 0;
-            Expr* left = parse_expr(context, t, &left_length);
-            t += left_length;
-
-            if (left == null) {
-                *length = t - t_first_stmt_start;
-                return null;
-            }
-
-            switch (t->kind) {
-                case token_assign: {
+                u32 type_index = 0;
+                if (t->kind == token_colon) {
                     t += 1;
 
-                    u32 right_length = 0;
-                    Expr* right = parse_expr(context, t, &right_length);
-                    t += right_length;
-
-                    if (right == null) {
+                    u32 type_length = 0;
+                    type_index = parse_type(context, t, &type_length);
+                    if (type_index == U32_MAX) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
+                    t += type_length;
+                }
 
-                    stmt->kind = stmt_assignment;
-                    stmt->assignment.left = left;
-                    stmt->assignment.right = right;
-                } break;
-
-                case token_add_assign:
-                case token_sub_assign:
-                {
-                    Binary_Op op;
-                    switch (t->kind) {
-                        case token_add_assign: op = binary_add; break;
-                        case token_sub_assign: op = binary_sub; break;
-                        default: assert(false);
-                    }
-
+                Expr* expr = null;
+                if (t->kind == token_assign) {
                     t += 1;
 
                     u32 right_length = 0;
-                    Expr* right = parse_expr(context, t, &right_length);
-                    t += right_length;
-
-                    if (right == null) {
+                    expr = parse_expr(context, t, &right_length); 
+                    if (expr == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
+                    t += right_length;
+                }
 
-                    Expr* binary = arena_new(&context->arena, Expr);
-                    binary->kind = expr_binary;
-                    binary->pos = left->pos;
-                    binary->binary.left = left;
-                    binary->binary.right = right;
-                    binary->binary.op = op;
+                if (expr == null && type_index == null) {
+                    u8* name = string_table_access(context->string_table, name_index);
+                    printf("Declared variable '%s' without specifying type or initial value. Hence can't infer type (Line %u)\n", name, t->pos.line);
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
 
-                    stmt->kind = stmt_assignment;
-                    stmt->assignment.left = left;
-                    stmt->assignment.right = binary;
-                } break;
+                u32 var_index = buf_length(context->tmp_vars);
+                buf_push(context->tmp_vars, ((Var) {
+                    .name = name_index,
+                    .declaration_pos = stmt->pos,
+                    .type_index = type_index,
+                }));
 
-                default: {
-                    stmt->kind = stmt_expr;
-                    stmt->expr = left;
-                } break;
-            }
+                assert(buf_length(context->tmp_vars) < MAX_LOCAL_VARS);
 
-            if (!expect_single_token(context, t, token_semicolon, "after statement")) {
-                *length = t - t_first_stmt_start;
-                return null;
-            }
-            t += 1;
+                stmt->kind = stmt_declaration;
+                stmt->declaration.var_index = var_index;
+                stmt->declaration.right = expr;
+
+                if (!expect_single_token(context, t, token_semicolon, "after variable declaration")) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+                t += 1;
+            } break;
+
+            default: {
+                u32 left_length = 0;
+                Expr* left = parse_expr(context, t, &left_length);
+                t += left_length;
+
+                if (left == null) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+
+                switch (t->kind) {
+                    case token_assign: {
+                        t += 1;
+
+                        u32 right_length = 0;
+                        Expr* right = parse_expr(context, t, &right_length);
+                        t += right_length;
+
+                        if (right == null) {
+                            *length = t - t_first_stmt_start;
+                            return null;
+                        }
+
+                        stmt->kind = stmt_assignment;
+                        stmt->assignment.left = left;
+                        stmt->assignment.right = right;
+                    } break;
+
+                    case token_add_assign:
+                    case token_sub_assign:
+                    {
+                        Binary_Op op;
+                        switch (t->kind) {
+                            case token_add_assign: op = binary_add; break;
+                            case token_sub_assign: op = binary_sub; break;
+                            default: assert(false);
+                        }
+
+                        t += 1;
+
+                        u32 right_length = 0;
+                        Expr* right = parse_expr(context, t, &right_length);
+                        t += right_length;
+
+                        if (right == null) {
+                            *length = t - t_first_stmt_start;
+                            return null;
+                        }
+
+                        Expr* binary = arena_new(&context->arena, Expr);
+                        binary->kind = expr_binary;
+                        binary->pos = left->pos;
+                        binary->binary.left = left;
+                        binary->binary.right = right;
+                        binary->binary.op = op;
+
+                        stmt->kind = stmt_assignment;
+                        stmt->assignment.left = left;
+                        stmt->assignment.right = binary;
+                    } break;
+
+                    default: {
+                        stmt->kind = stmt_expr;
+                        stmt->expr = left;
+                    } break;
+                }
+
+                if (!expect_single_token(context, t, token_semicolon, "after statement")) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+                t += 1;
+            } break;
         }
 
         // Try parsing more statements after this one
@@ -3343,6 +3426,10 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     t += parameter_length + 2;
 
     // Return type
+    func->signature.has_output = false;
+    func->signature.output_type_index = primitive_void;
+    func->body.output_var_index = U32_MAX;
+
     if (t->kind == token_arrow) {
         t += 1;
 
@@ -3352,7 +3439,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
         if (output_type_index == U32_MAX) {
             return null;
-        } else {
+        } else if (context->type_buf[output_type_index] != primitive_void) {
             func->signature.has_output = true;
             func->signature.output_type_index = output_type_index;
             func->body.output_var_index = buf_length(context->tmp_vars);
@@ -3362,10 +3449,6 @@ Func* parse_function(Context* context, Token* t, u32* length) {
             output_var.type_index = output_type_index;
             buf_push(context->tmp_vars, output_var);
         }
-    } else {
-        func->signature.has_output = false;
-        func->signature.output_type_index = primitive_void;
-        func->body.output_var_index = U32_MAX;
     }
 
     // Functions without a body
@@ -3505,17 +3588,20 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    enum { KEYWORD_COUNT = 9 };
+    enum { KEYWORD_COUNT = 12 };
     u32 keyword_token_table[KEYWORD_COUNT][2] = {
-        { token_keyword_fn,     string_table_intern_cstr(&context->string_table, "fn") },
-        { token_keyword_extern, string_table_intern_cstr(&context->string_table, "extern") },
-        { token_keyword_let,    string_table_intern_cstr(&context->string_table, "let") },
-        { token_keyword_if,     string_table_intern_cstr(&context->string_table, "if") },
-        { token_keyword_else,   string_table_intern_cstr(&context->string_table, "else") },
-        { token_keyword_for,    string_table_intern_cstr(&context->string_table, "for") },
-        { token_keyword_null,   string_table_intern_cstr(&context->string_table, "null") },
-        { token_keyword_true,   string_table_intern_cstr(&context->string_table, "true") },
-        { token_keyword_false,  string_table_intern_cstr(&context->string_table, "false") },
+        { token_keyword_fn,       string_table_intern_cstr(&context->string_table, "fn") },
+        { token_keyword_extern,   string_table_intern_cstr(&context->string_table, "extern") },
+        { token_keyword_let,      string_table_intern_cstr(&context->string_table, "let") },
+        { token_keyword_if,       string_table_intern_cstr(&context->string_table, "if") },
+        { token_keyword_else,     string_table_intern_cstr(&context->string_table, "else") },
+        { token_keyword_for,      string_table_intern_cstr(&context->string_table, "for") },
+        { token_keyword_return,   string_table_intern_cstr(&context->string_table, "return") },
+        { token_keyword_continue, string_table_intern_cstr(&context->string_table, "continue") },
+        { token_keyword_break,    string_table_intern_cstr(&context->string_table, "break") },
+        { token_keyword_null,     string_table_intern_cstr(&context->string_table, "null") },
+        { token_keyword_true,     string_table_intern_cstr(&context->string_table, "true") },
+        { token_keyword_false,    string_table_intern_cstr(&context->string_table, "false") },
     };
 
     init_primitive_names(context->primitive_names, &context->string_table);
@@ -3578,7 +3664,6 @@ bool build_ast(Context* context, u8* path) {
             u8* identifier = &file[first];
 
             u32 string_table_index = string_table_intern(&context->string_table, identifier, length);
-
 
             bool is_keyword = false;
             for (u32 k = 0; k < KEYWORD_COUNT; k += 1) {
@@ -3925,25 +4010,26 @@ bool build_ast(Context* context, u8* path) {
             u32 j = 0, i = 0;
             while (i < length) {
                 if (start[i] == '\\') {
+                    i += 1;
                     collapsed_length -= 1;
 
-                    u8 c = U8_MAX;
-                    switch (start[i + 1]) {
-                        case 'n': c = 0x0a; break;
-                        case 'r': c = 0x0d; break;
-                        case 't': c = 0x09; break;
-                        case '0': c = 0x00; break;
+                    u8 escaped = start[i];
+                    u8 resolved = U8_MAX;
+                    switch (escaped) {
+                        case 'n': resolved = 0x0a; i += 1; break;
+                        case 'r': resolved = 0x0d; i += 1; break;
+                        case 't': resolved = 0x09; i += 1; break;
+                        case '0': resolved = 0x00; i += 1; break;
                     }
 
-                    if (c == U8_MAX) {
-                        printf("Invalid escape sequence: '\\%c' (Line %u)\n", start[i + 1], (u64) file_pos.line);
+                    if (resolved == U8_MAX) {
+                        printf("Invalid escape sequence: '\\%c' (Line %u)\n", escaped, (u64) file_pos.line);
                         valid = false;
                         break;
                     }
 
-                    arena_pointer[j] = c;
+                    arena_pointer[j] = resolved;
                     j += 1;
-                    i += 2;
                 } else {
                     arena_pointer[j] = start[i];
                     i += 1;
@@ -4755,6 +4841,48 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 if (!typecheck_stmt(info, inner)) return false;
             }
             typecheck_scope_pop(info);
+        } break;
+
+        case stmt_return: {
+            if (!info->func->signature.has_output) {
+                if (stmt->return_value != null) {
+                    u8* name = string_table_access(info->context->string_table, info->func->name);
+                    printf("Function '%s' is not declared to return anything, but tried to return a value (Line %u)\n", name, (u64) stmt->pos.line);
+                    return false;
+                }
+
+            } else {
+                u32 expected_type_index = info->func->signature.output_type_index;
+
+                if (stmt->return_value == null) {
+                    u8* name = string_table_access(info->context->string_table, info->func->name);
+                    printf("Function '%s' is declared to return a ", name);
+                    print_type(info->context, expected_type_index);
+                    printf(", but tried to return a value. value (Line %u)\n", (u64) stmt->pos.line);
+                    return false;
+                }
+
+                if (!typecheck_expr(info, stmt->return_value, expected_type_index)) {
+                    return false;
+                }
+
+                if (!type_cmp(info->context, expected_type_index, stmt->return_value->type_index)) {
+                    u8* name = string_table_access(info->context->string_table, info->func->name);
+                    printf("Expected ");
+                    print_type(info->context, expected_type_index);
+                    printf(" but got ");
+                    print_type(info->context, stmt->return_value->type_index);
+                    printf(" for return value in function '%s' (Line %u)\n", name, stmt->pos.line);
+                    return false;
+                }
+            }
+        } break;
+
+        case stmt_continue:
+        case stmt_break:
+        {
+            // TODO check if the statement actually is inside a loop we can break/continue from
+            unimplemented();
         } break;
 
         default: assert(false);
@@ -6021,6 +6149,37 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             }
         } break;
 
+        case stmt_return: {
+            if (stmt->return_value != null) {
+                assert(func->signature.has_output);
+
+                Expr left = {0};
+                left.kind = expr_variable;
+                left.variable.index = func->body.output_var_index;
+                left.flags |= EXPR_FLAG_ASSIGNABLE;
+                left.type_index = func->signature.output_type_index;
+                left.pos = stmt->pos;
+
+                linearize_assignment(context, &left, stmt->return_value);
+            }
+
+            Op op = {0};
+            op.kind = op_jump;
+            op.jump.conditional = false;
+            u32 jump_index = buf_length(context->tmp_ops);
+            buf_push(context->tmp_ops, op);
+
+            On_Scope_Exit* hook = arena_new(&context->arena, On_Scope_Exit);
+            hook->op_index = jump_index;
+            add_on_scope_exit(context, hook);
+        } break;
+
+        case stmt_break:
+        case stmt_continue:
+        {
+            unimplemented();
+        } break;
+
         default: assert(false);
     }
 }
@@ -6037,6 +6196,13 @@ void build_intermediate(Context* context) {
         for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
             linearize_stmt(context, func, stmt);
         }
+
+        for (On_Scope_Exit* hook = context->on_scope_exit; hook != null; hook = hook->next) {
+            Op* jump = &context->tmp_ops[hook->op_index];
+            assert(jump->kind == op_jump);
+            jump->jump.to_op = buf_length(context->tmp_ops);
+        }
+        context->on_scope_exit = null;
 
         buf_foreach (Tmp, tmp, context->tmp_tmps) assert(!tmp->currently_allocated);
 
