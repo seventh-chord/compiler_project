@@ -7783,7 +7783,10 @@ bool write_executable(u8* path, Context* context) {
     if (data_length > 0) section_count += 1;
 
     u64 in_file_alignment = 0x200;
+    // NB If this becomes lower than the page size, stuff like page protection won't work anymore. That will also
+    // disable address space layout randomization.
     u64 in_memory_alignment = 0x1000;
+
     u64 dos_prepend_size = 200;
     u64 total_header_size = dos_prepend_size + sizeof(COFF_Header) + sizeof(Image_Header) + section_count*sizeof(Section_Header);
 

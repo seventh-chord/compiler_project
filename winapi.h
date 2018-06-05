@@ -114,15 +114,34 @@ struct PROCESSINFO {
 
 WINAPI_PRE u32 WINAPI_POST WaitForSingleObject(Handle handle, u32 milliseconds);
 
-
-
 // NB these functions in reality take a LARGE_INTEGER*, but LARGE_INTEGER is a union of a single
 // 64 bit int and two 32 bit ints, to make the function work on windows. That means we can just use
 // a single 64 bit int.
 WINAPI_PRE bool WINAPI_POST QueryPerformanceCounter(i64* counter);
 WINAPI_PRE bool WINAPI_POST QueryPerformanceFrequency(i64* frequency);
 
-
-
 WINAPI_PRE void WINAPI_POST DebugBreak();
 WINAPI_PRE void WINAPI_POST OutputDebugStringA(u8* string);
+
+
+typedef struct System_Info {
+    union {
+        u32  oem_id;
+        struct {
+            u16 processor_architecture;
+            u16 reserved;
+        };
+    };
+    u32 page_size;
+    void* min_app_address;
+    void* max_app_address;
+    u32* active_processor_mask;
+    u32 processor_count;
+    u32 processor_type;
+    u32 alloc_granularity;
+    u16 processor_level;
+    u16 processor_revision;
+} System_Info;
+
+WINAPI_PRE void WINAPI_POST GetSystemInfo(System_Info* info);
+
