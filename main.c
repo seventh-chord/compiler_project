@@ -1,3 +1,4 @@
+
 #define null 0
 #define true 1
 #define false 0
@@ -222,7 +223,7 @@ void* _buf_grow(void* buf, u64 new_len, u64 element_size) {
 
 // Appends a c-string onto a stretchy buffer. Does not push the null terminator!
 void str_push_cstr(u8** buf, u8* cstr) {
-    u32 cstr_length = str_length(cstr);
+    u64 cstr_length = str_length(cstr);
     if (cstr_length == 0) return;
 
     _buf_fit(*buf, cstr_length);
@@ -1046,7 +1047,6 @@ bool primitive_is_signed(Primitive primitive) {
         } break;
     }
 }
-
 
 u64 SIZE_MASKS[9] = {
     0x0000000000000000,
@@ -4745,13 +4745,121 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
             }
         } break;
 
+        case expr_cast: {
+            Primitive primitive = info->context->type_buf[expr->type_index];
+            Primitive inner_primitive = info->context->type_buf[expr->cast_from->type_index];
+
+            u64 inner_type_size = type_size_of(info->context, expr->cast_from->type_index);
+            assert(type_size <= 8 && inner_type_size <= 8);
+            assert(primitive_is_integer(primitive) && primitive_is_integer(inner_primitive));
+
+            u64 inner = 0;
+            if (!eval_compile_time_expr(info, expr->cast_from, (u8*) &inner)) return false;
+
+            u64 after_cast;
+            if (primitive_is_signed(primitive) && primitive_is_signed(inner_primitive)) {
+                i64 inner_signed;
+                // Sign-extend
+                switch (inner_type_size) {
+                    case 1: inner_signed = (i64) *((i8*)  &inner); break;
+                    case 2: inner_signed = (i64) *((i16*) &inner); break;
+                    case 4: inner_signed = (i64) *((i32*) &inner); break;
+                    case 8: inner_signed = (i64) *((i64*) &inner); break;
+                    default: assert(false);
+                }
+                after_cast = *((u64*) &inner_signed);
+            } else {
+                switch (inner_type_size) {
+                    case 1: after_cast = (u64) *((u8*)  &inner); break;
+                    case 2: after_cast = (u64) *((u16*) &inner); break;
+                    case 4: after_cast = (u64) *((u32*) &inner); break;
+                    case 8: after_cast = (u64) *((u64*) &inner); break;
+                    default: assert(false);
+                }
+            }
+
+            switch (type_size) {
+                case 1: *((u8*)  result_into) = (u8)  after_cast; break;
+                case 2: *((u16*) result_into) = (u16) after_cast; break;
+                case 4: *((u32*) result_into) = (u32) after_cast; break;
+                case 8: *((u64*) result_into) = (u64) after_cast; break;
+                default: assert(false);
+            }
+
+            return true;
+        } break;
+
+        case expr_subscript: {
+            u64 array_size = type_size_of(info->context, expr->subscript.array->type_index);
+            u64 index_size = type_size_of(info->context, expr->subscript.index->type_index);
+
+            assert(index_size <= 8);
+
+            u8* inner_data = arena_alloc(&info->context->stack, array_size);
+            if (!eval_compile_time_expr(info, expr->subscript.array, inner_data)) return false;
+
+            u64 index = 0;
+            if (!eval_compile_time_expr(info, expr->subscript.index, (u8*) &index)) return false;
+
+            u32 array_type_index = expr->subscript.array->type_index;
+            Primitive compound_literal_primitive = info->context->type_buf[array_type_index];
+            assert(compound_literal_primitive == primitive_array);
+
+            u32 child_type_index = array_type_index + sizeof(u64) + 1;
+            u64 child_size = type_size_of(info->context, child_type_index);
+            assert(child_size == type_size);
+
+            mem_copy(inner_data + index*child_size, result_into, type_size);
+
+            return true;
+        } break;
+
+        case expr_unary: {
+            Primitive primitive = info->context->type_buf[expr->type_index];
+            Primitive inner_primitive = info->context->type_buf[expr->unary.inner->type_index];
+
+            u64 inner_type_size = type_size_of(info->context, expr->unary.inner->type_index);
+
+            if (expr->unary.op == unary_dereference) {
+                unimplemented(); // TODO
+            } else if (expr->unary.op == unary_address_of) {
+                unimplemented(); // TODO
+            } else {
+                assert(inner_type_size <= 8);
+                assert(inner_type_size == type_size);
+
+                if (!eval_compile_time_expr(info, expr->unary.inner, result_into)) return false;
+
+                switch (expr->unary.op) {
+                    case unary_neg: {
+                        switch (type_size) {
+                            case 1: *((i8*)  result_into) = -(*((i8*)  result_into)); break;
+                            case 2: *((i16*) result_into) = -(*((i16*) result_into)); break;
+                            case 4: *((i32*) result_into) = -(*((i32*) result_into)); break;
+                            case 8: *((i64*) result_into) = -(*((i64*) result_into)); break;
+                            default: assert(false);
+                        }
+                    } break;
+
+                    case unary_not: {
+                        assert(inner_type_size == 1);
+                        *result_into = (*result_into == 0)? 1 : 0;
+                    } break;
+
+                    default: assert(false);
+                }
+            }
+
+            return true;
+        } break;
+
         case expr_binary: {
             assert(expr->binary.left->type_index == expr->binary.right->type_index);
             u64 child_size = type_size_of(info->context, expr->binary.left->type_index);
 
             assert(type_size <= 8 && child_size <= 8);
-            u64 left_result, right_result;
 
+            u64 left_result, right_result;
             if (!eval_compile_time_expr(info, expr->binary.left, (u8*) &left_result)) return false;
             if (!eval_compile_time_expr(info, expr->binary.right, (u8*) &right_result)) return false;
 
@@ -4831,10 +4939,19 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
 
             return true;
         } break;
-    }
 
-    printf("Can't evaluate this expression at compile time yet (Line %u)\n", expr->pos.line);
-    return false;
+        case expr_string_literal: {
+            unimplemented(); // TODO
+            return true;
+        } break;
+
+        case expr_call: {
+            printf("Can't evaluate function calls at compile time (Line %u)\n", expr->pos.line);
+            return false;
+        } break;
+
+        default: assert(false); return false;
+    }
 }
 
 bool typecheck(Context* context) {
@@ -4900,11 +5017,15 @@ bool typecheck(Context* context) {
             bool could_init = eval_compile_time_expr(&info, global->initial_expr, result_into);
             arena_stack_pop(&context->stack);
 
-            if (!could_init) computed_value = false;
+            if (!could_init) {
+                computed_value = false;
+            }
         }
 
-        if (resolved_type && computed_value) {
+        if (computed_value) {
             global->valid = true;
+        } else {
+            valid = false;
         }
     }
 
@@ -5154,16 +5275,14 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_string_literal: {
             assert(!get_address);
 
-            bool writable = false; // Decides whether strings should be writable by user code
-
-            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, writable);
+            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, false);
             assert(data_offset <= U32_MAX);
 
             Op op = {0};
             op.kind = op_load_data;
             op.load_data.local = assign_to;
             op.load_data.data_offset = (u32) data_offset;
-            op.load_data.writable = writable;
+            op.load_data.writable = false;
             buf_push(context->tmp_ops, op);
         } break;
 
@@ -7573,9 +7692,7 @@ bool write_executable(u8* path, Context* context) {
     u64 idata_memory_start  = pdata_memory_start  + round_to_next(pdata_length,  in_memory_alignment);
 
     // Verify that fixups are not bogus data, so we don't have to do that later...
-    for (u64 i = 0; i < buf_length(context->fixups); i += 1) {
-        Fixup* fixup = &context->fixups[i];
-
+    buf_foreach (Fixup, fixup, context->fixups) {
         if (fixup->text_location >= text_length) {
             panic("Can't apply fixup at %x which is beyond end of text section at %x\n", fixup->text_location, text_length);
         }
@@ -7657,8 +7774,7 @@ bool write_executable(u8* path, Context* context) {
         entry->name_address          = idata_memory_start + name_table_start;
 
         // Apply fixups for this library
-        for (u64 k = 0; k < buf_length(context->fixups); k += 1) {
-            Fixup* fixup = &context->fixups[k];
+        buf_foreach (Fixup, fixup, context->fixups) {
             if (fixup->kind != fixup_imported_function || fixup->import_index.library != i) { continue; }
 
             u32 function = fixup->import_index.function;
@@ -7676,8 +7792,7 @@ bool write_executable(u8* path, Context* context) {
     u64 memory_image_size = idata_memory_start + round_to_next(idata_length, in_memory_alignment);
 
     // Apply data & function fixups
-    for (u64 i = 0; i < buf_length(context->fixups); i += 1) {
-        Fixup* fixup = &context->fixups[i];
+    buf_foreach (Fixup, fixup, context->fixups) {
         i32* text_value = (u32*) (context->seg_text + fixup->text_location);
 
         switch (fixup->kind) {

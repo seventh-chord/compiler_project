@@ -6,7 +6,8 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-const NULL = null;
+const SEVEN = u64(u8(u64(3074504259546010887))); // evaluates to 7
+const EIGHT = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
 
 fn main() -> u8 {
     if (seventy_two() != 72) {
@@ -37,15 +38,18 @@ fn main() -> u8 {
 
     print_u64(16045690984503098046, 16); print("\n");
     print_u64(u64(-u32(11)), 10); print("\n");
+    print_u64(u64(SEVEN), 10); print("\n");
+    print_u64(u64(EIGHT), 10); print("\n");
 
     ExitProcess(0);
 }
 
+const STDOUT_KEY = u32(-11);
 let stdout_handle: u64;
+
 fn print(string: *u8) {
     if (stdout_handle == 0) {
-        //stdout_handle = GetStdHandle(4294967285);
-        stdout_handle = GetStdHandle(-11);
+        stdout_handle = GetStdHandle(STDOUT_KEY);
     }
 
     let length: u32 = 0;
@@ -59,19 +63,19 @@ fn print(string: *u8) {
     WriteFile(stdout_handle, string, length, &written, null);
 }
 
-let print_u64_buffer: [30]u8;
 fn print_u64(value: u64, base: u64) {
+    let buffer: [30]u8;
 
     if (value == 0) {
-        print_u64_buffer[0] = 0x30; // TODO character literals
+        buffer[0] = 0x30; // TODO character literals
     } else {
         let i: u64 = 0;
         for (value > 0) {
             let char = u8(value % base);
             if (char <= 9) {
-                print_u64_buffer[i] = 0x30 + char;
+                buffer[i] = 0x30 + char;
             } else {
-                print_u64_buffer[i] = 0x61 + (char - 10);
+                buffer[i] = 0x61 + (char - 10);
             }
             value = value / base; // TODO operator /=
             i += 1;
@@ -80,16 +84,16 @@ fn print_u64(value: u64, base: u64) {
 
         let j: u64 = 0;
         for (j < i) {
-            let temp = print_u64_buffer[j];
-            print_u64_buffer[j] = print_u64_buffer[i];
-            print_u64_buffer[i] = temp;
+            let temp = buffer[j];
+            buffer[j] = buffer[i];
+            buffer[i] = temp;
 
             i -= 1;
             j += 1;
         }
     }
 
-    print(&print_u64_buffer);
+    print(&buffer);
 }
 
 
