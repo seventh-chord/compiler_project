@@ -871,7 +871,9 @@ typedef struct Global_Var {
     bool constant;
     u32 data_offset; // either seg_rwdata or seg_rodata, depending on constant
 
-    bool checked, valid;
+    bool checked;
+    bool valid;
+    bool compute_at_runtime;
 } Global_Var;
 
 
@@ -1595,6 +1597,7 @@ typedef struct Context {
 
     // AST & intermediate representation
     Func* funcs; // stretchy-buffer
+    u32 global_init_func_index; // 0 if we don't need it
 
     // These are only for temporary use, we copy to arena buffers & clear
     Global_Var* global_vars;
@@ -4778,8 +4781,14 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
     return true;
 }
 
+typedef enum Eval_Result {
+    eval_ok,
+    eval_bad,
+    eval_do_at_runtime,
+} Eval_Result;
+
 // NB This will allocate on context->stack, push/pop before/after
-bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
+Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
     u64 type_size = type_size_of(info->context, expr->type_index);
     assert(type_size > 0);
 
@@ -4787,7 +4796,7 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
         case expr_literal: {
             assert(type_size <= 8);
             mem_copy((u8*) &expr->literal.value, result_into, type_size);
-            return true;
+            return eval_ok;
         } break;
 
         case expr_variable: {
@@ -4795,7 +4804,15 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
                 u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
                 Global_Var* global = &info->context->global_vars[global_index];
 
-                if (!global->valid) {
+                if (global->compute_at_runtime) {
+                    return eval_do_at_runtime;
+                } else if (global->valid) {
+                    u64 other_size = type_size_of(info->context, global->var.type_index);
+                    assert(other_size == type_size);
+                    u8* other_value = &info->context->seg_rwdata[global->data_offset];
+                    mem_copy(other_value, result_into, type_size);
+                    return eval_ok;
+                } else {
                     if (!global->checked) {
                         u8* name = string_table_access(info->context->string_table, global->var.name);
                         printf(
@@ -4803,18 +4820,11 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
                             name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
                         );
                     }
-                    return false;
-                } else {
-                    u64 other_size = type_size_of(info->context, global->var.type_index);
-                    assert(other_size == type_size);
-
-                    u8* other_value = &info->context->seg_rwdata[global->data_offset];
-                    mem_copy(other_value, result_into, type_size);
-                    return true;
+                    return eval_bad;
                 }
             } else {
                 printf("Can't use local variables in constant expressions (Line %u)\n", expr->pos.line);
-                return false;
+                return eval_bad;
             }
         } break;
 
@@ -4827,7 +4837,8 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
             assert(primitive_is_integer(primitive) && primitive_is_integer(inner_primitive));
 
             u64 inner = 0;
-            if (!eval_compile_time_expr(info, expr->cast_from, (u8*) &inner)) return false;
+            Eval_Result result = eval_compile_time_expr(info, expr->cast_from, (u8*) &inner);
+            if (result != eval_ok) return result;
 
             u64 after_cast;
             if (primitive_is_signed(primitive) && primitive_is_signed(inner_primitive)) {
@@ -4859,20 +4870,24 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
                 default: assert(false);
             }
 
-            return true;
+            return eval_ok;
         } break;
 
         case expr_subscript: {
+            Eval_Result result;
+
             u64 array_size = type_size_of(info->context, expr->subscript.array->type_index);
             u64 index_size = type_size_of(info->context, expr->subscript.index->type_index);
 
             assert(index_size <= 8);
 
             u8* inner_data = arena_alloc(&info->context->stack, array_size);
-            if (!eval_compile_time_expr(info, expr->subscript.array, inner_data)) return false;
+            result = eval_compile_time_expr(info, expr->subscript.array, inner_data);
+            if (result != eval_ok) return result;
 
             u64 index = 0;
-            if (!eval_compile_time_expr(info, expr->subscript.index, (u8*) &index)) return false;
+            result = eval_compile_time_expr(info, expr->subscript.index, (u8*) &index);
+            if (result != eval_ok) return result;
 
             u32 array_type_index = expr->subscript.array->type_index;
             Primitive compound_literal_primitive = info->context->type_buf[array_type_index];
@@ -4884,7 +4899,7 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
 
             mem_copy(inner_data + index*child_size, result_into, type_size);
 
-            return true;
+            return eval_ok;
         } break;
 
         case expr_unary: {
@@ -4894,14 +4909,15 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
             u64 inner_type_size = type_size_of(info->context, expr->unary.inner->type_index);
 
             if (expr->unary.op == unary_dereference) {
-                unimplemented(); // TODO
+                return eval_do_at_runtime;
             } else if (expr->unary.op == unary_address_of) {
-                unimplemented(); // TODO
+                return eval_do_at_runtime;
             } else {
                 assert(inner_type_size <= 8);
                 assert(inner_type_size == type_size);
 
-                if (!eval_compile_time_expr(info, expr->unary.inner, result_into)) return false;
+                Eval_Result result = eval_compile_time_expr(info, expr->unary.inner, result_into);
+                if (result != eval_ok) return result;
 
                 switch (expr->unary.op) {
                     case unary_neg: {
@@ -4923,18 +4939,21 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
                 }
             }
 
-            return true;
+            return eval_ok;
         } break;
 
         case expr_binary: {
-            assert(expr->binary.left->type_index == expr->binary.right->type_index);
             u64 child_size = type_size_of(info->context, expr->binary.left->type_index);
 
             assert(type_size <= 8 && child_size <= 8);
 
             u64 left_result, right_result;
-            if (!eval_compile_time_expr(info, expr->binary.left, (u8*) &left_result)) return false;
-            if (!eval_compile_time_expr(info, expr->binary.right, (u8*) &right_result)) return false;
+
+            Eval_Result eval_result;
+            eval_result = eval_compile_time_expr(info, expr->binary.left, (u8*) &left_result);
+            if (eval_result != eval_ok) return eval_result;
+            eval_result = eval_compile_time_expr(info, expr->binary.right, (u8*) &right_result);
+            if (eval_result != eval_ok) return eval_result;
 
             bool is_signed = primitive_is_signed(info->context->type_buf[expr->binary.left->type_index]);
 
@@ -4991,7 +5010,7 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
             }
 
             mem_copy((u8*) &result, result_into, type_size);
-            return true;
+            return eval_ok;
         } break;
 
         case expr_compound_literal: {
@@ -5003,27 +5022,26 @@ bool eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
 
                 u8* mem = result_into;
                 for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
-                    if (!eval_compile_time_expr(info, node->expr, mem)) return false;
+                    Eval_Result result = eval_compile_time_expr(info, node->expr, mem);
+                    if (result != eval_ok) return result;
                     mem += child_size;
                 }
             } else {
                 assert(false);
             }
 
-            return true;
+            return eval_ok;
         } break;
 
         case expr_string_literal: {
-            unimplemented(); // TODO
-            return true;
+            return eval_do_at_runtime;
         } break;
 
         case expr_call: {
-            printf("Can't evaluate function calls at compile time (Line %u)\n", expr->pos.line);
-            return false;
+            return eval_do_at_runtime;
         } break;
 
-        default: assert(false); return false;
+        default: assert(false); return eval_bad;
     }
 }
 
@@ -5034,8 +5052,7 @@ bool typecheck(Context* context) {
     info.context = context;
 
     // Global variables
-    for (u32 g = 0; g < buf_length(context->global_vars); g += 1) {
-        Global_Var* global = &context->global_vars[g];
+    buf_foreach (Global_Var, global, context->global_vars) {
         global->checked = true;
 
         bool resolved_type = global->var.type_index != 0;
@@ -5083,22 +5100,34 @@ bool typecheck(Context* context) {
             result_into = &context->seg_rwdata[global->data_offset];
         }
 
-        bool computed_value = true;
-
         if (global->initial_expr != null) {
             arena_stack_push(&context->stack);
-            bool could_init = eval_compile_time_expr(&info, global->initial_expr, result_into);
+            Eval_Result result = eval_compile_time_expr(&info, global->initial_expr, result_into);
             arena_stack_pop(&context->stack);
 
-            if (!could_init) {
-                computed_value = false;
-            }
-        }
+            switch (result) {
+                case eval_ok: {
+                    global->valid = true;
+                    global->compute_at_runtime = false;
+                } break;
 
-        if (computed_value) {
-            global->valid = true;
+                case eval_bad: {
+                    valid = false;
+                } break;
+
+                case eval_do_at_runtime: {
+                    if (global->constant) {
+                        global->valid = true;
+                        global->compute_at_runtime = true;
+                    } else {
+                        global->valid = true;
+                        global->compute_at_runtime = true;
+                    }
+                } break;
+            }
         } else {
-            valid = false;
+            global->valid = true;
+            global->compute_at_runtime = false;
         }
     }
 
@@ -6068,6 +6097,57 @@ void build_intermediate(Context* context) {
         }
         #endif
     }
+
+    // Compute some global variables at runtime
+    {
+        Func func = {0};
+        func.name = string_table_intern_cstr(&context->string_table, "init_globals"),
+        func.kind = func_kind_normal;
+
+        bool computed_any = false;
+
+        Local pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+
+        for (u32 global_index = 0; global_index < buf_length(context->global_vars); global_index += 1) {
+            Global_Var* global = &context->global_vars[global_index];
+
+            if (global->compute_at_runtime) {
+                assert(global->initial_expr != null);
+                computed_any = true;
+
+                Expr left = {0};
+                left.kind = expr_variable;
+                left.variable.index = global_index | VAR_INDEX_GLOBAL_FLAG;
+                left.flags |= EXPR_FLAG_ASSIGNABLE;
+                left.type_index = global->var.type_index;
+                left.pos = global->var.declaration_pos;
+
+                linearize_assignment(context, &left, global->initial_expr);
+            }
+        }
+
+        intermediate_deallocate_temporary(context, pointer);
+
+        if (computed_any) {
+            buf_foreach (Tmp, tmp, context->tmp_tmps) assert(!tmp->currently_allocated);
+
+            buf_push(context->tmp_ops, ((Op) { op_end_of_function }));
+
+            func.body.op_count = buf_length(context->tmp_ops) - 1;
+            func.body.ops = (Op*) arena_alloc(&context->arena, buf_bytes(context->tmp_ops));
+            mem_copy((u8*) context->tmp_ops, (u8*) func.body.ops, buf_bytes(context->tmp_ops));
+
+            func.body.tmp_count = buf_length(context->tmp_tmps);
+            func.body.tmps = (Tmp*) arena_alloc(&context->arena, buf_bytes(context->tmp_tmps));
+            mem_copy((u8*) context->tmp_tmps, (u8*) func.body.tmps, buf_bytes(context->tmp_tmps));
+
+            buf_clear(context->tmp_ops);
+            buf_clear(context->tmp_tmps);
+
+            context->global_init_func_index = buf_length(context->funcs);
+            buf_push(context->funcs, func);
+        }
+    }
 }
 
 
@@ -6430,6 +6510,21 @@ u64 instruction_jmp_i8(u8** b) {
     #endif
 
     return buf_length(*b) - sizeof(i8);
+}
+
+
+void instruction_call(Context* context, bool builtin, u32 func_index) {
+    buf_push(context->seg_text, 0xe8);
+    buf_push(context->seg_text, 0xde);
+    buf_push(context->seg_text, 0xad);
+    buf_push(context->seg_text, 0xbe);
+    buf_push(context->seg_text, 0xef);
+
+    Call_Fixup fixup = {0};
+    fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
+    fixup.builtin = builtin;
+    fixup.func_index = func_index;
+    buf_push(context->call_fixups, fixup);
 }
 
 void instruction_inc_or_dec(u8** b, bool inc, X64_Reg reg, u8 op_size) {
@@ -6988,17 +7083,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             // Actually call the function
             switch (callee->kind) {
                 case func_kind_normal: {
-                    buf_push(context->seg_text, 0xe8);
-                    buf_push(context->seg_text, 0xde);
-                    buf_push(context->seg_text, 0xad);
-                    buf_push(context->seg_text, 0xbe);
-                    buf_push(context->seg_text, 0xef);
-
-                    Call_Fixup fixup = {0};
-                    fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
-                    fixup.builtin = false;
-                    fixup.func_index = op->call.func_index;
-                    buf_push(context->call_fixups, fixup);
+                    instruction_call(context, false, op->call.func_index);
                 } break;
 
                 case func_kind_imported: {
@@ -7132,18 +7217,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             assert(pointer.as_reference);
             instruction_mov_mem(context, func, mov_from, pointer, reg_rax, POINTER_SIZE);
             instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(primitive_u64));
-
-            buf_push(context->seg_text, 0xe8);
-            buf_push(context->seg_text, 0xde);
-            buf_push(context->seg_text, 0xad);
-            buf_push(context->seg_text, 0xbe);
-            buf_push(context->seg_text, 0xef);
-
-            Call_Fixup fixup = {0};
-            fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
-            fixup.builtin = true;
-            fixup.func_index = builtin_mem_clear;
-            buf_push(context->call_fixups, fixup);
+            instruction_call(context, true, builtin_mem_clear);
         } break;
 
         case op_end_of_function: assert(false);
@@ -7190,6 +7264,11 @@ void build_machinecode(Context* context) {
         if (func->kind != func_kind_normal) continue;
 
         func->body.text_start = buf_length(context->seg_text);
+
+        // Prepend a call to the global init function before main
+        if (func == main_func && context->global_init_func_index != 0) {
+            instruction_call(context, false, context->global_init_func_index);
+        }
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         u8* name = string_table_access(context->string_table, func->name);
@@ -7913,7 +7992,8 @@ bool write_executable(u8* path, Context* context) {
         Section_Header* rodata_header = &section_headers[section_index];
         section_index += 1;
         mem_copy(".rdata", rodata_header->name, 6);
-        rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
+        //rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
+        rodata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
         rodata_header->virtual_size = rodata_length;
         rodata_header->virtual_address = rodata_memory_start;
         rodata_header->size_of_raw_data = round_to_next(rodata_length, in_file_alignment);

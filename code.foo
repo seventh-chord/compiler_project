@@ -43,6 +43,8 @@ fn main() -> u8 {
 
     test_fancy_casts();
 
+    say_my_name();
+
     ExitProcess(0);
 }
 
@@ -182,8 +184,16 @@ fn test_fancy_casts() {
     print("\n");
 }
 
+
+let my_name_a = "foo\n";
+let my_name_b = "__seventh-chord\n" + 2;
+
+fn say_my_name() {
+    print(my_name_a);
+    print(my_name_b);
+}
+
 /*
-allow strings as constants
 uninitialized (zeroed) global variables in .bss
 structs, unions, enums
 slices (also, make strings slices)
