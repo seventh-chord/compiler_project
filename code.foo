@@ -48,6 +48,9 @@ fn main() -> u8 {
     ExitProcess(0);
 }
 
+fn u32() {}
+fn cast() {}
+
 let STDOUT_KEY = u32(-11);
 let stdout_handle: u64;
 

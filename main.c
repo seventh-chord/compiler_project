@@ -3311,7 +3311,13 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
     if (find_func(context, name_index) != U32_MAX) {
         u8* name = string_table_access(context->string_table, name_index);
-        printf("Second definition of function %s on line %u\n", name, (u64) declaration_pos.line);
+        printf("Second definition of function '%s' on line %u\n", name, (u64) declaration_pos.line);
+        valid = false;
+    }
+
+    if (parse_primitive_name(context, name_index) != primitive_invalid || name_index == context->cast_name) {
+        u8* name = string_table_access(context->string_table, name_index);
+        printf("Can't use '%s' as a function name, as it is reserved for casts (Line %u)\n", name, start->pos.line);
         valid = false;
     }
 
@@ -3459,7 +3465,7 @@ bool parse_extern(Context* context, Token* t, u32* length) {
                 } else if (func->kind != func_kind_imported) {
                     u8* name = string_table_access(context->string_table, func->name);
                     printf(
-                        "Function %s has a body, but functions inside 'extern' blocks can't have bodies (Line %u)\n",
+                        "Function '%s' has a body, but functions inside 'extern' blocks can't have bodies (Line %u)\n",
                         name, (u64) body[i].pos.line
                     );
                     valid = false;
@@ -4024,7 +4030,7 @@ bool build_ast(Context* context, u8* path) {
             } else if (func->kind != func_kind_normal) {
                 u8* name = string_table_access(context->string_table, func->name);
                 printf(
-                    "Function %s doesn't have a body. Functions without bodies can only be inside 'extern' blocks (Line %u)\n",
+                    "Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks (Line %u)\n",
                     name, (u64) t->pos.line
                 );
                 valid = false;
@@ -4273,7 +4279,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                         if (!global->checked) {
                             u8* name = string_table_access(info->context->string_table, global->var.name);
                             printf(
-                                "Can't use global variable %s before its declaration on line %u (Line %u)\n",
+                                "Can't use global variable '%s' before its declaration on line %u (Line %u)\n",
                                 name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
                             );
                         }
@@ -4289,12 +4295,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
                     if (use_line <= decl_line) {
                         printf(
-                            "Can't use variable %s on line %u before its declaration on line %u\n",
+                            "Can't use variable '%s' on line %u before its declaration on line %u\n",
                             var_name, use_line, decl_line
                         );
                     } else {
                         printf(
-                            "Can't use variable %s on line %u, as it isn't in scope\n",
+                            "Can't use variable '%s' on line %u, as it isn't in scope\n",
                             var_name, use_line
                         );
                     }
@@ -4451,7 +4457,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 u32 actual_type_index = param_expr->expr->type_index;
                 if (!type_cmp(info->context, expected_type_index, actual_type_index)) {
                     u8* func_name = string_table_access(info->context->string_table, callee->name);
-                    printf("Invalid type for %n parameter to %s: Expected ", (u64) (p + 1), func_name);
+                    printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), func_name);
                     print_type(info->context, expected_type_index);
                     printf(" but got ");
                     print_type(info->context, actual_type_index);
@@ -4792,7 +4798,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     if (!global->checked) {
                         u8* name = string_table_access(info->context->string_table, global->var.name);
                         printf(
-                            "Can't use global variable %s in a compile time expression before its declaration on line %u (Line %u)\n",
+                            "Can't use global variable '%s' in a compile time expression before its declaration on line %u (Line %u)\n",
                             name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
                         );
                     }
