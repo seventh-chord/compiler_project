@@ -1591,6 +1591,7 @@ typedef struct Context {
 
     u8* string_table; // stretchy-buffer string table
     u32 primitive_names[PRIMITIVE_COUNT]; // indices to string table
+    u32 cast_name;
 
     // AST & intermediate representation
     Func* funcs; // stretchy-buffer
@@ -1807,7 +1808,7 @@ void print_token(u8* string_table, Token* t) {
     switch (t->kind) {
         case token_identifier: {
             u32 index = t->identifier_string_table_index;
-            s = string_table_access(string_table, index);
+            printf("'%s'", string_table_access(string_table, index));
         } break;
 
         case token_literal: {
@@ -2400,8 +2401,53 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expect_value = false;
                     t += 1;
 
-                    // Function call or cast
-                    if (t->kind == token_bracket_round_open) {
+                    // "Advanced" casts
+                    // These need to be parsed differently as the first parameter is a type
+                    if (t->kind == token_bracket_round_open && name_index == context->cast_name) {
+                        File_Pos start_pos = t->pos;
+                        t += 1;
+
+                        u32 type_length = 0;
+                        u32 cast_to = parse_type(context, t, &type_length);
+                        t += type_length;
+
+                        if (cast_to == U32_MAX) {
+                            *length = t - t_start;
+                            return null;
+                        }
+
+                        if (!expect_single_token(context, t, token_comma, "after type in cast")) {
+                            *length = t - t_start;
+                            return null;
+                        }
+                        t += 1;
+
+                        u32 inner_length = 0;
+                        Expr* cast_from = parse_expr(context, t, &inner_length);
+                        t += inner_length;
+
+                        if (cast_from == null) {
+                            *length = t - t_start;
+                            return null;
+                        }
+
+                        if (!expect_single_token(context, t, token_bracket_round_close, "after cast")) {
+                            *length = t - t_start;
+                            return null;
+                        }
+                        t += 1;
+
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->pos = start_pos;
+                        expr->kind = expr_cast;
+                        expr->cast_from = cast_from;
+                        expr->type_index = cast_to;
+
+                        shunting_yard_push_expr(context, yard, expr);
+                        could_parse = true;
+                    
+                    // Function call or simple cast
+                    } else if (t->kind == token_bracket_round_open) {
                         File_Pos start_pos = t->pos;
                         t += 1;
 
@@ -2450,13 +2496,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         t += 1;
 
 
-                        Primitive cast_to_primitive = primitive_invalid;
-                        for (u32 i = 0; i < PRIMITIVE_COUNT; i += 1) {
-                            if (name_index == context->primitive_names[i]) {
-                                cast_to_primitive = i;
-                                break;
-                            }
-                        }
+                        Primitive cast_to_primitive = parse_primitive_name(context, name_index);
 
                         if (cast_to_primitive != primitive_invalid) {
                             if (param_count != 1) {
@@ -3485,6 +3525,7 @@ bool build_ast(Context* context, u8* path) {
     };
 
     init_primitive_names(context->primitive_names, &context->string_table);
+    context->cast_name = string_table_intern_cstr(&context->string_table, "cast");
 
     for (u32 t = 0; t < PRIMITIVE_COUNT; t += 1) {
         // Now we can use primitive_* as a type index directly
@@ -4444,8 +4485,40 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
         case expr_cast: {
             Primitive primitive = info->context->type_buf[expr->type_index];
-            assert(primitive >= primitive_u8 && primitive <= primitive_i64);
-            typecheck_expr(info, expr->cast_from, expr->type_index);
+
+            u32 invalid = 0;
+
+            if (primitive == primitive_pointer) {
+                typecheck_expr(info, expr->cast_from, expr->type_index);
+                Primitive from_primitive = info->context->type_buf[expr->cast_from->type_index];
+                if (from_primitive != primitive_pointer) {
+                    invalid = 2;
+                }
+            } else if (primitive_is_integer(primitive)) {
+                typecheck_expr(info, expr->cast_from, expr->type_index);
+                Primitive from_primitive = info->context->type_buf[expr->cast_from->type_index];
+                if (!primitive_is_integer(from_primitive)) {
+                    invalid = 2;
+                }
+            } else {
+                invalid = 1;
+            }
+
+            if (invalid == 2) {
+                printf("Invalid cast. Can't cast from a ");
+                print_type(info->context, expr->cast_from->type_index);
+                printf(" to a ");
+                print_type(info->context, expr->type_index);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
+
+            if (invalid == 1) {
+                printf("Invalid cast. Can't cast to a ");
+                print_type(info->context, expr->type_index);
+                printf(" (Line %u)\n", expr->pos.line);
+                return false;
+            }
         } break;
 
         case expr_unary: {

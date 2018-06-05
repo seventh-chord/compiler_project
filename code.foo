@@ -41,6 +41,8 @@ fn main() -> u8 {
     print_u64(u64(SEVEN), 10); print("\n");
     print_u64(u64(EIGHT), 10); print("\n");
 
+    test_fancy_casts();
+
     ExitProcess(0);
 }
 
@@ -167,14 +169,26 @@ fn seventy_two() -> u8 {
     output = w + 45 + (255 + 1);
 }
 
+fn test_fancy_casts() {
+    let text = "Yo"; 
+    let foo_star = cast(*u16, text);
+    let foo = *foo_star;
+
+    print("0x");
+    print_u64(u64(foo), 16); // Should be 
+    if (foo != 0x6f59) {
+        print(" (Should be 0x6f59)");
+    }
+    print("\n");
+}
+
 /*
-constants in .rodata
+allow strings as constants
 uninitialized (zeroed) global variables in .bss
 structs, unions, enums
 slices (also, make strings slices)
 size_of, align_of, type_of
-more operators      <<   >>   |   &   ~   ||   &&
-assignment operators += -= etc
+more operators      <<   >>   |   &   ~   ||   &&    /=    *=
 character literals
 variable shadowing
 
@@ -182,6 +196,7 @@ variable shadowing
 debug info
 growing the stack? __chkstk
 constant evaluation / elimination
+register allocation
 peephole optimizer
 some form of compile-time execution
 */
