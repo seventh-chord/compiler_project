@@ -714,12 +714,9 @@ IO_Result write_entire_file(u8* file_name, u8* contents, u32 length) {
 
 
 typedef struct File_Pos {
+    u8* file_name;
     u32 line;
 } File_Pos;
-
-bool file_pos_is_after(File_Pos a, File_Pos b) {
-    return a.line > b.line;
-}
 
 typedef struct Token {
     enum {
@@ -1773,6 +1770,10 @@ u32 type_duplicate(Context* context, u32 type_index) {
 }
 
 
+void print_file_pos(File_Pos* pos) {
+    printf("%s:%u: ", pos->file_name, (u64) pos->line);
+}
+
 void print_type(Context* context, u32 type_index) {
     u32 i = type_index;
     while (true) {
@@ -2209,9 +2210,10 @@ Primitive parse_primitive_name(Context* context, u32 name_index) {
 
 bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
     if (t->kind != kind) {
+        print_file_pos(&t->pos);
         printf("Expected %s %s, but got ", TOKEN_NAMES[kind], location);
         print_token(context->string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
+        printf("\n");
         return false;
     } else {
         return true;
@@ -2228,9 +2230,10 @@ u32 parse_type(Context* context, Token* t, u32* length) {
             t += 1;
 
             if (t->kind != token_literal) {
+                print_file_pos(&t->pos);
                 printf("Expected array size, but got ");
                 print_token(context->string_table, t);
-                printf(" (Line %u)\n", t->pos.line);
+                printf("\n");
 
                 *length = t - t_start + 2;
                 return U32_MAX;
@@ -2259,7 +2262,8 @@ u32 parse_type(Context* context, Token* t, u32* length) {
 
             if (p == primitive_invalid) {
                 u8* name = string_table_access(context->string_table, t->identifier_string_table_index);
-                printf("Not a valid type: %s (Line %u)\n", name, (u64) t->pos.line);
+                print_file_pos(&t->pos);
+                printf("Not a valid type: '%s'\n", name);
 
                 *length = t - t_start + 1;
                 return U32_MAX;
@@ -2277,9 +2281,10 @@ u32 parse_type(Context* context, Token* t, u32* length) {
             t += 1;
 
         } else {
+            print_file_pos(&t->pos);
             printf("Unexpected token in type: ");
             print_token(context->string_table, t);
-            printf(" (Line %u)\n", (u64) t->pos.line);
+            printf("\n");
 
             t += 1;
             *length = t - t_start;
@@ -2497,9 +2502,10 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                             if (t->kind != token_bracket_round_close) {
                                 if (t->kind != token_comma) {
+                                    print_file_pos(&t->pos);
                                     printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
                                     print_token(context->string_table, t);
-                                    printf(" (Line %u)\n", (u64) t->pos.line);
+                                    printf("\n");
                                     *length = t - t_start;
                                     return null;
                                 }
@@ -2530,16 +2536,18 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                         if (cast_to_primitive != primitive_invalid) {
                             if (param_count != 1) {
+                                print_file_pos(&start_pos);
                                 printf(
-                                    "Expected 1 parameter for cast to %s, but got %u (Line %u)\n",
-                                    primitive_name(cast_to_primitive), (u64) param_count, (u64) start_pos.line
+                                    "Expected 1 parameter for cast to %s, but got %u\n",
+                                    primitive_name(cast_to_primitive), (u64) param_count
                                 );
                                 *length = t - t_start;
                                 return null;
                             }
 
                             if (!(cast_to_primitive >= primitive_u8 && cast_to_primitive <= primitive_i64)) {
-                                printf("Can't cast to %s (Line %u)\n", primitive_name(cast_to_primitive), (u64) start_pos.line);
+                                print_file_pos(&start_pos);
+                                printf("Can't cast to %s\n", primitive_name(cast_to_primitive));
                                 *length = t - t_start;
                                 return null;
                             }
@@ -2792,6 +2800,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
         if (reached_end) break;
 
         if (!could_parse) {
+            print_file_pos(&t->pos);
             printf("Expected ");
             if (expect_value) {
                 printf("a value or a unary operator");
@@ -2800,7 +2809,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
             }
             printf(" but got ");
             print_token(context->string_table, t);
-            printf(" (Line %u)\n", (u64) t->pos.line);
+            printf("\n");
 
             t += 1;
             *length = t - t_start;
@@ -2845,9 +2854,10 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
 
         if (t->kind != token_bracket_curly_close) {
             if (t->kind != token_comma) {
+                print_file_pos(&t->pos);
                 printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
                 print_token(context->string_table, t);
-                printf(" (Line %u)\n", (u64) t->pos.line);
+                printf("\n");
                 *length = t - t_start;
                 return null;
             }
@@ -3014,9 +3024,10 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                             } break;
 
                             default: {
+                                print_file_pos(&t->pos);
                                 printf("Expected another if-statmenet or a basic block after else, but got ");
                                 print_token(context->string_table, t);
-                                printf(" (Line %u)\n", t->pos.line);
+                                printf("\n");
                                 *length = t - t_first_stmt_start;
                                 return null;
                             } break;
@@ -3079,9 +3090,10 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                     } break;
 
                     default: {
+                        print_file_pos(&t->pos);
                         printf("Expected opening parenthesis '(' or curly brace '{' after for, but got ");
                         print_token(context->string_table, t);
-                        printf(" (Line %u)\n", t->pos.line);
+                        printf("\n");
                         *length = t - t_first_stmt_start;
                         return null;
                     } break;
@@ -3135,9 +3147,10 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                 t += 1;
 
                 if (t->kind != token_identifier) {
+                    print_file_pos(&t->pos);
                     printf("Expected variable name, but found ");
                     print_token(context->string_table, t);
-                    printf(" (Line %u)\n", t->pos.line);
+                    printf("\n");
                     *length = t - t_first_stmt_start;
                     return null;
                 }
@@ -3172,7 +3185,8 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
 
                 if (expr == null && type_index == null) {
                     u8* name = string_table_access(context->string_table, name_index);
-                    printf("Declared variable '%s' without specifying type or initial value. Hence can't infer type (Line %u)\n", name, t->pos.line);
+                    print_file_pos(&t->pos);
+                    printf("Declared variable '%s' without specifying type or initial value. Hence can't infer type\n", name);
                     *length = t - t_first_stmt_start;
                     return null;
                 }
@@ -3318,26 +3332,29 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
 
         u32 length = end - start;
         if (length < 1 || t[start].kind != token_identifier) {
+            print_file_pos(&t[start].pos);
             printf("Expected parameter name, but got ");
             print_token(context->string_table, &t[start]);
-            printf(" (Line %u)\n", (u64) t[start].pos.line);
+            printf("\n");
             return false;
         }
         u32 name_index = t[start].identifier_string_table_index;
 
         if (length < 2) {
             u8* name = string_table_access(context->string_table, name_index);
-            printf("Expected ': type' after parameter '%s', but found nothing (Line %u)\n", name, (u64) t[start + 1].pos.line);
+            print_file_pos(&t[start + 1].pos);
+            printf("Expected ': type' after parameter '%s', but found nothing\n", name);
             return false;
         }
 
         if (t[start + 1].kind != token_colon) {
             u8* name = string_table_access(context->string_table, name_index);
+            print_file_pos(&t[start + 1].pos);
             printf("Expected ': type' after parameter '%s', but got ", name);
             for (u32 j = start + 1;  j < end; j += 1) {
                 print_token(context->string_table, &t[j]);
             }
-            printf(" (Line %u)\n", (u64) t[start + 1].pos.line);
+            printf("\n");
             return false;
         }
 
@@ -3348,9 +3365,10 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
         }
 
         if (type_length != length - 2) {
+            print_file_pos(&t[start + 2 + type_length].pos);
             printf("Invalid token after type in parameter delcaration list: ");
             print_token(context->string_table, &t[start + 2 + type_length]);
-            printf(" (Line %u)\n", (u64) t[start + 2 + type_length].pos.line);
+            printf("\n");
             return false;
         }
 
@@ -3385,9 +3403,10 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     // Name
     t += 1;
     if (t->kind != token_identifier) {
+        print_file_pos(&t->pos);
         printf("Expected function name, but found ");
         print_token(context->string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
+        printf("\n");
 
         return null;
     }
@@ -3403,7 +3422,8 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
     if (parse_primitive_name(context, name_index) != primitive_invalid || name_index == context->cast_name) {
         u8* name = string_table_access(context->string_table, name_index);
-        printf("Can't use '%s' as a function name, as it is reserved for casts (Line %u)\n", name, start->pos.line);
+        print_file_pos(&start->pos);
+        printf("Can't use '%s' as a function name, as it is reserved for casts\n", name);
         valid = false;
     }
 
@@ -3419,9 +3439,10 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     t += 1;
     if (t->kind != token_bracket_round_open) {
         u8* name = string_table_access(context->string_table, name_index);
+        print_file_pos(&t->pos);
         printf("Expected a open parenthesis '(' to after 'fn %s', but got ", name);
         print_token(context->string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
+        printf("\n");
         return null;
     }
 
@@ -3465,9 +3486,10 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
         if (t->kind != token_bracket_curly_open) {
             u8* name = string_table_access(context->string_table, name_index);
+            print_file_pos(&t->pos);
             printf("Expected an open curly brace { after 'fn %s ...', but found ", name);
             print_token(context->string_table, t);
-            printf(" (Line %u)\n", (u64) t->pos.line);
+            printf("\n");
             return null;
         }
 
@@ -3515,9 +3537,10 @@ bool parse_extern(Context* context, Token* t, u32* length) {
     // Library name
     t += 1;
     if (t->kind != token_string) {
+        print_file_pos(&t->pos);
         printf("Expected library name, but got ");
         print_token(context->string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
+        printf("\n");
 
         return false;
     }
@@ -3527,9 +3550,10 @@ bool parse_extern(Context* context, Token* t, u32* length) {
     // Body
     t += 1;
     if (t->kind != token_bracket_curly_open) {
+        print_file_pos(&t->pos);
         printf("Expected an open curly brace { after 'extern \"%s\" ...', but found ", library_name);
         print_token(context->string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
+        printf("\n");
         return false;
     }
 
@@ -3551,10 +3575,8 @@ bool parse_extern(Context* context, Token* t, u32* length) {
                     valid = false;
                 } else if (func->kind != func_kind_imported) {
                     u8* name = string_table_access(context->string_table, func->name);
-                    printf(
-                        "Function '%s' has a body, but functions inside 'extern' blocks can't have bodies (Line %u)\n",
-                        name, (u64) body[i].pos.line
-                    );
+                    print_file_pos(&body[i].pos);
+                    printf("Function '%s' has a body, but functions inside 'extern' blocks can't have bodies\n", name);
                     valid = false;
                 } else {
                     Import_Index import_index = add_import(context, library_name_index, func->name);
@@ -3565,9 +3587,10 @@ bool parse_extern(Context* context, Token* t, u32* length) {
             } break;
 
             default: {
+                print_file_pos(&body[i].pos);
                 printf("Found invalid token at top level inside 'extern' block: ");
                 print_token(context->string_table, &body[i]);
-                printf(" (Line %u)\n", (u64) body[i].pos.line);
+                printf("\n");
 
                 i += 1;
                 while (i < body_length && body[i].kind != token_semicolon) { i += 1; }
@@ -3627,7 +3650,7 @@ bool build_ast(Context* context, u8* path) {
     struct Bracket_Info {
         u8 our_char;
         u8 needed_match;
-        u32 our_line;
+        File_Pos our_pos;
         u32 token_position;
         Bracket_Info* previous;
     };
@@ -3638,6 +3661,7 @@ bool build_ast(Context* context, u8* path) {
 
     Token* tokens = null;
     File_Pos file_pos = {0};
+    file_pos.file_name = path;
     file_pos.line = 1;
 
     #define LOWERCASE \
@@ -3746,9 +3770,10 @@ bool build_ast(Context* context, u8* path) {
             done_with_literal:
 
             if (overflow) {
+                print_file_pos(&file_pos);
                 printf(
-                    "Integer literal %z is to large. Wrapped around to %u. (Line %u)\n",
-                    (u64) (last - first + 1), &file[first], value, (u64) file_pos.line
+                    "Integer literal %z is to large. Wrapped around to %u\n",
+                    (u64) (last - first + 1), &file[first], value
                 );
             }
 
@@ -3947,7 +3972,7 @@ bool build_ast(Context* context, u8* path) {
                 if (open) {
                     Bracket_Info* info = arena_insert(&context->stack, ((Bracket_Info) {0}));
                     info->our_char = our_char;
-                    info->our_line = file_pos.line;
+                    info->our_pos = file_pos;
                     info->needed_match = matching_kind;
                     info->token_position = buf_length(tokens);
                     info->previous = bracket_match;
@@ -3955,15 +3980,14 @@ bool build_ast(Context* context, u8* path) {
                     offset = 0;
                 } else {
                     if (bracket_match == null) {
-                        printf(
-                            "Found a closing bracket '%c' before any opening brackets were found (Line %u)\n",
-                            our_char, (u64) file_pos.line
-                        );
+                        print_file_pos(&file_pos);
+                        printf("Found a closing bracket '%c' before any opening brackets were found\n", our_char);
                         all_brackets_matched = false;
                     } else if (bracket_match->needed_match != kind) {
+                        print_file_pos(&file_pos);
                         printf(
                             "Found a closing bracket '%c', which doesn't match the previous '%c' (Line %u and %u)\n",
-                            our_char, bracket_match->our_char, (u64) bracket_match->our_line, (u64) file_pos.line
+                            our_char, bracket_match->our_char, (u64) bracket_match->our_pos.line, (u64) file_pos.line
                         );
                         all_brackets_matched = false;
                     } else {
@@ -3995,7 +4019,8 @@ bool build_ast(Context* context, u8* path) {
             for (; i < file_length; i += 1) {
                 if (file[i] == '\n' || file[i] == '\r') {
                     valid = false;
-                    printf("Strings can't span multiple lines (Line %u)\n", (u64) file_pos.line);
+                    print_file_pos(&file_pos);
+                    printf("Strings can't span multiple lines\n");
                     break;
                 }
 
@@ -4027,7 +4052,8 @@ bool build_ast(Context* context, u8* path) {
                     }
 
                     if (resolved == U8_MAX) {
-                        printf("Invalid escape sequence: '\\%c' (Line %u)\n", escaped, (u64) file_pos.line);
+                        print_file_pos(&file_pos);
+                        printf("Invalid escape sequence: '\\%c'\n", escaped);
                         valid = false;
                         break;
                     }
@@ -4080,7 +4106,8 @@ bool build_ast(Context* context, u8* path) {
         } break;
 
         default: {
-            printf("Unexpected character: %c (Line %u)\n", file[i], (u64) file_pos.line);
+            print_file_pos(&file_pos);
+            printf("Unexpected character: %c\n", file[i]);
             valid = false;
             i += 1;
         } break;
@@ -4090,7 +4117,8 @@ bool build_ast(Context* context, u8* path) {
 
     if (all_brackets_matched && bracket_match != null) {
         all_brackets_matched = false;
-        printf("Unclosed bracket '%c' (Line %u)\n", bracket_match->our_char, (u64) bracket_match->our_line);
+        print_file_pos(&bracket_match->our_pos);
+        printf("Unclosed bracket '%c'\n", bracket_match->our_char);
     }
 
     arena_stack_pop(&context->stack);
@@ -4102,9 +4130,10 @@ bool build_ast(Context* context, u8* path) {
     #if 0
     printf("%u tokens:\n", (u64) buf_length(tokens));
     for (Token* t = tokens; t->kind != token_end_of_stream; t += 1) {
+        print_token_pos(&t->pos);
         printf("  ");
         print_token(string_table, t);
-        printf(" (Line %u)\n", (u64) t->pos.line);
+        printf("\n");
     }
     #endif
 
@@ -4119,10 +4148,8 @@ bool build_ast(Context* context, u8* path) {
                 valid = false;
             } else if (func->kind != func_kind_normal) {
                 u8* name = string_table_access(context->string_table, func->name);
-                printf(
-                    "Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks (Line %u)\n",
-                    name, (u64) t->pos.line
-                );
+                print_file_pos(&t->pos);
+                printf("Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks\n", name);
                 valid = false;
             }
 
@@ -4140,9 +4167,10 @@ bool build_ast(Context* context, u8* path) {
             t += 1;
 
             if (t->kind != token_identifier) {
+                print_file_pos(&t->pos);
                 printf("Expected global variable name, but found ");
                 print_token(context->string_table, t);
-                printf(" (Line %u)\n", t->pos.line);
+                printf("\n");
                 return null;
             }
             u32 name_index = t->identifier_string_table_index;
@@ -4170,7 +4198,8 @@ bool build_ast(Context* context, u8* path) {
 
             if (expr == null && type_index == null) {
                 u8* name = string_table_access(context->string_table, name_index);
-                printf("Declared global variable '%s' without specifying type or initial value. Hence can't infer type (Line %u)\n", name, t->pos.line);
+                print_file_pos(&t->pos);
+                printf("Declared global variable '%s' without specifying type or initial value. Hence can't infer type\n", name);
                 return null;
             }
 
@@ -4191,9 +4220,10 @@ bool build_ast(Context* context, u8* path) {
         default: {
             valid = false;
 
+            print_file_pos(&t->pos);
             printf("Found invalid token at global scope: ");
             print_token(context->string_table, t);
-            printf(" (Line %u)\n", (u64) t->pos.line);
+            printf("\n");
 
             t += 1;
             while (t->kind != token_keyword_fn && t->kind != token_keyword_extern && t->kind != token_end_of_stream) { t += 1; }
@@ -4268,9 +4298,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                         u64 value = expr->literal.value;
 
                         if (value != (value & mask)) {
+                            print_file_pos(&expr->pos);
                             printf(
-                                "Warning: Literal %u won't fit fully into a %s and will be masked! (Line %u)\n",
-                                (u64) value, primitive_name(solidify_to_primitive), (u64) expr->pos.line
+                                "Warning: Literal %u won't fit fully into a %s and will be masked!\n",
+                                (u64) value, primitive_name(solidify_to_primitive)
                             );
                         }
                     } else {
@@ -4311,12 +4342,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 u32 expected_child_type_index = expr->type_index + 1 + sizeof(u64);
 
                 if (expr->compound_literal.count != expected_child_count) {
+                    print_file_pos(&expr->pos);
                     printf(
-                        "Too %s values in compound literal: expected %u, got %u (Line %u)\n",
+                        "Too %s values in compound literal: expected %u, got %u\n",
                         (expr->compound_literal.count > expected_child_count)? "many" : "few",
                         (u64) expected_child_count,
-                        (u64) expr->compound_literal.count,
-                        (u64) expr->pos.line
+                        (u64) expr->compound_literal.count
                     );
                     return false;
                 }
@@ -4328,19 +4359,21 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                     }
 
                     if (!type_cmp(info->context, expected_child_type_index, child->type_index)) {
+                        print_file_pos(&expr->pos);
                         printf("Invalid type inside compound literal: Expected ");
                         print_type(info->context, expected_child_type_index);
                         printf(" but got ");
                         print_type(info->context, child->type_index);
-                        printf(" (Line %u)\n", (u64) expr->pos.line);
+                        printf("\n");
 
                         return false;
                     }
                 }
             } else {
+                print_file_pos(&expr->pos);
                 printf("Invalid type for compound literal: ");
                 print_type(info->context, expr->type_index);
-                printf(" (Line %u)\n", expr->pos.line);
+                printf("\n");
                 return false;
             }
         } break;
@@ -4352,12 +4385,13 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
                 if (var_index == U32_MAX) {
                     u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
+                    print_file_pos(&expr->pos);
                     printf("Can't find variable '%s' ", var_name);
                     if (info->func != null) {
                         u8* func_name = string_table_access(info->context->string_table, info->func->name);
                         printf("in function '%s' or ", func_name);
                     }
-                    printf("in global scope (Line %u)\n", (u64) expr->pos.line);
+                    printf("in global scope\n");
                     return false;
                 }
 
@@ -4368,9 +4402,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                     if (!global->valid) {
                         if (!global->checked) {
                             u8* name = string_table_access(info->context->string_table, global->var.name);
+                            print_file_pos(&expr->pos);
                             printf(
-                                "Can't use global variable '%s' before its declaration on line %u (Line %u)\n",
-                                name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
+                                "Can't use global variable '%s' before its declaration on line %u\n",
+                                name, (u64) global->var.declaration_pos.line
                             );
                         }
 
@@ -4463,11 +4498,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 }
 
                 if (!valid) {
+                    print_file_pos(&expr->pos);
                     printf("Can't compare ");
                     print_type(info->context, expr->binary.left->type_index);
                     printf(" with ");
                     print_type(info->context, expr->binary.right->type_index);
-                    printf(" using operator %s (Line %u)\n", BINARY_OP_SYMBOL[expr->binary.op], (u64) expr->pos.line);
+                    printf(" using operator %s\n", BINARY_OP_SYMBOL[expr->binary.op]);
                     return false;
                 }
             } else {
@@ -4501,11 +4537,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             }
 
             if (expr->type_index == primitive_invalid) {
+                print_file_pos(&expr->pos);
                 printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
                 print_type(info->context, expr->binary.left->type_index);
                 printf(" vs ");
                 print_type(info->context, expr->binary.right->type_index);
-                printf(" (Line %u)\n", (u64) expr->pos.line);
+                printf("\n");
                 return false;
             }
         } break;
@@ -4515,7 +4552,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 u32 func_index = find_func(info->context, expr->call.unresolved_name);
                 if (func_index == U32_MAX) {
                     u8* name = string_table_access(info->context->string_table, expr->call.unresolved_name);
-                    printf("Can't find function '%s' (Line %u)\n", name, (u64) expr->pos.line);
+                    print_file_pos(&expr->pos);
+                    printf("Can't find function '%s'\n", name);
                     return false;
                 }
 
@@ -4528,9 +4566,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
             if (expr->call.param_count != callee->signature.param_count) {
                 u8* name = string_table_access(info->context->string_table, callee->name);
+                print_file_pos(&expr->pos);
                 printf(
-                    "Function '%s' takes %u parameters, but %u were given (Line %u)\n",
-                    name, (u64) callee->signature.param_count, (u64) expr->call.param_count, (u64) expr->pos.line
+                    "Function '%s' takes %u parameters, but %u were given\n",
+                    name, (u64) callee->signature.param_count, (u64) expr->call.param_count
                 );
                 return false;
             }
@@ -4547,11 +4586,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 u32 actual_type_index = param_expr->expr->type_index;
                 if (!type_cmp(info->context, expected_type_index, actual_type_index)) {
                     u8* func_name = string_table_access(info->context->string_table, callee->name);
+                    print_file_pos(&expr->pos);
                     printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), func_name);
                     print_type(info->context, expected_type_index);
                     printf(" but got ");
                     print_type(info->context, actual_type_index);
-                    printf(" (Line %u)\n", (u64) expr->pos.line);
+                    printf("\n");
 
                     return false;
                 }
@@ -4580,18 +4620,20 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             }
 
             if (invalid == 2) {
+                print_file_pos(&expr->pos);
                 printf("Invalid cast. Can't cast from a ");
                 print_type(info->context, expr->cast_from->type_index);
                 printf(" to a ");
                 print_type(info->context, expr->type_index);
-                printf(" (Line %u)\n", expr->pos.line);
+                printf("\n");
                 return false;
             }
 
             if (invalid == 1) {
+                print_file_pos(&expr->pos);
                 printf("Invalid cast. Can't cast to a ");
                 print_type(info->context, expr->type_index);
-                printf(" (Line %u)\n", expr->pos.line);
+                printf("\n");
                 return false;
             }
         } break;
@@ -4615,9 +4657,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                     // TODO allow using unary_not to do a bitwise not on integers
                     Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
                     if (child_primitive != primitive_bool) {
+                        print_file_pos(&expr->unary.inner->pos);
                         printf("Can only 'not' a 'bool', not a ");
                         print_type(info->context, expr->unary.inner->type_index);
-                        printf(" (Line %u)\n", expr->unary.inner->pos.line);
+                        printf("\n");
                         return false;
                     }
 
@@ -4627,9 +4670,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 case unary_neg: {
                     Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
                     if (!primitive_is_integer(child_primitive)) {
+                        print_file_pos(&expr->unary.inner->pos);
                         printf("Can only negatve integers, not a ");
                         print_type(info->context, expr->unary.inner->type_index);
-                        printf(" (Line %u)\n", expr->unary.inner->pos.line);
+                        printf("\n");
                         return false;
                     }
 
@@ -4639,17 +4683,19 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
                 case unary_dereference: {
                     Primitive child_primitive = info->context->type_buf[expr->unary.inner->type_index];
                     if (child_primitive != primitive_pointer) {
+                        print_file_pos(&expr->pos);
                         printf("Can't dereference non-pointer ");
                         print_expr(info->context, info->func, expr->unary.inner);
-                        printf(" (Line %u)\n", expr->pos.line);
+                        printf("\n");
                         return false;
                     }
 
                     Primitive pointer_to = info->context->type_buf[expr->unary.inner->type_index + 1];
                     if (pointer_to == primitive_void) {
+                        print_file_pos(&expr->pos);
                         printf("Can't dereference the void pointer ");
                         print_expr(info->context, info->func, expr->unary.inner);
-                        printf(" (Line %u)\n", expr->pos.line);
+                        printf("\n");
                         return false;
                     }
 
@@ -4659,9 +4705,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
 
                 case unary_address_of: {
                     if (!(expr->unary.inner->flags & EXPR_FLAG_ASSIGNABLE)) {
+                        print_file_pos(&expr->pos);
                         printf("Can't take address of ");
                         print_expr(info->context, info->func, expr->unary.inner);
-                        printf(" (Line %u)\n", expr->pos.line);
+                        printf("\n");
                         return false;
                     }
 
@@ -4692,9 +4739,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             } else if (info->context->type_buf[array_type_index] == primitive_pointer && info->context->type_buf[array_type_index + 1] == primitive_array) {
                 expr->type_index = array_type_index + sizeof(u64) + 2;
             } else {
+                print_file_pos(&expr->pos);
                 printf("Can't index a ");
                 print_type(info->context, array_type_index);
-                printf(" (Line %u)\n", (u64) expr->pos.line);
+                printf("\n");
                 bad = true;
             }
 
@@ -4705,9 +4753,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, u32 solidify_to) {
             u32 index_type_index = expr->subscript.index->type_index;
             if (info->context->type_buf[index_type_index] != primitive_u64) {
                 // TODO should we allow other integer types and insert automatic promotions as neccesary here??
+                print_file_pos(&expr->subscript.index->pos);
                 printf("Can only use u64 as an array index, not ");
                 print_type(info->context, index_type_index);
-                printf(" (Line %u)\n", (u64) expr->subscript.index->pos.line);
+                printf("\n");
                 bad = true;
             }
 
@@ -4734,18 +4783,20 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             u32 right_type_index = stmt->assignment.right->type_index;
 
             if (!type_cmp(info->context, left_type_index, right_type_index)) {
+                print_file_pos(&stmt->pos);
                 printf("Types on left and right side of assignment don't match: ");
                 print_type(info->context, left_type_index);
                 printf(" vs ");
                 print_type(info->context, right_type_index);
-                printf(" (Line %u)\n", (u64) stmt->pos.line);
+                printf("\n");
                 return false;
             }
 
             if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
+                print_file_pos(&stmt->pos);
                 printf("Can't assign to left hand side: ");
                 print_expr(info->context, info->func, stmt->assignment.left);
-                printf(" (Line %u)\n", (u64) stmt->pos.line);
+                printf("\n");
                 return false;
             }
         } break;
@@ -4778,11 +4829,12 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 } else if (var->type_index == 0) {
                     var->type_index = right->type_index;
                 } else if (!type_cmp(info->context, var->type_index, right->type_index)) {
+                    print_file_pos(&stmt->pos);
                     printf("Right hand side of variable declaration doesn't have correct type. Expected ");
                     print_type(info->context, var->type_index);
                     printf(" but got ");
                     print_type(info->context, right->type_index);
-                    printf(" (Line %u)\n", stmt->pos.line);
+                    printf("\n");
                     bad_types = true;
                 }
             }
@@ -4806,9 +4858,10 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
             Primitive condition_primitive = info->context->type_buf[stmt->conditional.condition->type_index];
             if (condition_primitive != primitive_bool) {
+                print_file_pos(&stmt->conditional.condition->pos);
                 printf("Expected bool but got ");
                 print_type(info->context, stmt->conditional.condition->type_index);
-                printf(" in 'if'-statement (Line %u)\n", stmt->conditional.condition->pos.line);
+                printf(" in 'if'-statement\n");
                 return false;
             }
 
@@ -4833,9 +4886,10 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
                 Primitive condition_primitive = info->context->type_buf[stmt->loop.condition->type_index];
                 if (condition_primitive != primitive_bool) {
+                    print_file_pos(&stmt->loop.condition->pos);
                     printf("Expected bool but got ");
                     print_type(info->context, stmt->loop.condition->type_index);
-                    printf(" in 'for'-loop (Line %u)\n", stmt->loop.condition->pos.line);
+                    printf(" in 'for'-loop\n");
                     return false;
                 }
             }
@@ -4851,7 +4905,8 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             if (!info->func->signature.has_output) {
                 if (stmt->return_value != null) {
                     u8* name = string_table_access(info->context->string_table, info->func->name);
-                    printf("Function '%s' is not declared to return anything, but tried to return a value (Line %u)\n", name, (u64) stmt->pos.line);
+                    print_file_pos(&stmt->pos);
+                    printf("Function '%s' is not declared to return anything, but tried to return a value\n", name);
                     return false;
                 }
 
@@ -4860,9 +4915,10 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
                 if (stmt->return_value == null) {
                     u8* name = string_table_access(info->context->string_table, info->func->name);
+                    print_file_pos(&stmt->pos);
                     printf("Function '%s' is declared to return a ", name);
                     print_type(info->context, expected_type_index);
-                    printf(", but tried to return a value. value (Line %u)\n", (u64) stmt->pos.line);
+                    printf(", but tried to return a value. value\n");
                     return false;
                 }
 
@@ -4872,11 +4928,12 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
                 if (!type_cmp(info->context, expected_type_index, stmt->return_value->type_index)) {
                     u8* name = string_table_access(info->context->string_table, info->func->name);
+                    print_file_pos(&stmt->pos);
                     printf("Expected ");
                     print_type(info->context, expected_type_index);
                     printf(" but got ");
                     print_type(info->context, stmt->return_value->type_index);
-                    printf(" for return value in function '%s' (Line %u)\n", name, stmt->pos.line);
+                    printf(" for return value in function '%s'\n", name);
                     return false;
                 }
             }
@@ -4929,15 +4986,17 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                 } else {
                     if (!global->checked) {
                         u8* name = string_table_access(info->context->string_table, global->var.name);
+                        print_file_pos(&expr->pos);
                         printf(
-                            "Can't use global variable '%s' in a compile time expression before its declaration on line %u (Line %u)\n",
-                            name, (u64) global->var.declaration_pos.line, (u64) expr->pos.line
+                            "Can't use global variable '%s' in a compile time expression before its declaration on line %u\n",
+                            name, (u64) global->var.declaration_pos.line
                         );
                     }
                     return eval_bad;
                 }
             } else {
-                printf("Can't use local variables in constant expressions (Line %u)\n", expr->pos.line);
+                print_file_pos(&expr->pos);
+                printf("Can't use local variables in constant expressions\n");
                 return eval_bad;
             }
         } break;
@@ -5170,7 +5229,8 @@ Control_Flow_Result check_control_flow(Stmt* stmt) {
 
     for (; stmt->kind != stmt_end; stmt = stmt->next) {
         if (has_returned) {
-            printf("Unreachable code (Line %u)\n", (u64) stmt->pos.line);
+            print_file_pos(&stmt->pos);
+            printf("Unreachable code\n");
             return control_flow_invalid;
         }
 
@@ -5259,11 +5319,12 @@ bool typecheck(Context* context) {
                     global->var.type_index = global->initial_expr->type_index;
                     resolved_type = true;
                 } else if (!type_cmp(context, global->var.type_index, global->initial_expr->type_index)) {
+                    print_file_pos(&global->var.declaration_pos);
                     printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
                     print_type(context, global->var.type_index);
                     printf(" but got ");
                     print_type(context, global->initial_expr->type_index);
-                    printf(" (Line %u)\n", global->var.declaration_pos.line);
+                    printf("\n");
                 } else {
                     resolved_type = true;
                 }
@@ -5342,7 +5403,8 @@ bool typecheck(Context* context) {
             valid = false;
         } else if (info.func->signature.has_output && result != control_flow_will_return) {
             u8* name = string_table_access(info.context->string_table, info.func->name);
-            printf("Function '%s' is missing a return statement (Line %u)\n", name, (u64) info.func->declaration_pos.line);
+            print_file_pos(&info.func->declaration_pos);
+            printf("Function '%s' is missing a return statement\n", name);
             valid = false;
         }
 
