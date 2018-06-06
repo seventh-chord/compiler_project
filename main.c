@@ -1266,9 +1266,7 @@ struct Stmt {
             Expr* right;
         } assignment;
 
-        struct {
-            Stmt* inner;
-        } block;
+        Stmt* block;
 
         struct {
             Expr* condition;
@@ -1497,6 +1495,7 @@ typedef struct Jump_Fixup {
 
 typedef struct Func {
     u32 name;
+    File_Pos declaration_pos;
 
     enum {
         func_kind_normal, // use '.body'
@@ -1855,8 +1854,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                     var = &func->body.vars[expr->variable.index];
                 }
 
-                u8* name = string_table_access(context->string_table, var->name);
-                printf("%s", name);
+                if (var != null) {
+                    u8* name = string_table_access(context->string_table, var->name);
+                    printf("%s", name);
+                }
             }
         } break;
 
@@ -1979,7 +1980,7 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
         case stmt_block: {
             printf("{\n");
 
-            print_stmts(context, func, stmt->block.inner, indent_level + 1);
+            print_stmts(context, func, stmt->block, indent_level + 1);
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
             printf("}");
@@ -2946,7 +2947,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                 }
 
                 stmt->kind = stmt_block;
-                stmt->block.inner = inner;
+                stmt->block = inner;
             } break;
 
             case token_keyword_if: {
@@ -3410,6 +3411,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     buf_push(context->funcs, ((Func) {0}));
     Func* func = buf_end(context->funcs) - 1;
     func->name = name_index;
+    func->declaration_pos = start->pos;
 
     // Parameter list
     t += 1;
@@ -3445,7 +3447,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
             func->body.output_var_index = buf_length(context->tmp_vars);
 
             Var output_var = {0};
-            output_var.name = string_table_intern(&context->string_table, "output", 6);
+            output_var.name = U32_MAX;
             output_var.type_index = output_type_index;
             buf_push(context->tmp_vars, output_var);
         }
@@ -4791,7 +4793,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case stmt_block: {
             typecheck_scope_push(info);
-            for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
+            for (Stmt* inner = stmt->block; inner->kind != stmt_end; inner = inner->next) {
                 if (!typecheck_stmt(info, inner)) return false;
             }
             typecheck_scope_pop(info);
@@ -5155,6 +5157,81 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
     }
 }
 
+typedef enum Control_Flow_Result {
+    control_flow_will_return,
+    control_flow_might_return,
+    control_flow_invalid,
+} Control_Flow_Result;
+
+Control_Flow_Result check_control_flow(Stmt* stmt) {
+    bool has_returned = false;
+
+    for (; stmt->kind != stmt_end; stmt = stmt->next) {
+        if (has_returned) {
+            printf("Unreachable code (Line %u)\n", (u64) stmt->pos.line);
+            return control_flow_invalid;
+        }
+
+        switch (stmt->kind) {
+            case stmt_declaration:
+            case stmt_expr:
+            case stmt_assignment:
+            {} break;
+
+            case stmt_block: {
+                Control_Flow_Result result = check_control_flow(stmt->block);
+                switch (result) {
+                    case control_flow_will_return: has_returned = true; break;
+                    case control_flow_might_return: break;
+                    case control_flow_invalid: return control_flow_invalid; break;
+                    default: assert(false);
+                }
+            } break;
+
+            case stmt_if: {
+                Control_Flow_Result then_result = check_control_flow(stmt->conditional.then);
+                if (then_result == control_flow_invalid) return then_result;
+
+                Control_Flow_Result else_result = control_flow_might_return;
+                if (stmt->conditional.else_then != null) {
+                    else_result = check_control_flow(stmt->conditional.else_then);
+                    if (else_result == control_flow_invalid) return else_result;
+                }
+
+                if (then_result == control_flow_will_return && else_result == control_flow_will_return) {
+                    has_returned = true;
+                }
+            } break;
+
+            case stmt_loop: {
+                Control_Flow_Result result = check_control_flow(stmt->loop.body);
+                switch (result) {
+                    case control_flow_will_return: has_returned = true; break;
+                    case control_flow_might_return: break;
+                    case control_flow_invalid: return control_flow_invalid; break;
+                    default: assert(false);
+                }
+            } break;
+
+            case stmt_return: {
+                has_returned = true;
+            } break;
+
+            case stmt_break:
+            case stmt_continue:
+            {
+                unimplemented(); // TODO
+            } break;
+        }
+    }
+
+    if (has_returned) {
+        return control_flow_will_return;
+    } else {
+        return control_flow_might_return;
+    }
+}
+
 bool typecheck(Context* context) {
     bool valid = true;
 
@@ -5250,10 +5327,21 @@ bool typecheck(Context* context) {
             info.scope->map[var_index] = true;
         }
 
+        // Types
         for (Stmt* stmt = info.func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
             if (!typecheck_stmt(&info, stmt)) {
                 valid = false;
             }
+        }
+
+        // Control flow
+        Control_Flow_Result result = check_control_flow(info.func->body.first_stmt);
+        if (result == control_flow_invalid) {
+            valid = false;
+        } else if (info.func->signature.has_output && result != control_flow_will_return) {
+            u8* name = string_table_access(info.context->string_table, info.func->name);
+            printf("Function '%s' is missing a return statement (Line %u)\n", name, (u64) info.func->declaration_pos.line);
+            valid = false;
         }
 
         arena_stack_pop(&context->stack);
@@ -6089,7 +6177,7 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
         } break;
 
         case stmt_block: {
-            for (Stmt* inner = stmt->block.inner; inner->kind != stmt_end; inner = inner->next) {
+            for (Stmt* inner = stmt->block; inner->kind != stmt_end; inner = inner->next) {
                 linearize_stmt(context, func, inner);
             }
         } break;
@@ -8258,6 +8346,8 @@ void print_verbose_info(Context* context) {
             {
                 printf("    %u variables: ", (u64) func->body.var_count);
                 for (u32 v = 0; v < func->body.var_count; v += 1) {
+                    if (v == func->body.output_var_index) continue;
+
                     Var* var = &func->body.vars[v];
                     u8* name = string_table_access(context->string_table, var->name);
 
