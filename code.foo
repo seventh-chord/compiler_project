@@ -152,11 +152,11 @@ fn remove_fifteen(p: *u8) {
     *p = *p - fifteen;
 }
 
-fn bar(a: u8, b: u8) -> u8 {
-    let dingus: u64 = 1;
-    dingus = dingus + u64(1 + u8(2));
-
-    return a + b*2 + u8(dingus);
+// Don't actually do this in real code, but you can use type names as identifier names
+fn bar(u8: u8, u32: u8) -> u8 {
+    let u64: u64 = 1;
+    u64 = u64 + u64(1 + u8(2));
+    return u8 + u32*2 + u8(u64);
 }
 
 fn foo(a: u8) -> u8 {
@@ -235,6 +235,12 @@ fn does_return_but_somewhat_sneakily() -> u8 {
     } else {
         return 2;
     }
+}
+
+
+struct Arena {
+    data: *u8;
+    used, capacity: u64;
 }
 
 /*

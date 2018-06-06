@@ -774,6 +774,9 @@ typedef struct Token {
         token_keyword_return,
         token_keyword_continue,
         token_keyword_break,
+        token_keyword_struct,
+        token_keyword_enum,
+        token_keyword_union,
         token_keyword_null,
         token_keyword_true,
         token_keyword_false,
@@ -845,6 +848,9 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_keyword_return]       = "return",
     [token_keyword_continue]     = "continue",
     [token_keyword_break]        = "break",
+    [token_keyword_struct]       = "struct",
+    [token_keyword_enum]         = "enum",
+    [token_keyword_union]        = "union",
     [token_keyword_true]         = "true",
     [token_keyword_false]        = "false",
     [token_keyword_null]         = "null",
@@ -901,6 +907,16 @@ typedef enum Primitive {
 } Primitive;
 
 Primitive DEFAULT_INTEGER_TYPE = primitive_i64;
+
+typedef struct Struct {
+    u32 name;
+
+    u32 member_count;
+    struct {
+        u32 name;
+        u32 type;
+    } *members;
+} Struct;
 
 void init_primitive_names(u32* names, u8** string_table) {
     names[primitive_unsolidified_int] = string_table_intern(string_table, "<int>", 5);
@@ -1822,6 +1838,18 @@ void print_type(Context* context, u32 type_index) {
 
         if (!keep_going) break;
     }
+}
+
+void print_struct(Context* context, Struct* s) {
+    u8* name = string_table_access(context->string_table, s->name);
+    printf("struct %s {\n", name);
+    for (u32 i = 0; i < s->member_count; i += 1) {
+        u8* member_name = string_table_access(context->string_table, s->members[i].name);
+        printf("    %s: ", member_name);
+        print_type(context, s->members[i].type);
+        printf(";\n");
+    }
+    printf("}\n");
 }
 
 void print_token(u8* string_table, Token* t) {
@@ -3528,6 +3556,115 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     }
 }
 
+Struct* parse_struct(Context* context, Token* t, u32* length) {
+    Token* t_start = t;
+
+    assert(t->kind == token_keyword_struct);
+    t += 1;
+
+    Struct* s = arena_new(&context->arena, Struct);
+
+    if (t->kind != token_identifier) {
+        print_file_pos(&t->pos);
+        printf("Expected struct name, but got ");
+        print_token(context->string_table, t);
+        printf("\n");
+        return null;
+    }
+    s->name = t->identifier_string_table_index;
+    t += 1;
+
+    if (!expect_single_token(context, t, token_bracket_curly_open, "after struct name")) return null;
+    t += 1;
+
+
+    typedef struct Member Member;
+    struct Member {
+        u32 name;
+        u32 type;
+        Member *next, *previous;
+    };
+
+    Member* first = null;
+    Member* last = null;
+
+    arena_stack_push(&context->stack);
+
+    while (true) {
+        u32 names_given = 0;
+        while (true) {
+            if (t->kind != token_identifier) {
+                print_file_pos(&t->pos);
+                printf("Expected member name, but got ");
+                print_token(context->string_table, t);
+                printf("\n");
+                return null;
+            }
+            u32 member_name = t->identifier_string_table_index;
+            t += 1;
+
+            Member* next = arena_new(&context->stack, Member);
+            next->name = member_name;
+
+            if (first == null) {
+                first = next;
+            } else {
+                next->previous = last;
+                last->next = next;
+            }
+            last = next;
+
+            names_given += 1;
+            s->member_count += 1;
+
+            if (t->kind == token_comma) {
+                t += 1;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if (!expect_single_token(context, t, token_colon, names_given > 1? "after member names" : "after member name")) return null;
+        t += 1;
+
+        u32 type_length = 0;
+        u32 type_index = parse_type(context, t, &type_length);
+        t += type_length;
+        if (type_index == U32_MAX) return null;
+
+        if (!expect_single_token(context, t, token_semicolon, "after member declaration")) return null;
+
+        Member* m = last;
+        for (u32 i = 0; i < names_given; i += 1) {
+            m->type = type_index;
+            m = m->previous;
+        }
+
+        t += 1;
+
+        if (t->kind == token_bracket_curly_close) {
+            t += 1;
+            break;
+        } else {
+            continue;
+        }
+    }
+
+    s->members = (void*) arena_alloc(&context->arena, s->member_count * sizeof(*s->members));
+
+    u32 i = 0;
+    for (Member* m = first; m != null; m = m->next, i += 1) {
+        s->members[i].name = m->name;
+        s->members[i].type = m->type;
+    }
+
+    arena_stack_pop(&context->stack);
+
+    *length = t - t_start;
+    return s;
+}
+
 bool parse_extern(Context* context, Token* t, u32* length) {
     assert(t->kind == token_keyword_extern);
 
@@ -3547,7 +3684,6 @@ bool parse_extern(Context* context, Token* t, u32* length) {
         printf("Expected library name, but got ");
         print_token(context->string_table, t);
         printf("\n");
-
         return false;
     }
     u8* library_name = t->string.bytes;
@@ -3621,7 +3757,7 @@ bool build_ast(Context* context, u8* path) {
 
     bool valid = true;
 
-    enum { KEYWORD_COUNT = 12 };
+    enum { KEYWORD_COUNT = 15 };
     u32 keyword_token_table[KEYWORD_COUNT][2] = {
         { token_keyword_fn,       string_table_intern_cstr(&context->string_table, "fn") },
         { token_keyword_extern,   string_table_intern_cstr(&context->string_table, "extern") },
@@ -3632,6 +3768,9 @@ bool build_ast(Context* context, u8* path) {
         { token_keyword_return,   string_table_intern_cstr(&context->string_table, "return") },
         { token_keyword_continue, string_table_intern_cstr(&context->string_table, "continue") },
         { token_keyword_break,    string_table_intern_cstr(&context->string_table, "break") },
+        { token_keyword_struct,   string_table_intern_cstr(&context->string_table, "struct") },
+        { token_keyword_enum,     string_table_intern_cstr(&context->string_table, "enum") },
+        { token_keyword_union,    string_table_intern_cstr(&context->string_table, "union") },
         { token_keyword_null,     string_table_intern_cstr(&context->string_table, "null") },
         { token_keyword_true,     string_table_intern_cstr(&context->string_table, "true") },
         { token_keyword_false,    string_table_intern_cstr(&context->string_table, "false") },
@@ -4145,7 +4284,7 @@ bool build_ast(Context* context, u8* path) {
 
     // Parse
     Token* t = tokens;
-    while (t->kind != token_end_of_stream) switch (t->kind) {
+    while (t->kind != token_end_of_stream && valid) switch (t->kind) {
         case token_keyword_fn: {
             u32 length = 0;
             Func* func = parse_function(context, t, &length);
@@ -4223,6 +4362,22 @@ bool build_ast(Context* context, u8* path) {
             assert(buf_length(context->global_vars) < MAX_LOCAL_VARS);
         } break;
 
+        case token_keyword_struct: {
+            u32 length = 0;
+            Struct* s = parse_struct(context, t, &length);
+            t += length;
+
+            print_struct(context, s);
+        } break;
+
+        case token_keyword_enum: {
+            unimplemented(); // TODO
+        } break;
+
+        case token_keyword_union: {
+            unimplemented(); // TODO
+        } break;
+
         default: {
             valid = false;
 
@@ -4230,9 +4385,6 @@ bool build_ast(Context* context, u8* path) {
             printf("Found invalid token at global scope: ");
             print_token(context->string_table, t);
             printf("\n");
-
-            t += 1;
-            while (t->kind != token_keyword_fn && t->kind != token_keyword_extern && t->kind != token_end_of_stream) { t += 1; }
         } break;
     }
 
@@ -8510,9 +8662,9 @@ bool build_file_to_executable(u8* source_path, u8* exe_path) {
 }
 
 bool run_executable(u8* exe_path) {
-    STARTUPINFO startup_info = {0};
-    startup_info.size = sizeof(STARTUPINFO);
-    PROCESSINFO process_info = {0};
+    Startup_Info startup_info = {0};
+    startup_info.size = sizeof(Startup_Info);
+    Process_Info process_info = {0};
     bool result = CreateProcessA(exe_path, "", null, null, false, 0, null, null, &startup_info, &process_info);
     if (!result) {
         printf("Failed to start generated executable\n");

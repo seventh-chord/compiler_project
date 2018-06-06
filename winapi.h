@@ -71,8 +71,8 @@ WINAPI_PRE bool WINAPI_POST WriteFile(
 #define INVALID_HANDLE_VALUE  ((Handle)-1)
 #define FILE_ATTRIBUTE_NORMAL 0x80
 
-typedef struct STARTUPINFO STARTUPINFO;
-typedef struct PROCESSINFO PROCESSINFO;
+typedef struct Startup_Info Startup_Info;
+typedef struct Process_Info Process_Info;
 
 WINAPI_PRE bool WINAPI_POST CreateProcessA(
   u8* application_name,
@@ -83,11 +83,11 @@ WINAPI_PRE bool WINAPI_POST CreateProcessA(
   u32 creation_flags,
   void* environment,
   u8* current_directory,
-  STARTUPINFO* startup_info,
-  PROCESSINFO* process_info
+  Startup_Info* startup_info,
+  Process_Info* process_info
 );
 
-struct STARTUPINFO {
+struct Startup_Info {
     u32 size;
     void* reserved_1;
     u8* desktop;
@@ -105,7 +105,7 @@ struct STARTUPINFO {
     Handle stderr;
 };
 
-struct PROCESSINFO {
+struct Process_Info {
     Handle process;
     Handle thread;
     u32 process_id;
