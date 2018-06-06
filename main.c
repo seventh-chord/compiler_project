@@ -3393,9 +3393,11 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     }
     u32 name_index = t->identifier_string_table_index;
 
-    if (find_func(context, name_index) != U32_MAX) {
+    u32 other_func_index = find_func(context, name_index);
+    if (other_func_index != U32_MAX) {
+        Func* other_func = &context->funcs[other_func_index];
         u8* name = string_table_access(context->string_table, name_index);
-        printf("Second definition of function '%s' on line %u\n", name, (u64) declaration_pos.line);
+        printf("A function called '%s' is defined both on line %u and line %u\n", name, (u64) declaration_pos.line, (u64) other_func->declaration_pos.line);
         valid = false;
     }
 
