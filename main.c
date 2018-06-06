@@ -1538,6 +1538,12 @@ typedef struct Func {
 
 typedef struct On_Scope_Exit On_Scope_Exit;
 struct On_Scope_Exit {
+    enum {
+        scope_hook_return,
+        scope_hook_break,
+        scope_hook_continue,
+    } kind;
+
     u32 op_index;
     On_Scope_Exit* next;
 };
@@ -1771,7 +1777,7 @@ u32 type_duplicate(Context* context, u32 type_index) {
 
 
 void print_file_pos(File_Pos* pos) {
-    printf("%s:%u: ", pos->file_name, (u64) pos->line);
+    printf("(%s:%u) ", pos->file_name, (u64) pos->line);
 }
 
 void print_type(Context* context, u32 type_index) {
@@ -4941,10 +4947,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case stmt_continue:
         case stmt_break:
-        {
-            // TODO check if the statement actually is inside a loop we can break/continue from
-            unimplemented();
-        } break;
+        {} break; // Any fancy logic goes in 'check_control_flow'
 
         default: assert(false);
     }
@@ -5224,11 +5227,12 @@ typedef enum Control_Flow_Result {
     control_flow_invalid,
 } Control_Flow_Result;
 
-Control_Flow_Result check_control_flow(Stmt* stmt) {
+Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop) {
     bool has_returned = false;
+    bool has_skipped_out = false; // continue or break
 
     for (; stmt->kind != stmt_end; stmt = stmt->next) {
-        if (has_returned) {
+        if (has_returned || has_skipped_out) {
             print_file_pos(&stmt->pos);
             printf("Unreachable code\n");
             return control_flow_invalid;
@@ -5241,7 +5245,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt) {
             {} break;
 
             case stmt_block: {
-                Control_Flow_Result result = check_control_flow(stmt->block);
+                Control_Flow_Result result = check_control_flow(stmt->block, parent_loop);
                 switch (result) {
                     case control_flow_will_return: has_returned = true; break;
                     case control_flow_might_return: break;
@@ -5251,12 +5255,12 @@ Control_Flow_Result check_control_flow(Stmt* stmt) {
             } break;
 
             case stmt_if: {
-                Control_Flow_Result then_result = check_control_flow(stmt->conditional.then);
+                Control_Flow_Result then_result = check_control_flow(stmt->conditional.then, parent_loop);
                 if (then_result == control_flow_invalid) return then_result;
 
                 Control_Flow_Result else_result = control_flow_might_return;
                 if (stmt->conditional.else_then != null) {
-                    else_result = check_control_flow(stmt->conditional.else_then);
+                    else_result = check_control_flow(stmt->conditional.else_then, parent_loop);
                     if (else_result == control_flow_invalid) return else_result;
                 }
 
@@ -5266,7 +5270,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt) {
             } break;
 
             case stmt_loop: {
-                Control_Flow_Result result = check_control_flow(stmt->loop.body);
+                Control_Flow_Result result = check_control_flow(stmt->loop.body, stmt);
                 switch (result) {
                     case control_flow_will_return: has_returned = true; break;
                     case control_flow_might_return: break;
@@ -5282,7 +5286,13 @@ Control_Flow_Result check_control_flow(Stmt* stmt) {
             case stmt_break:
             case stmt_continue:
             {
-                unimplemented(); // TODO
+                if (parent_loop == null) {
+                    print_file_pos(&stmt->pos);
+                    printf("%s outside of loop\n", stmt->kind == stmt_break? "break" : "continue");
+                    return control_flow_invalid;
+                } else {
+                    has_skipped_out = true;
+                }
             } break;
         }
     }
@@ -5398,7 +5408,7 @@ bool typecheck(Context* context) {
         }
 
         // Control flow
-        Control_Flow_Result result = check_control_flow(info.func->body.first_stmt);
+        Control_Flow_Result result = check_control_flow(info.func->body.first_stmt, null);
         if (result == control_flow_invalid) {
             valid = false;
         } else if (info.func->signature.has_output && result != control_flow_will_return) {
@@ -6294,10 +6304,34 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
                 },
             }));
 
+            u32 loop_end = buf_length(context->tmp_ops);
+
             if (stmt->loop.condition != null) {
                 Op* initial_jump_pointer = &context->tmp_ops[initial_jump];
                 assert(initial_jump_pointer->kind == op_jump);
                 initial_jump_pointer->jump.to_op = buf_length(context->tmp_ops);
+            }
+
+            On_Scope_Exit* hook = context->on_scope_exit;
+            On_Scope_Exit** unlink_slot = &context->on_scope_exit;
+
+            while (hook != null) {
+                if (hook->kind == scope_hook_break || hook->kind == scope_hook_continue) {
+                    Op* jump = &context->tmp_ops[hook->op_index];
+                    assert(jump->kind == op_jump);
+
+                    switch (hook->kind) {
+                        case scope_hook_break:    jump->jump.to_op = loop_end; break;
+                        case scope_hook_continue: jump->jump.to_op = loop_start; break;
+                        default: assert(false);
+                    }
+
+                    *unlink_slot = hook->next;
+                } else {
+                    unlink_slot = &hook->next;
+                }
+
+                hook = hook->next;
             }
         } break;
 
@@ -6322,6 +6356,7 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             buf_push(context->tmp_ops, op);
 
             On_Scope_Exit* hook = arena_new(&context->arena, On_Scope_Exit);
+            hook->kind = scope_hook_return;
             hook->op_index = jump_index;
             add_on_scope_exit(context, hook);
         } break;
@@ -6329,7 +6364,23 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
         case stmt_break:
         case stmt_continue:
         {
-            unimplemented();
+            Op op = {0};
+            op.kind = op_jump;
+            op.jump.conditional = false;
+            u32 jump_index = buf_length(context->tmp_ops);
+            buf_push(context->tmp_ops, op);
+
+            int kind;
+            switch (stmt->kind) {
+                case stmt_break:    kind = scope_hook_break;    break;
+                case stmt_continue: kind = scope_hook_continue; break;
+                default: assert(false);
+            }
+
+            On_Scope_Exit* hook = arena_new(&context->arena, On_Scope_Exit);
+            hook->kind = kind;
+            hook->op_index = jump_index;
+            add_on_scope_exit(context, hook);
         } break;
 
         default: assert(false);
@@ -6350,6 +6401,7 @@ void build_intermediate(Context* context) {
         }
 
         for (On_Scope_Exit* hook = context->on_scope_exit; hook != null; hook = hook->next) {
+            assert(hook->kind == scope_hook_return);
             Op* jump = &context->tmp_ops[hook->op_index];
             assert(jump->kind == op_jump);
             jump->jump.to_op = buf_length(context->tmp_ops);
