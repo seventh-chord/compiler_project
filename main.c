@@ -1136,7 +1136,7 @@ struct Expr { // 'typedef'd earlier!
         } subscript;
 
         struct {
-            Expr* value;
+            Expr* parent;
             union { u32 member_name; u32 member_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
         } member_access;
     };
@@ -1688,6 +1688,7 @@ u64 type_size_of(Type* type) {
 bool primitive_is_compound(Primitive primitive) {
     switch (primitive) {
         case primitive_array: return true;
+        case primitive_struct: return true;
 
         case primitive_u8:  return false;
         case primitive_u16: return false;
@@ -1749,6 +1750,7 @@ bool primitive_is_signed(Primitive primitive) {
         case primitive_void:
         case primitive_pointer:
         case primitive_array:
+        case primitive_struct:
         case primitive_unsolidified_int:
         case primitive_bool:
         {
@@ -2008,13 +2010,13 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         } break;
 
         case expr_member_access: {
-            print_expr(context, func, expr->member_access.value);
+            print_expr(context, func, expr->member_access.parent);
             printf(".");
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
                 u8* name = string_table_access(context->string_table, expr->member_access.member_name);
                 printf("<unresolved %s>", name);
             } else {
-                Type* s = expr->member_access.value->type;
+                Type* s = expr->member_access.parent->type;
                 if (s->kind == primitive_pointer) {
                     s = s->pointer_to;
                 }
@@ -2302,6 +2304,26 @@ Type* parse_primitive_name(Context* context, u32 name_index) {
     return null;
 }
 
+Type* parse_user_type_name(Context* context, u32 name_index) {
+    buf_foreach (Type, user_type, context->user_types) {
+        u32 user_type_name = 0;
+        switch (user_type->kind) {
+            case primitive_struct: {
+                user_type_name = user_type->structure.name;
+            } break;
+
+            default: assert(false);
+        }
+
+        if (name_index == user_type_name) {
+            return user_type;
+            break;
+        }
+    }
+
+    return null;
+}
+
 Type* parse_type(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
@@ -2320,6 +2342,10 @@ Type* parse_type(Context* context, Token* t, u32* length) {
         switch (t->kind) {
             case token_identifier: {
                 base_type = parse_primitive_name(context, t->identifier_string_table_index);
+
+                if (base_type == null) {
+                    base_type = parse_user_type_name(context, t->identifier_string_table_index);
+                }
 
                 if (base_type == null) {
                     base_type = arena_new(&context->arena, Type);
@@ -2581,7 +2607,7 @@ void shunting_yard_push_member_access(Context* context, Shunting_Yard* yard, u32
 
     Expr* expr = arena_new(&context->arena, Expr);
     expr->kind = expr_member_access;
-    expr->member_access.value = *structure;
+    expr->member_access.parent = *structure;
     expr->member_access.member_name = member_name;
     expr->flags = EXPR_FLAG_UNRESOLVED;
     expr->pos = expr->subscript.array->pos;
@@ -5047,7 +5073,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         } break;
 
         case expr_member_access: {
-            Expr* parent = expr->member_access.value;
+            Expr* parent = expr->member_access.parent;
 
             if (!typecheck_expr(info, parent, &info->context->primitive_types[primitive_invalid])) {
                 return false;
@@ -5675,33 +5701,15 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
             } break;
 
             case primitive_unresolved_name: {
-                u32 name = type->unresolved_name;
+                type = parse_user_type_name(context, type->unresolved_name);
 
-                Type* resolved_type = null;
-                buf_foreach (Type, user_type, context->user_types) {
-                    u32 user_type_name = 0;
-                    switch (user_type->kind) {
-                        case primitive_struct: {
-                            user_type_name = user_type->structure.name;
-                        } break;
-
-                        default: assert(false);
-                    }
-
-                    if (name == user_type_name) {
-                        resolved_type = user_type;
-                        break;
-                    }
-                }
-
-                if (resolved_type == null) {
-                    u8* name_string = string_table_access(context->string_table, name);
+                if (type == null) {
+                    u8* name_string = string_table_access(context->string_table, type->unresolved_name);
                     print_file_pos(pos);
                     printf("No such type: '%s'\n", name_string);
                     return false;
                 }
 
-                type = resolved_type;
                 done = true;
             } break;
 
@@ -6463,6 +6471,50 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             intermediate_deallocate_temporary(context, offset);
         } break;
 
+        case expr_member_access: {
+            u32 m = expr->member_access.member_index;
+            Type* parent_type = expr->member_access.parent->type;
+
+            Type* struct_type = parent_type;
+            bool is_pointer = false;
+            if (struct_type->kind == primitive_pointer) {
+                assert(struct_type->pointer_to->kind == primitive_struct);
+                struct_type = struct_type->pointer_to;
+                is_pointer = true;
+            }
+
+
+            Local base_pointer;
+            if (get_address) {
+                base_pointer = assign_to;
+            } else {
+                base_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+            }
+            linearize_expr(context, expr->member_access.parent, base_pointer, !is_pointer);
+
+            u64 offset = struct_type->structure.members[m].offset;
+
+            Op op = {0};
+            op.kind = op_add;
+            op.primitive = primitive_pointer;
+            op.binary.source = (Local) { local_literal, false, offset };
+            op.binary.target = base_pointer;
+            buf_push(context->tmp_ops, op);
+
+            if (!get_address) {
+                if (primitive_is_compound(target_primitive)) {
+                    assert(assign_to.as_reference);
+                }
+
+                Type* child_type = expr->type; 
+                assert(child_type == struct_type->structure.members[m].type);
+
+                base_pointer.as_reference = true;
+                intermediate_write_compound_set(context, base_pointer, assign_to, child_type);
+                intermediate_deallocate_temporary(context, base_pointer);
+            }
+        } break;
+
         default: assert(false);
     }
 }
@@ -6545,6 +6597,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
     switch (left->kind) {
         case expr_subscript:
         case expr_unary:
+        case expr_member_access:
         {
             if (left->kind == expr_unary && left->unary.op != unary_dereference) {
                 break;
@@ -9011,9 +9064,11 @@ void print_verbose_info(Context* context) {
 
 bool build_file_to_executable(u8* source_path, u8* exe_path) {
     Context context = {0};
+
     if (!build_ast(&context, source_path)) return false;
     if (!typecheck(&context)) return false;
-    print_verbose_info(&context);
+    printf("%u\n", context.arena.current_page->used);
+    //print_verbose_info(&context);
     build_intermediate(&context);
     build_machinecode(&context);
     if (!write_executable(exe_path, &context)) return false;

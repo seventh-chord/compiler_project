@@ -6,13 +6,13 @@ struct Foo {
 let mister_worldwide: Foo;
 //let mister_worldwide = Foo { a: 1 }; // TODO next up
 
-fn set_foo() {
+fn foozleschmuzle() {
     mister_worldwide.a = 7;
     print_foo(&mister_worldwide);
 }
 
 fn print_foo(foo: *Foo) {
-    print("Foo { a: \n");
+    print("Foo { a: ");
     print_u64(u64(foo.a), 10);
     print(" }\n");
 }
@@ -81,6 +81,8 @@ fn main() {
     test_fancy_casts();
     say_my_name();
     test_is_prime();
+
+    foozleschmuzle();
 
     ExitProcess(0);
 }
