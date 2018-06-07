@@ -238,10 +238,12 @@ fn does_return_but_somewhat_sneakily() -> u8 {
 }
 
 
+/*
 struct Arena {
     data: *u8;
     used, capacity: u64;
 }
+*/
 
 /*
 uninitialized (zeroed) global variables in .bss
@@ -251,6 +253,7 @@ size_of, align_of, type_of
 more operators      <<   >>   |   &   ~   ||   &&    /=    *=
 character literals
 variable shadowing
+taking the address of temporaries
 
 .pdata and unwind info
 debug info
