@@ -730,6 +730,7 @@ typedef struct Token {
         token_bracket_curly_close  = '}',
         token_semicolon = ';',
         token_comma     = ',',
+        token_dot       = '.',
         token_colon     = ':',
 
         token_add = '+',
@@ -828,16 +829,17 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_add_assign]           = "+=",
     [token_sub_assign]           = "-=",
 
-    [token_semicolon]            = "semicolon ';'",
-    [token_comma]                = "comma ','",
-    [token_colon]                = "colon ':'",
+    [token_dot]                  = "a dot '.'",
+    [token_semicolon]            = "a semicolon ';'",
+    [token_comma]                = "a comma ','",
+    [token_colon]                = "a colon ':'",
 
-    [token_bracket_round_open]   = "opening parenthesis '('",
-    [token_bracket_round_close]  = "closing parenthesis ')'",
-    [token_bracket_square_open]  = "opening square bracket '['",
-    [token_bracket_square_close] = "closing square bracket ']'",
-    [token_bracket_curly_open]   = "opening curly brace '{'",
-    [token_bracket_curly_close]  = "closing curly brace '}'",
+    [token_bracket_round_open]   = "an opening parenthesis '('",
+    [token_bracket_round_close]  = "a closing parenthesis ')'",
+    [token_bracket_square_open]  = "an opening square bracket '['",
+    [token_bracket_square_close] = "a closing square bracket ']'",
+    [token_bracket_curly_open]   = "an opening curly brace '{'",
+    [token_bracket_curly_close]  = "a closing curly brace '}'",
 
     [token_keyword_fn]           = "fn",
     [token_keyword_extern]       = "extern",
@@ -884,10 +886,8 @@ enum { POINTER_SIZE = 8 };
 Primitive DEFAULT_INTEGER_TYPE = primitive_u64; // TODO make this primitive_i64
 
 u8* PRIMITIVE_NAMES[PRIMITIVE_COUNT] = {
-    [primitive_invalid]          = "invalid",
     [primitive_void]             = "void",
     [primitive_bool]             = "bool",
-    [primitive_unsolidified_int] = "<int>",
     [primitive_u8]               = "u8",
     [primitive_u16]              = "u16",
     [primitive_u32]              = "u32",
@@ -896,17 +896,25 @@ u8* PRIMITIVE_NAMES[PRIMITIVE_COUNT] = {
     [primitive_i16]              = "i16",
     [primitive_i32]              = "i32",
     [primitive_i64]              = "i64",
-    [primitive_pointer]          = "pointer",
-    [primitive_array]            = "array",
+
+    [primitive_invalid]          = "<invalid>",
+    [primitive_unsolidified_int] = "<int>",
+    [primitive_pointer]          = "<pointer>",
+    [primitive_array]            = "<array>",
     [primitive_unresolved_name]  = "<unresolved>",
-    [primitive_struct]           = "struct",
+    [primitive_struct]           = "<struct>",
 };
+
+
+#define TYPE_FLAG_SIZE_NOT_COMPUTED 0x01
+#define TYPE_FLAG_UNRESOLVED        0x02
 
 typedef struct Type Type;
 typedef struct Type_List Type_List;
 
 struct Type {
     Primitive kind;
+    u32 flags;
 
     union {
         u32 primitive_name;
@@ -919,6 +927,8 @@ struct Type {
             struct {
                 u32 name;
                 Type* type;
+                File_Pos declaration_pos;
+                u64 offset;
             } *members;
 
             u64 size, align;
@@ -1071,6 +1081,7 @@ typedef enum Expr_Kind {
     expr_call,
     expr_cast,
     expr_subscript,
+    expr_member_access,
 } Expr_Kind;
 
 struct Expr { // 'typedef'd earlier!
@@ -1078,7 +1089,7 @@ struct Expr { // 'typedef'd earlier!
     u8 flags;
 
     union {
-        union { u32 index; u32 unresolved_name; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
+        union { u32 unresolved_name; u32 index; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
 
         struct {
             u64 value;
@@ -1111,10 +1122,7 @@ struct Expr { // 'typedef'd earlier!
         } unary;
 
         struct {
-            union {
-                u32 unresolved_name;
-                u32 func_index;
-            }; // discriminated by EXPR_FLAG_UNRESOLVED
+            union { u32 unresolved_name; u32 func_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
 
             Expr_List* params;
             u32 param_count;
@@ -1126,6 +1134,11 @@ struct Expr { // 'typedef'd earlier!
             Expr* array;
             Expr* index;
         } subscript;
+
+        struct {
+            Expr* value;
+            union { u32 member_name; u32 member_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
+        } member_access;
     };
 
     Type* type;
@@ -1537,6 +1550,10 @@ Type* get_pointer_type(Context* context, Type* type) {
         type->pointer_type = arena_new(&context->arena, Type);
         type->pointer_type->kind = primitive_pointer;
         type->pointer_type->pointer_to = type;
+
+        if (type->flags & TYPE_FLAG_UNRESOLVED) {
+            type->pointer_type->flags = TYPE_FLAG_UNRESOLVED;
+        }
     }
 
     return type->pointer_type;
@@ -1557,12 +1574,17 @@ Type* get_array_type(Context* context, Type* type, u64 length) {
     new->type.array.length = length;
     new->type.array.of = type;
 
+    if (type->flags & TYPE_FLAG_UNRESOLVED) {
+        new->type.flags = TYPE_FLAG_UNRESOLVED;
+    }
+
     return &new->type;
 }
 
 void init_primitive_types(Context* context) {
     #define init_primitive(kind) context->primitive_types[kind] = (Type) { kind, .primitive_name = string_table_intern_cstr(&context->string_table, PRIMITIVE_NAMES[kind]) };
 
+    init_primitive(primitive_invalid);
     init_primitive(primitive_void);
     init_primitive(primitive_bool);
     init_primitive(primitive_unsolidified_int);
@@ -1637,7 +1659,7 @@ u8 primitive_size_of(Primitive primitive) {
     }
 }
 
-u64 type_size_of(Context* context, Type* type) {
+u64 type_size_of(Type* type) {
     u64 array_multiplier = 1;
 
     while (true) {
@@ -1646,20 +1668,22 @@ u64 type_size_of(Context* context, Type* type) {
             type = type->array.of;
 
         } else {
+            assert(!(type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED));
+
             u64 base_size;
-            if (type->kind == primitive_array) {
+            if (type->kind == primitive_struct) {
                 base_size = type->structure.size;
             } else {
                 base_size = primitive_size_of(type->kind);
             }
 
-            return array_multiplier * base_size;
+            return base_size * array_multiplier;
         }
     }
 
     assert(false);
     return 0;
-} 
+}
 
 bool primitive_is_compound(Primitive primitive) {
     switch (primitive) {
@@ -1690,6 +1714,9 @@ bool primitive_is_integer(Primitive primitive) {
         case primitive_array:
         case primitive_struct:
         case primitive_bool:
+        case primitive_unsolidified_int:
+        case primitive_unresolved_name:
+        case primitive_invalid:
         {
             return false;
         } break;
@@ -1706,11 +1733,7 @@ bool primitive_is_integer(Primitive primitive) {
             return true;
         } break;
 
-        case primitive_unsolidified_int:
-        case primitive_unresolved_name:
-        case primitive_invalid:
-        default:
-        {
+        default: {
             assert(false);
             return false;
         } break;
@@ -1840,6 +1863,12 @@ void print_type(Context* context, Type* type) {
             case primitive_struct: {
                 u8* name = string_table_access(context->string_table, type->structure.name);
                 printf(name);
+                type = null;
+            } break;
+
+            case primitive_unresolved_name: {
+                u8* name = string_table_access(context->string_table, type->unresolved_name);
+                printf("<unresolved %s>", name);
                 type = null;
             } break;
 
@@ -1976,6 +2005,25 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             printf("[");
             print_expr(context, func, expr->subscript.index);
             printf("]");
+        } break;
+
+        case expr_member_access: {
+            print_expr(context, func, expr->member_access.value);
+            printf(".");
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                u8* name = string_table_access(context->string_table, expr->member_access.member_name);
+                printf("<unresolved %s>", name);
+            } else {
+                Type* s = expr->member_access.value->type;
+                if (s->kind == primitive_pointer) {
+                    s = s->pointer_to;
+                }
+                assert(s->kind == primitive_struct);
+
+                u32 name_index = s->structure.members[expr->member_access.member_index].name;
+                u8* name = string_table_access(context->string_table, name_index);
+                printf(name);
+            }
         } break;
 
         default: assert(false);
@@ -2272,13 +2320,15 @@ Type* parse_type(Context* context, Token* t, u32* length) {
         switch (t->kind) {
             case token_identifier: {
                 base_type = parse_primitive_name(context, t->identifier_string_table_index);
-                t += 1;
 
                 if (base_type == null) {
                     base_type = arena_new(&context->arena, Type);
                     base_type->kind = primitive_unresolved_name;
                     base_type->unresolved_name = t->identifier_string_table_index;
+                    base_type->flags |= TYPE_FLAG_UNRESOLVED;
                 }
+
+                t += 1;
             } break;
 
             case token_bracket_square_open: {
@@ -2372,6 +2422,7 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
     struct Member {
         u32 name;
         Type* type;
+        File_Pos pos;
         Member *next, *previous;
     };
 
@@ -2380,21 +2431,22 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
 
     arena_stack_push(&context->stack);
 
-    while (true) {
+    while (t->kind != token_bracket_curly_close) {
         u32 names_given = 0;
         while (true) {
             if (t->kind != token_identifier) {
                 print_file_pos(&t->pos);
-                printf("Expected member name, but got ");
+                printf("Expected a member name, but got ");
                 print_token(context->string_table, t);
                 printf("\n");
                 return null;
             }
-            u32 member_name = t->identifier_string_table_index;
-            t += 1;
 
             Member* next = arena_new(&context->stack, Member);
-            next->name = member_name;
+            next->name = t->identifier_string_table_index;
+            next->pos = t->pos;
+
+            t += 1;
 
             if (first == null) {
                 first = next;
@@ -2432,14 +2484,8 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
         }
 
         t += 1;
-
-        if (t->kind == token_bracket_curly_close) {
-            t += 1;
-            break;
-        } else {
-            continue;
-        }
     }
+    t += 1;
 
     type->structure.members = (void*) arena_alloc(&context->arena, type->structure.member_count * sizeof(*type->structure.members));
 
@@ -2447,13 +2493,12 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
     for (Member* m = first; m != null; m = m->next, i += 1) {
         type->structure.members[i].name = m->name;
         type->structure.members[i].type = m->type;
+        type->structure.members[i].declaration_pos = m->pos;
     }
 
     arena_stack_pop(&context->stack);
 
-    // Lay out and compute size
-    // TODO This should go in typecheck, as we need to know the size of other struct types for this too!
-    unimplemented();
+    type->flags |= TYPE_FLAG_SIZE_NOT_COMPUTED;
 
     *length = t - t_start;
     return type;
@@ -2504,13 +2549,11 @@ void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* i
     Expr** array = &yard->expr_queue[yard->expr_queue_index - 1];
 
     while (true) {
-        bool done = false;
         if ((*array)->kind == expr_unary) {
             array = &((*array)->unary.inner);
         } else {
-            done = true;
+            break;
         }
-        if (done) break;
     }
 
     Expr* expr = arena_new(&context->arena, Expr);
@@ -2520,6 +2563,30 @@ void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* i
     expr->pos = expr->subscript.array->pos;
 
     *array = expr;
+}
+
+void shunting_yard_push_member_access(Context* context, Shunting_Yard* yard, u32 member_name) {
+    assert(yard->unary_prefix == null);
+    assert(yard->expr_queue_index > 0);
+
+    Expr** structure = &yard->expr_queue[yard->expr_queue_index - 1];
+
+    while (true) {
+        if ((*structure)->kind == expr_unary) {
+            structure = &((*structure)->unary.inner);
+        } else {
+            break;
+        }
+    }
+
+    Expr* expr = arena_new(&context->arena, Expr);
+    expr->kind = expr_member_access;
+    expr->member_access.value = *structure;
+    expr->member_access.member_name = member_name;
+    expr->flags = EXPR_FLAG_UNRESOLVED;
+    expr->pos = expr->subscript.array->pos;
+
+    *structure = expr;
 }
 
 void shunting_yard_push_expr(Context* context, Shunting_Yard* yard, Expr* new_expr) {
@@ -2916,6 +2983,26 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     could_parse = true;
                 } break;
 
+                case token_dot: {
+                    t += 1;
+
+                    if (t->kind != token_identifier) {
+                        print_file_pos(&t->pos);
+                        printf("Expected member name, but got ");
+                        print_token(context->string_table, t);
+                        printf("\n");
+                        *length = t - t_start;
+                        return null;
+                    }
+                    u32 member_name = t->identifier_string_table_index;
+                    t += 1;
+
+                    shunting_yard_push_member_access(context, yard, member_name);
+
+                    expect_value = false;
+                    could_parse = true;
+                } break;
+
                 // End of expression
                 case token_semicolon:
                 case token_comma:
@@ -2972,9 +3059,9 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
             if (expect_value) {
                 printf("a value or a unary operator");
             } else {
-                printf("a binary operator or a postfix operator (array subscript or member access)");
+                printf("a binary operator or a postfix operator");
             }
-            printf(" but got ");
+            printf(", but got ");
             print_token(context->string_table, t);
             printf("\n");
 
@@ -4243,6 +4330,10 @@ bool build_ast(Context* context, u8* path) {
             i += 1;
             buf_push(tokens, ((Token) { token_comma, .pos = file_pos }));
         } break;
+        case '.': {
+            i += 1;
+            buf_push(tokens, ((Token) { token_dot, .pos = file_pos }));
+        } break;
         case ':': {
             i += 1;
             buf_push(tokens, ((Token) { token_colon, .pos = file_pos }));
@@ -4382,8 +4473,6 @@ bool build_ast(Context* context, u8* path) {
             u32 length = 0;
             Type* type = parse_struct_declaration(context, t, &length);
             t += length;
-
-            print_type(context, type);
 
             // NB in order to avoid to many nested pointers, we just copy the full type into our buffer.
             // This essentially orphans/leaks the type allocated by 'parse_struct_declaration'.
@@ -4568,7 +4657,6 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
         case expr_variable: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                bool assignable = true;
                 u32 var_index = find_var(info->context, info->func, expr->variable.unresolved_name);
 
                 if (var_index == U32_MAX) {
@@ -4623,10 +4711,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
                 expr->variable.index = var_index;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
-
-                if (assignable) {
-                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
-                }
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             }
 
             if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
@@ -4792,13 +4877,15 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             u32 invalid = 0;
 
             if (primitive == primitive_pointer) {
-                typecheck_expr(info, expr->cast_from, expr->type);
+                if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
+
                 Primitive from_primitive = expr->cast_from->type->kind;
                 if (from_primitive != primitive_pointer) {
                     invalid = 2;
                 }
             } else if (primitive_is_integer(primitive)) {
-                typecheck_expr(info, expr->cast_from, expr->type);
+                if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
+
                 Primitive from_primitive = expr->cast_from->type->kind;
                 if (!primitive_is_integer(from_primitive)) {
                     invalid = 2;
@@ -4959,7 +5046,58 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             if (bad) return false;
         } break;
 
+        case expr_member_access: {
+            Expr* parent = expr->member_access.value;
+
+            if (!typecheck_expr(info, parent, &info->context->primitive_types[primitive_invalid])) {
+                return false;
+            }
+
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                u32 access_name = expr->member_access.member_name;
+
+                Type* s = parent->type;
+                if (s->kind == primitive_pointer && s->pointer_to->kind == primitive_struct) {
+                    s = s->pointer_to;
+                }
+
+                bool has_member = false;
+                if (s->kind == primitive_struct) {
+                    for (u32 m = 0; m < s->structure.member_count; m += 1) {
+                        u32 member_name = s->structure.members[m].name;
+                        if (member_name == access_name) {
+                            expr->member_access.member_index = m;
+                            expr->type = s->structure.members[m].type;
+                            expr->flags &= ~EXPR_FLAG_UNRESOLVED;
+                            has_member = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!has_member) {
+                    u8* name_string = string_table_access(info->context->string_table, access_name);
+                    print_file_pos(&expr->pos);
+                    print_type(info->context, parent->type);
+                    printf(" has no member '%s'\n", name_string);
+                    return false;
+                }
+            }
+
+            if (parent->flags & EXPR_FLAG_ASSIGNABLE) {
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            }
+        } break;
+
         default: assert(false);
+    }
+
+    if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
+        if (resolve_type(info->context, &expr->type, &expr->pos)) {
+            expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
+        } else {
+            return false;
+        }
     }
 
     return true;
@@ -5153,7 +5291,7 @@ typedef enum Eval_Result {
 
 // NB This will allocate on context->stack, push/pop before/after
 Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
-    u64 type_size = type_size_of(info->context, expr->type);
+    u64 type_size = type_size_of(expr->type);
     assert(type_size > 0);
 
     switch (expr->kind) {
@@ -5171,7 +5309,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                 if (global->compute_at_runtime) {
                     return eval_do_at_runtime;
                 } else if (global->valid) {
-                    u64 other_size = type_size_of(info->context, global->var.type);
+                    u64 other_size = type_size_of(global->var.type);
                     assert(other_size == type_size);
                     u8* other_value = &info->context->seg_data[global->data_offset];
                     mem_copy(other_value, result_into, type_size);
@@ -5198,7 +5336,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             Primitive primitive = expr->type->kind;
             Primitive inner_primitive = expr->cast_from->type->kind;
 
-            u64 inner_type_size = type_size_of(info->context, expr->cast_from->type);
+            u64 inner_type_size = type_size_of(expr->cast_from->type);
             assert(type_size <= 8 && inner_type_size <= 8);
             assert(primitive_is_integer(primitive) && primitive_is_integer(inner_primitive));
 
@@ -5242,8 +5380,8 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         case expr_subscript: {
             Eval_Result result;
 
-            u64 array_size = type_size_of(info->context, expr->subscript.array->type);
-            u64 index_size = type_size_of(info->context, expr->subscript.index->type);
+            u64 array_size = type_size_of(expr->subscript.array->type);
+            u64 index_size = type_size_of(expr->subscript.index->type);
 
             assert(index_size <= 8);
 
@@ -5260,7 +5398,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             assert(compound_literal_primitive == primitive_array);
 
             Type* child_type = array_type->array.of;
-            u64 child_size = type_size_of(info->context, child_type);
+            u64 child_size = type_size_of(child_type);
             assert(child_size == type_size);
 
             mem_copy(inner_data + index*child_size, result_into, type_size);
@@ -5272,7 +5410,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             Primitive primitive = expr->type->kind;
             Primitive inner_primitive = expr->unary.inner->type->kind;
 
-            u64 inner_type_size = type_size_of(info->context, expr->unary.inner->type);
+            u64 inner_type_size = type_size_of(expr->unary.inner->type);
 
             if (expr->unary.op == unary_dereference) {
                 return eval_do_at_runtime;
@@ -5309,7 +5447,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_binary: {
-            u64 child_size = type_size_of(info->context, expr->binary.left->type);
+            u64 child_size = type_size_of(expr->binary.left->type);
 
             assert(type_size <= 8 && child_size <= 8);
 
@@ -5384,7 +5522,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
 
             if (primitive == primitive_array) {
                 Type* child_type = expr->type->array.of;
-                u64 child_size = type_size_of(info->context, child_type);
+                u64 child_size = type_size_of(child_type);
 
                 u8* mem = result_into;
                 for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
@@ -5494,11 +5632,180 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop) {
     }
 }
 
+bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
+    // The reason we have a pretty complex system here is because we want types to be pointer-equal
+
+    Type* type = *type_slot;
+
+    if (!(type->flags & TYPE_FLAG_UNRESOLVED)) {
+        return true;
+    }
+
+    typedef struct Prefix Prefix;
+    struct Prefix {
+        enum { prefix_pointer, prefix_array } kind;
+        u64 array_length;
+        Prefix* link;
+    };
+    Prefix* prefix = null;
+
+    arena_stack_push(&context->stack); // We allocate prefixes, if any, on the stack
+
+    while (true) {
+        bool done = false;
+
+        switch (type->kind) {
+            case primitive_pointer: {
+                Prefix* new = arena_new(&context->stack, Prefix);
+                new->kind = prefix_pointer;
+                new->link = prefix;
+                prefix = new;
+
+                type = type->pointer_to;
+            } break;
+
+            case primitive_array: {
+                Prefix* new = arena_new(&context->stack, Prefix);
+                new->kind = prefix_array;
+                new->array_length = type->array.length;
+                new->link = prefix;
+                prefix = new;
+
+                type = type->array.of;
+            } break;
+
+            case primitive_unresolved_name: {
+                u32 name = type->unresolved_name;
+
+                Type* resolved_type = null;
+                buf_foreach (Type, user_type, context->user_types) {
+                    u32 user_type_name = 0;
+                    switch (user_type->kind) {
+                        case primitive_struct: {
+                            user_type_name = user_type->structure.name;
+                        } break;
+
+                        default: assert(false);
+                    }
+
+                    if (name == user_type_name) {
+                        resolved_type = user_type;
+                        break;
+                    }
+                }
+
+                if (resolved_type == null) {
+                    u8* name_string = string_table_access(context->string_table, name);
+                    print_file_pos(pos);
+                    printf("No such type: '%s'\n", name_string);
+                    return false;
+                }
+
+                type = resolved_type;
+                done = true;
+            } break;
+
+            default: assert(false);
+        }
+
+        if (done) break;
+    }
+
+    while (prefix != null) {
+        switch (prefix->kind) {
+            case prefix_pointer: type = get_pointer_type(context, type); break;
+            case prefix_array:   type = get_array_type(context, type, prefix->array_length); break;
+        }
+        prefix = prefix->link;
+    }
+
+    arena_stack_pop(&context->stack);
+
+    *type_slot = type;
+    return true;
+}
+
 bool typecheck(Context* context) {
     bool valid = true;
 
     Typecheck_Info info = {0};
     info.context = context;
+
+    // User types (structs, enums, unions)
+    buf_foreach (Type, type, context->user_types) {
+        switch (type->kind) {
+            case primitive_struct: {
+                if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                    u64 max_align = 0;
+                    u64 size = 0;
+
+                    for (u32 m = 0; m < type->structure.member_count; m += 1) {
+                        File_Pos* member_pos = &type->structure.members[m].declaration_pos;
+                        Type* member_type = type->structure.members[m].type;
+
+                        if (!resolve_type(context, &member_type, member_pos)) {
+                            valid = false;
+                            break;
+                        }
+
+                        u64 member_size = 0;
+                        u64 member_align = 0;
+
+                        u64 array_multiplier = 1;
+                        while (true) {
+                            if (member_type->kind == primitive_array) {
+                                array_multiplier *= member_type->array.length;
+                                member_type = member_type->array.of;
+
+                            } else {
+                                if (member_type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                                    print_file_pos(member_pos);
+                                    printf("We don't support fully out-of-order declarations. Can't use type ");
+                                    print_type(context, member_type);
+                                    printf(" directly here\n");
+                                    valid = false;
+                                    break;
+                                }
+
+                                u64 base_size;
+                                if (member_type->kind == primitive_struct) {
+                                    member_size = member_type->structure.size;
+                                    member_align = member_type->structure.align;
+                                } else {
+                                    member_size = primitive_size_of(member_type->kind);
+                                    member_align = member_size;
+                                }
+
+                                member_size *= array_multiplier;
+                                break;
+                            }
+                        }
+
+                        if (member_size == 0) continue;
+
+                        size = round_to_next(size, member_align);
+                        type->structure.members[m].offset = size;
+                        size += member_size;
+
+                        max_align = max(max_align, member_align);
+                    }
+
+                    if (max_align > 0) {
+                        size = round_to_next(size, max_align);
+                    }
+
+                    type->structure.size = size;
+                    type->structure.align = max_align;
+
+                    type->flags &= ~TYPE_FLAG_SIZE_NOT_COMPUTED;
+                }
+            } break;
+
+            default: assert(false);
+        }
+    }
+
+    if (!valid) return false;
 
     // Global variables
     buf_foreach (Global_Var, global, context->global_vars) {
@@ -5506,9 +5813,16 @@ bool typecheck(Context* context) {
 
         bool resolved_type = global->var.type != null;
 
+        if (global->var.type != null && global->var.type->flags & TYPE_FLAG_UNRESOLVED) {
+            if (!resolve_type(context, &global->var.type, &global->var.declaration_pos)) {
+                valid = false;
+                continue;
+            }
+        }
+
         if (global->initial_expr != null) {
             Type* solidify_to;
-            if (global->var.type == 0) {
+            if (global->var.type == null) {
                 solidify_to = &context->primitive_types[DEFAULT_INTEGER_TYPE];
             } else {
                 solidify_to = global->var.type;
@@ -5538,7 +5852,7 @@ bool typecheck(Context* context) {
             continue;
         }
 
-        u64 type_size = type_size_of(context, global->var.type);
+        u64 type_size = type_size_of(global->var.type);
         assert(type_size > 0);
 
         global->data_offset = add_exe_data(context, null, type_size);
@@ -5572,12 +5886,31 @@ bool typecheck(Context* context) {
 
     if (!valid) return false;
 
+    // Function signatures
+    buf_foreach (Func, func, context->funcs) {
+        for (u32 p = 0; p < func->signature.param_count; p += 1) {
+            Type** type = &func->signature.params[p].type;
+            if ((*type)->flags & TYPE_FLAG_UNRESOLVED) {
+                if (resolve_type(context, type, &func->declaration_pos)) {
+                    (*type)->flags &= ~TYPE_FLAG_UNRESOLVED;
+                } else {
+                    valid = false;
+                }
+            }
+        }
+    }
+
+    if (!valid) return false;
+
     // Functions
     for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
-        arena_stack_push(&context->stack);
-
         info.func = context->funcs + f;
-        if (info.func->kind != func_kind_normal) continue;
+
+        if (info.func->kind != func_kind_normal) {
+            continue;
+        }
+
+        arena_stack_push(&context->stack); // for allocating scopes
 
         info.scope = scope_new(context, info.func->body.var_count);
 
@@ -5590,7 +5923,7 @@ bool typecheck(Context* context) {
             info.scope->map[var_index] = true;
         }
 
-        // Types
+        // Body types
         for (Stmt* stmt = info.func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
             if (!typecheck_stmt(&info, stmt)) {
                 valid = false;
@@ -5681,7 +6014,7 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
         if (primitive == primitive_array) {
             u64 array_size = type->array.length;
             Type* child_type = type->array.of;
-            u64 stride = type_size_of(context, child_type);
+            u64 stride = type_size_of(child_type);
 
             Local offset_source = intermediate_allocate_temporary(context, POINTER_SIZE);
             Local offset_target = intermediate_allocate_temporary(context, POINTER_SIZE);
@@ -5748,7 +6081,7 @@ void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
 
     if (primitive_is_compound(primitive)) {
         Local pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
-        u64 type_size = type_size_of(context, var->type);
+        u64 type_size = type_size_of(var->type);
 
         Op op = {0};
 
@@ -5848,7 +6181,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 assert(array_length == expr->compound_literal.count);
 
                 Type* child_type = expr->type->array.of;
-                u64 stride = type_size_of(context, child_type);
+                u64 stride = type_size_of(child_type);
 
                 Local element_pointer = assign_to;
 
@@ -5888,7 +6221,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             assert(!get_address);
 
             if (assign_to.kind == local_temporary) {
-                u64 left_size = type_size_of(context, expr->binary.left->type);
+                u64 left_size = type_size_of(expr->binary.left->type);
                 Tmp* tmp = &context->tmp_tmps[assign_to.value];
                 tmp->size = max(left_size, tmp->size);
             }
@@ -5897,7 +6230,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             Local right_local = {0};
             if (!linearize_expr_to_local(expr->binary.right, &right_local)) {
-                u64 right_size = type_size_of(context, expr->binary.right->type);
+                u64 right_size = type_size_of(expr->binary.right->type);
                 right_local = intermediate_allocate_temporary(context, right_size);
                 linearize_expr(context, expr->binary.right, right_local, false);
             }
@@ -5967,7 +6300,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             for (Expr_List* node = expr->call.params; node != null; node = node->next) {
                 Expr* expr = node->expr;
 
-                u64 param_size = type_size_of(context, expr->type);
+                u64 param_size = type_size_of(expr->type);
                 if (param_size > 8) unimplemented(); // TODO by-reference semantics
 
                 Local local = {0};
@@ -6000,7 +6333,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             assert(!get_address);
 
             if (assign_to.kind == local_temporary) {
-                u64 left_size = type_size_of(context, expr->cast_from->type);
+                u64 left_size = type_size_of(expr->cast_from->type);
                 Tmp* tmp = &context->tmp_tmps[assign_to.value];
                 tmp->size = max(left_size, tmp->size);
             }
@@ -6087,7 +6420,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 is_pointer = false;
             }
 
-            u64 stride = type_size_of(context, child_type);
+            u64 stride = type_size_of(child_type);
 
             Local base_pointer;
             if (get_address) {
@@ -6219,7 +6552,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 
             bool use_pointer_to_right = primitive_is_compound(left->type->kind);
 
-            Local right_data_local = intermediate_allocate_temporary(context, type_size_of(context, right->type));
+            Local right_data_local = intermediate_allocate_temporary(context, type_size_of(right->type));
             Local pointer_to_right_data_local, right_local;
             if (use_pointer_to_right) {
                 pointer_to_right_data_local = intermediate_allocate_temporary(context, POINTER_SIZE);
@@ -6254,7 +6587,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
             assert(!(left->flags & EXPR_FLAG_UNRESOLVED));
 
             Primitive left_primitive = left->type->kind;
-            u64 operand_size = type_size_of(context, left->type);
+            u64 operand_size = type_size_of(left->type);
 
             bool needs_temporary = linearize_assignment_needs_temporary(right, left->variable.index);
 
@@ -6361,14 +6694,14 @@ u64 linearize_conditional_jump(Context* context, Expr* condition) {
 
         Local left_local = {0};
         if (!linearize_expr_to_local(condition->binary.left, &left_local)) {
-            u64 left_size = type_size_of(context, condition->binary.left->type);
+            u64 left_size = type_size_of(condition->binary.left->type);
             left_local = intermediate_allocate_temporary(context, left_size);
             linearize_expr(context, condition->binary.left, left_local, false);
         }
 
         Local right_local = {0};
         if (!linearize_expr_to_local(condition->binary.right, &right_local)) {
-            u64 right_size = type_size_of(context, condition->binary.right->type);
+            u64 right_size = type_size_of(condition->binary.right->type);
             right_local = intermediate_allocate_temporary(context, right_size);
             linearize_expr(context, condition->binary.right, right_local, false);
         }
@@ -7845,7 +8178,7 @@ void build_machinecode(Context* context) {
 
             if (mem_item->offset == U32_MAX) continue; // Ignore parameters for now
 
-            u64 size = type_size_of(context, func->body.vars[v].type);
+            u64 size = type_size_of(func->body.vars[v].type);
             offset = (u32) round_to_next(offset, min(size, POINTER_SIZE));
             mem_item->size = size;
             mem_item->offset = offset;
@@ -7872,7 +8205,7 @@ void build_machinecode(Context* context) {
             Mem_Item* mem_item = &func->body.stack_layout.vars[var_index];
             assert(mem_item->offset == U32_MAX);
 
-            u64 size = type_size_of(context, func->body.vars[var_index].type);
+            u64 size = type_size_of(func->body.vars[var_index].type);
             assert(size <= POINTER_SIZE);
 
             mem_item->size = POINTER_SIZE;
@@ -7914,7 +8247,7 @@ void build_machinecode(Context* context) {
             u32 var_index = func->signature.params[p].var_index;
             Local local = { local_variable, false, var_index };
 
-            u64 operand_size = type_size_of(context, func->signature.params[p].type);
+            u64 operand_size = type_size_of(func->signature.params[p].type);
             assert(operand_size <= 8);
 
             if (p < 4) {
@@ -8680,7 +9013,7 @@ bool build_file_to_executable(u8* source_path, u8* exe_path) {
     Context context = {0};
     if (!build_ast(&context, source_path)) return false;
     if (!typecheck(&context)) return false;
-    //print_verbose_info(&context);
+    print_verbose_info(&context);
     build_intermediate(&context);
     build_machinecode(&context);
     if (!write_executable(exe_path, &context)) return false;

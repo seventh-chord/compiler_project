@@ -1,9 +1,33 @@
 
+struct Foo {
+    a: u32;
+}
+
+let mister_worldwide: Foo;
+//let mister_worldwide = Foo { a: 1 }; // TODO next up
+
+fn set_foo() {
+    mister_worldwide.a = 7;
+    print_foo(&mister_worldwide);
+}
+
+fn print_foo(foo: *Foo) {
+    print("Foo { a: \n");
+    print_u64(u64(foo.a), 10);
+    print(" }\n");
+}
+
+
+
+
 extern "kernel32.lib" {
     fn ExitProcess(exit_code: u32);
 
     fn GetStdHandle(key: u32) -> u64;
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+
+    fn GetProcessHeap() -> u64;
+    fn HeapAlloc(heap: *void, flags: u32, bytes: u64) -> u64;
 }
 
 fn assert(condition: bool) {
@@ -238,10 +262,27 @@ fn does_return_but_somewhat_sneakily() -> u8 {
 }
 
 
+
 /*
+let heap = GetProcessHeap();
+let ARENA_BLOCK_SIZE = 8 * 1024 * 1024;
+
 struct Arena {
     data: *u8;
     used, capacity: u64;
+}
+
+fn arena_new(arena: *Arena, size: u64) -> *void {
+    if (arena.data == null) {
+        arena.data = cast(*u8, HeapAlloc(heap, 0, ARENA_BLOCK_SIZE));
+        arena.used = 0;
+        arena.capacity = ARENA_BLOCK_SIZE;
+    }
+
+    let result = data + used;
+    used += size;
+    assert(used <= capacity);
+    return cast(*void, result);
 }
 */
 
