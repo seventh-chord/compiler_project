@@ -1061,13 +1061,6 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
 };
 
 
-typedef struct Expr_List Expr_List;
-struct Expr_List {
-    Expr* expr;
-    Expr_List* next;
-};
-
-
 #define EXPR_FLAG_UNRESOLVED 0x01
 #define EXPR_FLAG_ASSIGNABLE 0x02
 
@@ -1106,7 +1099,7 @@ struct Expr { // 'typedef'd earlier!
         } string;
 
         struct {
-            Expr_List* content; // *[*Expr]
+            Expr** content; // []*Expr
             u32 count;
         } compound_literal;
 
@@ -1124,7 +1117,7 @@ struct Expr { // 'typedef'd earlier!
         struct {
             union { u32 unresolved_name; u32 func_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
 
-            Expr_List* params;
+            Expr** params; // []*Expr
             u32 param_count;
         } call;
 
@@ -1419,6 +1412,7 @@ typedef struct Func {
         struct {
             Type* type;
             u32 var_index;
+            bool reference_semantics;
         } *params;
         u32 param_count;
     } signature;
@@ -1974,11 +1968,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         case expr_compound_literal: {
             print_type(context, expr->type);
             printf(" { ");
-            bool first = true;
-            for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
-                if (!first) printf(", ");
-                first = false;
-                print_expr(context, func, node->expr);
+            for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
+                if (i > 0) printf(", ");
+                Expr* child = expr->compound_literal.content[i];
+                print_expr(context, func, child);
             }
             printf(" }");
         } break;
@@ -2011,11 +2004,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             }
 
             printf("(");
-            bool first = true;
-            for (Expr_List* node = expr->call.params; node != null; node = node->next) {
-                if (!first) printf(", ");
-                first = false;
-                print_expr(context, func, node->expr);
+            for (u32 i = 0; i < expr->call.param_count; i += 1) {
+                if (i > 0) printf(", ");
+                Expr* child = expr->call.params[i];
+                print_expr(context, func, child);
             }
             printf(")");
         } break;
@@ -2267,7 +2259,7 @@ void print_op(Context* context, Func* func, Op* op) {
         case op_load_data: {
             printf("address of ");
             print_local(context, func, op->load_data.local);
-            printf(", .data + %u into ", (u64) op->load_data.data_offset);
+            printf(", .data + %u", (u64) op->load_data.data_offset);
         } break;
 
         case op_builtin_mem_clear: {
@@ -2774,9 +2766,17 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         File_Pos start_pos = t->pos;
                         t += 1;
 
-                        Expr_List* param_list = null;
-                        Expr_List* param_list_head = null;
+                        typedef struct Param Param;
+                        struct Param {
+                            Expr* expr;
+                            Param *next, *previous;
+                        };
+
                         u32 param_count = 0;
+                        Param* first_param = null;
+                        Param* last_param = null;
+
+                        arena_stack_push(&context->stack);
 
                         while (t->kind != token_bracket_round_close) {
                             u32 param_length = 0;
@@ -2800,15 +2800,16 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                                 t += 1;
                             }
 
-                            Expr_List* list_item = arena_new(&context->arena, Expr_List);
-                            list_item->expr = param;
+                            Param* next = arena_new(&context->stack, Param);
+                            next->expr = param;
 
-                            if (param_list_head == null) {
-                                param_list_head = list_item;
+                            if (first_param == null) {
+                                first_param = next;
                             } else {
-                                param_list->next = list_item;
+                                next->previous = last_param;
+                                last_param->next = next;
                             }
-                            param_list = list_item;
+                            last_param = next;
 
                             param_count += 1;
                         }
@@ -2823,6 +2824,13 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         Type* cast_to_primitive = parse_primitive_name(context, name_index);
 
                         if (cast_to_primitive != null) {
+                            if (!primitive_is_integer(cast_to_primitive->kind)) {
+                                print_file_pos(&start_pos);
+                                printf("Can't cast to %s\n", PRIMITIVE_NAMES[cast_to_primitive->kind]);
+                                *length = t - t_start;
+                                return null;
+                            }
+
                             if (param_count != 1) {
                                 print_file_pos(&start_pos);
                                 printf(
@@ -2833,17 +2841,10 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                                 return null;
                             }
 
-                            if (!primitive_is_integer(cast_to_primitive->kind)) {
-                                print_file_pos(&start_pos);
-                                printf("Can't cast to %s\n", PRIMITIVE_NAMES[cast_to_primitive->kind]);
-                                *length = t - t_start;
-                                return null;
-                            }
-
                             Expr* expr = arena_new(&context->arena, Expr);
                             expr->pos = start_pos;
                             expr->kind = expr_cast;
-                            expr->cast_from = param_list_head->expr;
+                            expr->cast_from = first_param->expr;
                             expr->type = cast_to_primitive;
 
                             shunting_yard_push_expr(context, yard, expr);
@@ -2854,12 +2855,20 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                             expr->kind = expr_call;
                             expr->call.unresolved_name = name_index;
                             expr->flags |= EXPR_FLAG_UNRESOLVED;
-                            expr->call.params = param_list_head;
+
                             expr->call.param_count = param_count;
+                            expr->call.params = (void*) arena_alloc(&context->arena, param_count * sizeof(Expr*));
+                            u32 i = 0;
+                            for (Param* p = first_param; p != null; p = p->next, i += 1) {
+                                expr->call.params[i] = p->expr;
+                            }
 
                             shunting_yard_push_expr(context, yard, expr);
                             could_parse = true;
                         }
+
+
+                        arena_stack_pop(&context->stack);
                     
                     // Structure literal
                     } else if (t->kind == token_bracket_curly_open) {
@@ -3146,16 +3155,24 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
     }
     t += 1;
 
-    Expr_List* expr_list = null;
-    Expr_List* expr_list_head = null;
-    u32 expr_count = 0;
+    typedef struct Param Param;
+    struct Param {
+        Expr* expr;
+        Param *next, *previous;
+    };
+
+    u32 param_count = 0;
+    Param* first_param = null;
+    Param* last_param = null;
+
+    arena_stack_push(&context->stack);
 
     while (t->kind != token_bracket_curly_close) {
-        u32 sub_expr_length = 0;
-        Expr* sub_expr = parse_expr(context, t, &sub_expr_length);
-        t += sub_expr_length;
+        u32 param_length = 0;
+        Expr* param = parse_expr(context, t, &param_length);
+        t += param_length;
 
-        if (sub_expr == null) {
+        if (param == null) {
             *length = t - t_start;
             return null;
         }
@@ -3163,7 +3180,7 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
         if (t->kind != token_bracket_curly_close) {
             if (t->kind != token_comma) {
                 print_file_pos(&t->pos);
-                printf("Expected comma ',' or closing curly brace '}' after value in compound literal, but got ");
+                printf("Expected comma ',' or closing parenthesis '}' after value in compound litereral, but got ");
                 print_token(context->string_table, t);
                 printf("\n");
                 *length = t - t_start;
@@ -3172,19 +3189,20 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
             t += 1;
         }
 
-        Expr_List* list_item = arena_new(&context->arena, Expr_List);
-        list_item->expr = sub_expr;
+        Param* next = arena_new(&context->stack, Param);
+        next->expr = param;
 
-        if (expr_list_head == null) {
-            expr_list_head = list_item;
+        if (first_param == null) {
+            first_param = next;
         } else {
-            expr_list->next = list_item;
+            next->previous = last_param;
+            last_param->next = next;
         }
-        expr_list = list_item;
+        last_param = next;
 
-        expr_count += 1;
+        param_count += 1;
     }
-    
+
     if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
         *length = t - t_start;
         return null;
@@ -3193,9 +3211,16 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
 
     Expr* expr = arena_new(&context->arena, Expr);
     expr->kind = expr_compound_literal;
-    expr->compound_literal.content = expr_list_head;
-    expr->compound_literal.count = expr_count;
     expr->pos = t_start->pos;
+
+    expr->compound_literal.count = param_count;
+    expr->compound_literal.content = (void*) arena_alloc(&context->arena, param_count * sizeof(Expr*));
+    u32 i = 0;
+    for (Param* p = first_param; p != null; p = p->next, i += 1) {
+        expr->compound_literal.content[i] = p->expr;
+    }
+
+    arena_stack_pop(&context->stack);
 
     *length = t - t_start;
     return expr;
@@ -4697,8 +4722,9 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                         return false;
                     }
 
-                    for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
-                        Expr* child = node->expr;
+                    for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
+                        Expr* child = expr->compound_literal.content[i];
+
                         if (!typecheck_expr(info, child, expected_child_type)) {
                             return false;
                         }
@@ -4921,16 +4947,17 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 return false;
             }
 
-            Expr_List* param_expr = expr->call.params;
-            for (u32 p = 0; p < expr->call.param_count; p += 1, param_expr = param_expr->next) {
+            for (u32 p = 0; p < expr->call.param_count; p += 1) {
+                Expr* param_expr = expr->call.params[p];
+
                 u32 var_index = callee->signature.params[p].var_index;
                 Type* expected_type = callee->signature.params[p].type;
 
-                if (!typecheck_expr(info, param_expr->expr, expected_type)) {
+                if (!typecheck_expr(info, param_expr, expected_type)) {
                     return false;
                 }
 
-                Type* actual_type = param_expr->expr->type;
+                Type* actual_type = param_expr->type;
                 if (!type_can_assign(info->context, expected_type, actual_type)) {
                     u8* func_name = string_table_access(info->context->string_table, callee->name);
                     print_file_pos(&expr->pos);
@@ -5619,8 +5646,9 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                 u64 child_size = type_size_of(child_type);
 
                 u8* mem = result_into;
-                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
-                    Eval_Result result = eval_compile_time_expr(info, node->expr, mem);
+                for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
+                    Expr* child = expr->compound_literal.content[i];
+                    Eval_Result result = eval_compile_time_expr(info, child, mem);
                     if (result != eval_ok) return result;
                     mem += child_size;
                 }
@@ -5896,6 +5924,28 @@ bool typecheck(Context* context) {
     }
 
     if (!valid) return false;
+    
+    // Function signatures
+    buf_foreach (Func, func, context->funcs) {
+        for (u32 p = 0; p < func->signature.param_count; p += 1) {
+            Type** type = &func->signature.params[p].type;
+
+            if ((*type)->flags & TYPE_FLAG_UNRESOLVED) {
+                if (resolve_type(context, type, &func->declaration_pos)) {
+                    (*type)->flags &= ~TYPE_FLAG_UNRESOLVED;
+                } else {
+                    valid = false;
+                }
+            }
+
+            u64 size = type_size_of(*type);
+            if (size > 8) {
+                func->signature.params[p].reference_semantics = true;
+            }
+        }
+    }
+
+    if (!valid) return false;
 
     // Global variables
     buf_foreach (Global_Var, global, context->global_vars) {
@@ -5974,22 +6024,6 @@ bool typecheck(Context* context) {
         } else {
             global->valid = true;
             global->compute_at_runtime = false;
-        }
-    }
-
-    if (!valid) return false;
-
-    // Function signatures
-    buf_foreach (Func, func, context->funcs) {
-        for (u32 p = 0; p < func->signature.param_count; p += 1) {
-            Type** type = &func->signature.params[p].type;
-            if ((*type)->flags & TYPE_FLAG_UNRESOLVED) {
-                if (resolve_type(context, type, &func->declaration_pos)) {
-                    (*type)->flags &= ~TYPE_FLAG_UNRESOLVED;
-                } else {
-                    valid = false;
-                }
-            }
         }
     }
 
@@ -6278,22 +6312,21 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
                 Local element_pointer = assign_to;
 
-                bool first = true;
-                for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
+                for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
                     element_pointer.as_reference = false;
 
-                    if (!first) {
+                    if (i > 0) {
                         buf_push(context->tmp_ops, ((Op) {
                             .kind = op_add,
                             .primitive = primitive_pointer,
                             .binary = { (Local) { local_literal, false, stride }, element_pointer }
                         }));
                     }
-                    first = false;
 
                     element_pointer.as_reference = true;
 
-                    linearize_expr(context, node->expr, element_pointer, false);
+                    Expr* child = expr->compound_literal.content[i];
+                    linearize_expr(context, child, element_pointer, false);
                 }
 
                 u64 negative_offset = stride * (expr->compound_literal.count - 1);
@@ -6434,22 +6467,20 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             Op_Call_Param* call_params = (Op_Call_Param*) arena_alloc(&context->arena, sizeof(Op_Call_Param) * expr->call.param_count);
 
-            u32 p = 0;
-            for (Expr_List* node = expr->call.params; node != null; node = node->next) {
-                Expr* expr = node->expr;
+            for (u32 p = 0; p < expr->call.param_count; p += 1) {
+                Expr* child = expr->call.params[p];
 
-                u64 param_size = type_size_of(expr->type);
+                u64 param_size = type_size_of(child->type);
                 if (param_size > 8) unimplemented(); // TODO by-reference semantics
 
                 Local local = {0};
-                if (!linearize_expr_to_local(expr, &local)) {
+                if (!linearize_expr_to_local(child, &local)) {
                     local = intermediate_allocate_temporary(context, param_size);
-                    linearize_expr(context, expr, local, false);
+                    linearize_expr(context, child, local, false);
                 }
 
                 call_params[p].size = param_size;
                 call_params[p].local = local;
-                p += 1;
             }
 
             Op op = {0};
@@ -6688,8 +6719,9 @@ bool linearize_assignment_needs_temporary(Expr* expr, u32 var_index) {
         } break;
 
         case expr_compound_literal: {
-            for (Expr_List* node = expr->compound_literal.content; node != null; node = node->next) {
-                if (linearize_assignment_needs_temporary(node->expr, var_index)) return true;
+            for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
+                Expr* child = expr->compound_literal.content[i];
+                if (linearize_assignment_needs_temporary(child, var_index)) return true;
             }
         } break;
 
@@ -6699,8 +6731,9 @@ bool linearize_assignment_needs_temporary(Expr* expr, u32 var_index) {
         } break;
 
         case expr_call: {
-            for (Expr_List* node = expr->call.params; node != null; node = node->next) {
-                if (linearize_assignment_needs_temporary(node->expr, var_index)) return true;
+            for (u32 p = 0; p < expr->call.param_count; p += 1) {
+                Expr* child = expr->call.params[p];
+                if (linearize_assignment_needs_temporary(child, var_index)) return true;
             }
         } break;
 
