@@ -25,7 +25,7 @@ fn c_string_length(string: *u8) -> u64 {
     return length;
 }
 
-fn mem_copy(src: *u8, dest: *u8, length: u64) {
+fn mem_copy(src, dest: *u8, length: u64) {
     for (length > 0) {
         *dest = *src;
         src += 1;
@@ -323,7 +323,6 @@ fn stride_test() {
 }
 
 /*
-shorthand for multiple function paramters with the same type ('fn foo(a, b: *u8)')
 auto-cast void pointer to any pointer type
 structs as function parameters - reference semantics
 dont generate jump after return if return is the last stmt

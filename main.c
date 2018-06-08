@@ -3607,89 +3607,117 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
     return first_stmt;
 }
 
-bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u32 length) {
-    assert(func->signature.params == null);
+bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u32* length) {
+    Token* t_start = t;
+
+    if (!expect_single_token(context, t, token_bracket_round_open, "after function name")) {
+        return null;
+    }
+    t += 1;
+
     assert(func->signature.param_count == 0);
+    assert(func->signature.params == null);
 
-    if (length == 0) {
-        return true;
-    }
+    typedef struct Param Param;
+    struct Param {
+        u32 name;
+        Type* type;
+        File_Pos pos;
+        Param *next, *previous;
+    };
 
-    // Count parameters
-    func->signature.param_count = 1;
-    for (u32 i = 0; i < length; i += 1) {
-        if (t[i].kind == token_comma && i + 1 < length) {
-            func->signature.param_count += 1;
-        }
-        if (t[i].kind == token_bracket_round_open || t[i].kind == token_bracket_square_open || t[i].kind == token_bracket_curly_open) {
-            i += t[i].bracket_offset_to_matching;
-        }
-    }
+    Param* first = null;
+    Param* last = null;
 
-    u64 signature_param_bytes = func->signature.param_count * sizeof(*func->signature.params);
-    func->signature.params = (void*) arena_alloc(&context->arena, signature_param_bytes);
-    mem_clear((u8*) func->signature.params, signature_param_bytes);
+    arena_stack_push(&context->stack);
 
-    // Parse parameters
-    u32 i = 0;
-    for (u32 n = 0; n < func->signature.param_count; n += 1) {
-        u32 start = i;
-        while (i < length && t[i].kind != token_comma) { i += 1; }
-        u32 end = i;
-        i += 1; // Skip the comma
-
-        u32 length = end - start;
-        if (length < 1 || t[start].kind != token_identifier) {
-            print_file_pos(&t[start].pos);
-            printf("Expected parameter name, but got ");
-            print_token(context->string_table, &t[start]);
-            printf("\n");
-            return false;
-        }
-        u32 name_index = t[start].identifier_string_table_index;
-
-        if (length < 2) {
-            u8* name = string_table_access(context->string_table, name_index);
-            print_file_pos(&t[start + 1].pos);
-            printf("Expected ': type' after parameter '%s', but found nothing\n", name);
-            return false;
-        }
-
-        if (t[start + 1].kind != token_colon) {
-            u8* name = string_table_access(context->string_table, name_index);
-            print_file_pos(&t[start + 1].pos);
-            printf("Expected ': type' after parameter '%s', but got ", name);
-            for (u32 j = start + 1;  j < end; j += 1) {
-                print_token(context->string_table, &t[j]);
+    if (t->kind == token_bracket_round_close) {
+        t += 1;
+    } else while (true) {
+        u32 names_given = 0;
+        while (true) {
+            if (t->kind != token_identifier) {
+                print_file_pos(&t->pos);
+                printf("Expected a parameter name, but got ");
+                print_token(context->string_table, t);
+                printf("\n");
+                *length = t - t_start;
+                return false;
             }
-            printf("\n");
+
+            Param* next = arena_new(&context->stack, Param);
+            next->name = t->identifier_string_table_index;
+            next->pos = t->pos;
+
+            t += 1;
+
+            if (first == null) {
+                first = next;
+            } else {
+                next->previous = last;
+                last->next = next;
+            }
+            last = next;
+
+            names_given += 1;
+            func->signature.param_count += 1;
+
+            if (t->kind == token_comma) {
+                t += 1;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if (!expect_single_token(context, t, token_colon, names_given > 1? "after parameter names" : "after parameter name")) {
+            *length = t - t_start;
             return false;
         }
+        t += 1;
 
         u32 type_length = 0;
-        Type* type = parse_type(context, &t[start + 2], &type_length);
-        if (type == null) {
+        Type* param_type = parse_type(context, t, &type_length);
+        t += type_length;
+        if (param_type == null) {
+            *length = t - t_start;
             return false;
         }
 
-        if (type_length != length - 2) {
-            print_file_pos(&t[start + 2 + type_length].pos);
-            printf("Invalid token after type in parameter delcaration list: ");
-            print_token(context->string_table, &t[start + 2 + type_length]);
-            printf("\n");
-            return false;
+        Param* p = last;
+        for (u32 i = 0; i < names_given; i += 1) {
+            p->type = param_type;
+            p = p->previous;
         }
 
-        func->signature.params[n].var_index = buf_length(context->tmp_vars);
-        func->signature.params[n].type = type;
-
-        Var var = {0};
-        var.name = name_index;
-        var.declaration_pos = t->pos;
-        var.type = type;
-        buf_push(context->tmp_vars, var);
+        if (t->kind == token_bracket_round_close) {
+            t += 1;
+            break;
+        } else {
+            if (!expect_single_token(context, t, token_comma, "after member declaration")) return false;
+            t += 1;
+        }
     }
 
+    func->signature.params = (void*) arena_alloc(&context->arena, func->signature.param_count * sizeof(*func->signature.params));
+
+    u32 i = 0;
+    for (Param* p = first; p != null; p = p->next, i += 1) {
+        Var var = {0};
+        var.name = p->name;
+        var.type = p->type;
+        var.declaration_pos = p->pos;
+
+        u32 var_index = buf_length(context->tmp_vars);
+        buf_push(context->tmp_vars, var);
+
+        func->signature.params[i].var_index = var_index;
+        func->signature.params[i].type = p->type;
+    }
+
+    arena_stack_pop(&context->stack);
+
+    *length = t - t_start;
     return true;
 }
 
@@ -3719,11 +3747,13 @@ Func* parse_function(Context* context, Token* t, u32* length) {
         return null;
     }
     u32 name_index = t->identifier_string_table_index;
+    t += 1;
 
     u32 other_func_index = find_func(context, name_index);
     if (other_func_index != U32_MAX) {
         Func* other_func = &context->funcs[other_func_index];
         u8* name = string_table_access(context->string_table, name_index);
+        print_file_pos(&start->pos);
         printf("A function called '%s' is defined both on line %u and line %u\n", name, (u64) declaration_pos.line, (u64) other_func->declaration_pos.line);
         valid = false;
     }
@@ -3744,19 +3774,9 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     func->declaration_pos = start->pos;
 
     // Parameter list
-    t += 1;
-    if (t->kind != token_bracket_round_open) {
-        u8* name = string_table_access(context->string_table, name_index);
-        print_file_pos(&t->pos);
-        printf("Expected a open parenthesis '(' to after 'fn %s', but got ", name);
-        print_token(context->string_table, t);
-        printf("\n");
-        return null;
-    }
-
-    u32 parameter_length = t->bracket_offset_to_matching - 1;
-    if (!parse_parameter_declaration_list(context, func, t + 1, parameter_length)) return null;
-    t += parameter_length + 2;
+    u32 parameter_length = 0;
+    if (!parse_parameter_declaration_list(context, func, t, &parameter_length)) return null;
+    t += parameter_length;
 
     // Return type
     func->signature.has_output = false;
