@@ -1685,6 +1685,25 @@ u64 type_size_of(Type* type) {
     return 0;
 }
 
+u64 type_align_of(Type* type) {
+    while (true) {
+        if (type->kind == primitive_array) {
+            type = type->array.of;
+        } else {
+            assert(!(type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED));
+
+            if (type->kind == primitive_struct) {
+                return type->structure.align;
+            } else {
+                return primitive_size_of(type->kind);
+            }
+        }
+    }
+
+    assert(false);
+    return 0;
+}
+
 bool primitive_is_compound(Primitive primitive) {
     switch (primitive) {
         case primitive_array: return true;
@@ -1832,8 +1851,13 @@ Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
     return index;
 }
 
-u64 add_exe_data(Context* context, u8* data, u64 length) {
+u64 add_exe_data(Context* context, u8* data, u64 length, u64 alignment) {
     u64 data_offset = buf_length(context->seg_data);
+
+    u64 aligned_data_offset = round_to_next(data_offset, alignment);
+    if (aligned_data_offset > data_offset) {
+        str_push_zeroes(&context->seg_data, aligned_data_offset - data_offset);
+    }
 
     if (data == null) {
         str_push_zeroes(&context->seg_data, length);
@@ -1841,7 +1865,7 @@ u64 add_exe_data(Context* context, u8* data, u64 length) {
         str_push_str(&context->seg_data, data, length);
     }
 
-    return data_offset;
+    return aligned_data_offset;
 }
 
 void print_file_pos(File_Pos* pos) {
@@ -5827,7 +5851,7 @@ bool typecheck(Context* context) {
                     type->flags &= ~TYPE_FLAG_SIZE_NOT_COMPUTED;
                 }
 
-                #if 1
+                #if 0
                 u8* name = string_table_access(context->string_table, type->structure.name);
                 printf("struct %s\n", name);
                 printf("size = %u, align = %u\n", type->structure.size, type->structure.align);
@@ -5891,10 +5915,13 @@ bool typecheck(Context* context) {
         }
 
         u64 type_size = type_size_of(global->var.type);
+        u64 type_align = type_align_of(global->var.type);
         assert(type_size > 0);
 
-        global->data_offset = add_exe_data(context, null, type_size);
+        global->data_offset = add_exe_data(context, null, type_size, type_align);
         u8* result_into = &context->seg_data[global->data_offset];
+
+        //printf("%s at .data + %u\n", string_table_access(context->string_table, global->var.name), (u64) global->data_offset);
 
         if (global->initial_expr != null) {
             arena_stack_push(&context->stack);
@@ -6199,7 +6226,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_string_literal: {
             assert(!get_address);
 
-            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1);
+            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, 1);
             assert(data_offset <= U32_MAX);
 
             Op op = {0};

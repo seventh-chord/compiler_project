@@ -319,20 +319,23 @@ fn arena_new(arena: *Arena, size: u64) -> *u8 {
 }
 
 /*
-uninitialized (zeroed) global variables in .bss
-structs, unions, enums
+stride in poitner addition
+shorthand for multiple function paramters with the same type ('fn foo(a, b: *u8)')
+auto-cast void pointer to any pointer type
+structs as function parameters - reference semantics
+
+enums
 slices (also, make strings slices)
 size_of, align_of, type_of
+a 'any' type
+uninitialized (zeroed) global variables in .bss
+unions
 more operators      <<   >>   |   &   ~   ||   &&    /=    *=
 character literals
 variable shadowing
 taking the address of temporaries
 a defer statement
-auto-cast void pointer to any pointer type
-respect stride in poitner addition
-shorthand for multiple function paramters with the same type ('fn foo(a, b: *u8)')
 figure out how to do no parentheses in loops/conditionals
-respect alignment when placing compound types in .data or on the stack
 
 .pdata and unwind info
 debug info
