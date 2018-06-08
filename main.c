@@ -5174,6 +5174,11 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         }
     }
 
+    // Autocast from '*void' to any other pointer kind
+    if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && solidify_to->kind == primitive_pointer) {
+        expr->type = solidify_to;
+    }
+
     return true;
 }
 

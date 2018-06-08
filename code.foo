@@ -299,7 +299,7 @@ struct Arena {
 
 fn arena_new(arena: *Arena, size: u64) -> *u8 {
     if (arena.data == null) {
-        arena.data = cast(*u8, HeapAlloc(heap, 0, ARENA_BLOCK_SIZE));
+        arena.data = HeapAlloc(heap, 0, ARENA_BLOCK_SIZE);
         arena.used = 0;
         arena.capacity = ARENA_BLOCK_SIZE;
     }
@@ -323,7 +323,6 @@ fn stride_test() {
 }
 
 /*
-auto-cast void pointer to any pointer type
 structs as function parameters - reference semantics
 dont generate jump after return if return is the last stmt
 
