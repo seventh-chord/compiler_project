@@ -2166,7 +2166,10 @@ void print_local(Context* context, Func* func, Local local) {
     switch (local.kind) {
         case local_variable: {
             Var* var = &func->body.vars[local.value];
-            u8* name = string_table_access(context->string_table, var->name);
+            u8* name = "???";
+            if (var->name != U32_MAX) {
+                name = string_table_access(context->string_table, var->name);
+            }
             printf("%s%s", pointer_star, name);
         } break;
 
@@ -6298,6 +6301,51 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 u64 right_size = type_size_of(expr->binary.right->type);
                 right_local = intermediate_allocate_temporary(context, right_size);
                 linearize_expr(context, expr->binary.right, right_local, false);
+            }
+
+            if (expr->binary.op == binary_add || expr->binary.op == binary_sub) {
+                Primitive left_primitive = expr->binary.left->type->kind;
+                Primitive right_primitive = expr->binary.right->type->kind;
+
+                if (left_primitive == primitive_pointer) {
+                    assert(right_primitive != primitive_pointer);
+
+                    if (right_local.kind == local_literal) {
+                        u64 right_size = primitive_size_of(right_primitive);
+                        Local new_right_local = intermediate_allocate_temporary(context, right_size);
+
+                        Op op = {0};
+                        op.kind = op_set;
+                        op.primitive = right_primitive;
+                        op.binary.source = right_local;
+                        op.binary.target = new_right_local;
+                        buf_push(context->tmp_ops, op);
+
+                        right_local = new_right_local;
+                    }
+
+                    u64 stride = type_size_of(expr->binary.left->type->pointer_to);
+
+                    Op op = {0};
+                    op.kind = op_mul;
+                    op.primitive = right_primitive;
+                    op.binary.source = (Local) { local_literal, false, stride };
+                    op.binary.target = right_local;
+                    buf_push(context->tmp_ops, op);
+                }
+
+                if (right_primitive == primitive_pointer) {
+                    assert(left_primitive != primitive_pointer);
+
+                    u64 stride = type_size_of(expr->binary.right->type->pointer_to);
+
+                    Op op = {0};
+                    op.kind = op_mul;
+                    op.primitive = left_primitive;
+                    op.binary.source = (Local) { local_literal, false, stride };
+                    op.binary.target = assign_to;
+                    buf_push(context->tmp_ops, op);
+                }
             }
 
 

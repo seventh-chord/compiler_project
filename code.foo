@@ -16,6 +16,65 @@ fn assert(condition: bool) {
     }
 }
 
+fn c_string_length(string: *u8) -> u64 {
+    let length: u64 = 0;
+    for (*string != 0) {
+        length += 1;
+        string = 1 + string;
+    }
+    return length;
+}
+
+fn mem_copy(src: *u8, dest: *u8, length: u64) {
+    for (length > 0) {
+        *dest = *src;
+        src += 1;
+        dest += 1;
+        length -= 1;
+    }
+}
+
+let stdout_handle = GetStdHandle(u32(-11));
+fn print(string: *u8) {
+    let length: u64 = c_string_length(string);
+    let written: u32;
+    WriteFile(stdout_handle, string, u32(length), &written, null);
+}
+
+fn print_u64(value: u64, base: u64) {
+    let buffer: [30]u8;
+
+    if (value == 0) {
+        buffer[0] = 0x30; // TODO character literals
+    } else {
+        let i: u64 = 0;
+        for (value > 0) {
+            let char = u8(value % base);
+            value = value / base; // TODO operator /=
+
+            if (char <= 9) {
+                buffer[i] = 0x30 + char;
+            } else {
+                buffer[i] = 0x61 + (char - 10);
+            }
+            i += 1;
+        }
+        i -= 1;
+
+        let j: u64 = 0;
+        for (j < i) {
+            let temp = buffer[j];
+            buffer[j] = buffer[i];
+            buffer[i] = temp;
+
+            i -= 1;
+            j += 1;
+        }
+    }
+
+    print(&buffer);
+}
+
 let SEVEN = u64(u8(u64(3074504259546010887))); // evaluates to 7
 let EIGHT = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
 let NINE = nine();
@@ -62,57 +121,10 @@ fn main() {
     test_is_prime();
     foozleschmuzle();
     arena_test();
+    stride_test();
 
     ExitProcess(0);
 }
-
-let stdout_handle = GetStdHandle(u32(-11));
-fn print(string: *u8) {
-    let length: u32 = 0;
-    let s = string;
-    for (*s != 0) {
-        s += 1;
-        length += 1;
-    }
-
-    let written: u32;
-    WriteFile(stdout_handle, string, length, &written, null);
-}
-
-fn print_u64(value: u64, base: u64) {
-    let buffer: [30]u8;
-
-    if (value == 0) {
-        buffer[0] = 0x30; // TODO character literals
-    } else {
-        let i: u64 = 0;
-        for (value > 0) {
-            let char = u8(value % base);
-            value = value / base; // TODO operator /=
-
-            if (char <= 9) {
-                buffer[i] = 0x30 + char;
-            } else {
-                buffer[i] = 0x61 + (char - 10);
-            }
-            i += 1;
-        }
-        i -= 1;
-
-        let j: u64 = 0;
-        for (j < i) {
-            let temp = buffer[j];
-            buffer[j] = buffer[i];
-            buffer[i] = temp;
-
-            i -= 1;
-            j += 1;
-        }
-    }
-
-    print(&buffer);
-}
-
 
 fn sidewinder() { global = !global; }
 let global = 3 > 2;
@@ -261,26 +273,6 @@ fn print_foo(foo: *Foo) {
     print(" }\n");
 }
 
-
-
-fn c_string_length(string: *u8) -> u64 {
-    let length: u64 = 0;
-    for (*string != 0) {
-        length += 1;
-        string += 1;
-    }
-    return length;
-}
-
-fn mem_copy(src: *u8, dest: *u8, length: u64) {
-    for (length > 0) {
-        *dest = *src;
-        src += 1;
-        dest += 1;
-        length -= 1;
-    }
-}
-
 fn arena_test() {
     print("Calvino inbound...\n");
 
@@ -318,11 +310,23 @@ fn arena_new(arena: *Arena, size: u64) -> *u8 {
     return result;
 }
 
+
+fn stride_test() {
+    let list = [3]u64 { 1, 2, 3 };
+    let pointer = cast(*u64, &list);
+
+    print_u64(*pointer, 10);
+    print(", ");
+    pointer += 1;
+    print_u64(*pointer, 10);
+    print("\n");
+}
+
 /*
-stride in poitner addition
 shorthand for multiple function paramters with the same type ('fn foo(a, b: *u8)')
 auto-cast void pointer to any pointer type
 structs as function parameters - reference semantics
+dont generate jump after return if return is the last stmt
 
 enums
 slices (also, make strings slices)
