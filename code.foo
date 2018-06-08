@@ -9,9 +9,11 @@ extern "kernel32.lib" {
     fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> *void;
 }
 
-fn assert(condition: bool) {
+fn assert(condition: bool, error_message: *u8) {
     if (!condition) {
-        print("Assertion failed\n");
+        print("Assertion failed: ");
+        print(error_message);
+        print("\n");
         ExitProcess(0);
     }
 }
@@ -84,11 +86,11 @@ fn main() {
     //let nasty = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
     //let nasty = [3]u8 { 1, 2, 3 }[2];
 
-    let bread_and_butter = [2]*u8 { "bread", "butter" };
+    let bread_and_butter = [2]*u8 { "bread\n", "butter\n" };
     print(bread_and_butter[0]);
     print(bread_and_butter[1]);
 
-    assert(seventy_two() == 72);
+    assert(seventy_two() == 72, "seventy_two() == 72");
 
     let hi = "Hi";
     let ho = "Ho";
@@ -123,6 +125,7 @@ fn main() {
     foozleschmuzle();
     arena_test();
     stride_test();
+    farwell(); // to kings
 
     ExitProcess(0);
 }
@@ -220,12 +223,12 @@ fn say_my_name() {
 }
 
 fn test_is_prime() {
-    assert(is_prime(53));
-    assert(is_prime(139));
-    assert(is_prime(367));
-    assert(!is_prime(65));
-    assert(!is_prime(84));
-    assert(!is_prime(33));
+    assert(is_prime(53), "is_prime(53)");
+    assert(is_prime(139), "is_prime(139)");
+    assert(is_prime(367), "is_prime(367)");
+    assert(!is_prime(65), "!is_prime(65)");
+    assert(!is_prime(84), "!is_prime(84)");
+    assert(!is_prime(33), "!is_prime(33)");
 }
 
 fn is_prime(a: u64) -> bool {
@@ -277,7 +280,7 @@ fn print_foo(foo: *Foo) {
 fn arena_test() {
     print("Calvino inbound...\n");
 
-    let original = "[...]: those that through the years and the changes continue to give their form to desires, and those in which desires either erase the city or are reased by it.\n";
+    let original = "[There are two kinds of cities]: those that through the years and the changes continue to give their form to desires, and those in which desires either erase the city or are erased by it.\n";
     let length = c_string_length(original);
 
     let arena: Arena;
@@ -307,7 +310,7 @@ fn arena_new(arena: *Arena, size: u64) -> *u8 {
 
     let result = arena.data + arena.used;
     arena.used += size;
-    assert(arena.used <= arena.capacity);
+    assert(arena.used <= arena.capacity, "arena.used <= arena.capacity");
     return result;
 }
 
@@ -324,10 +327,10 @@ fn stride_test() {
 }
 
 
-/*
 fn farwell() {
     let pages: The_Pages_Of_History;
-    pages.path_of_least_resistance = 1001001;
+
+    pages.path_of_least_resistance = 40;
     turn(pages);
     print(", ");
     print_u64(pages.path_of_least_resistance, 10);
@@ -344,12 +347,10 @@ struct The_Pages_Of_History {
     castles_in_the_distance: u64;
     path_of_least_resistance: u64;
 }
-*/
 
 /*
-structs as function parameters - reference semantics
-dont generate jump after return if return is the last stmt
 struct literals
+dont generate jump after return if return is the last stmt
 
 enums
 slices (also, make strings slices)

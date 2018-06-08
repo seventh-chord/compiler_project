@@ -1217,6 +1217,7 @@ typedef enum Op_Kind {
     op_load_data,
 
     op_builtin_mem_clear,
+    op_builtin_mem_copy,
 
     // 'unary'
     op_neg,
@@ -1247,6 +1248,7 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_jump] = "jump",
     [op_load_data] = "load_data",
     [op_builtin_mem_clear] = "builtin_mem_clear",
+    [op_builtin_mem_copy] = "builtin_mem_copy",
 
     [op_neg] = "neg",
     [op_not] = "not",
@@ -1323,6 +1325,11 @@ typedef struct Op {
             Local pointer;
             u64 size;
         } builtin_mem_clear;
+
+        struct {
+            Local src, dst; // both must be pointers
+            u64 size;
+        } builtin_mem_copy;
     };
 
     u32 text_start;
@@ -2266,6 +2273,14 @@ void print_op(Context* context, Func* func, Op* op) {
             printf("builtin mem clear ");
             print_local(context, func, op->builtin_mem_clear.pointer);
             printf(" (%u bytes)", op->builtin_mem_clear.size);
+        } break;
+
+        case op_builtin_mem_copy: {
+            printf("builtin mem copy from ");
+            print_local(context, func, op->builtin_mem_copy.src);
+            printf(" to ");
+            print_local(context, func, op->builtin_mem_copy.dst);
+            printf(" (%u bytes)", op->builtin_mem_copy.size);
         } break;
 
         default: assert(false);
@@ -4951,7 +4966,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 Expr* param_expr = expr->call.params[p];
 
                 u32 var_index = callee->signature.params[p].var_index;
+
                 Type* expected_type = callee->signature.params[p].type;
+                if (callee->signature.params[p].reference_semantics) {
+                    assert(expected_type->kind == primitive_pointer);
+                    expected_type = expected_type->pointer_to;
+                }
 
                 if (!typecheck_expr(info, param_expr, expected_type)) {
                     return false;
@@ -5938,9 +5958,13 @@ bool typecheck(Context* context) {
                 }
             }
 
-            u64 size = type_size_of(*type);
-            if (size > 8) {
+            if (primitive_is_compound((*type)->kind)) {
                 func->signature.params[p].reference_semantics = true;
+                *type = get_pointer_type(context, *type);
+
+                if (func->kind == func_kind_normal) {
+                    func->body.vars[func->signature.params[p].var_index].type = *type;
+                }
             }
         }
     }
@@ -6135,63 +6159,54 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
     Primitive primitive = type->kind;
 
     if (primitive_is_compound(primitive)) {
-        assert(source.as_reference);
-        assert(target.as_reference);
+        Local source_pointer, target_pointer;
+        bool dealloc_source_pointer = false;
+        bool dealloc_target_pointer = false;
 
-        if (primitive == primitive_array) {
-            u64 array_size = type->array.length;
-            Type* child_type = type->array.of;
-            u64 stride = type_size_of(child_type);
+        if (!source.as_reference) {
+            source_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
 
-            Local offset_source = intermediate_allocate_temporary(context, POINTER_SIZE);
-            Local offset_target = intermediate_allocate_temporary(context, POINTER_SIZE);
+            Op op = {0};
+            op.kind = op_address_of;
+            op.binary.source = source;
+            op.binary.target = source_pointer;
+            buf_push(context->tmp_ops, op);
 
-            buf_push(context->tmp_ops, ((Op) {
-                .kind = op_set,
-                .primitive = primitive_pointer,
-                .binary = {
-                    .source = { source.kind, false, source.value },
-                    .target = offset_source,
-                },
-            }));
-
-            buf_push(context->tmp_ops, ((Op) {
-                .kind = op_set,
-                .primitive = primitive_pointer,
-                .binary = {
-                    .source = { target.kind, false, target.value },
-                    .target = offset_target,
-                },
-            }));
-
-            // TODO TODO TODO TODO Once we get control flow, this should be a loop in machinecode
-            for (u64 i = 0; i < array_size; i += 1) {
-                offset_source.as_reference = true;
-                offset_target.as_reference = true;
-
-                intermediate_write_compound_set(context, offset_source, offset_target, child_type);
-
-                offset_source.as_reference = false;
-                offset_target.as_reference = false;
-
-                Op op = {0};
-                op.kind = op_add;
-                op.primitive = primitive_pointer;
-                op.binary.source = (Local) { local_literal, false, stride };
-
-                op.binary.target = offset_source;
-                buf_push(context->tmp_ops, op);
-
-                op.binary.target = offset_target;
-                buf_push(context->tmp_ops, op);
-            }
-
-            intermediate_deallocate_temporary(context, offset_source);
-            intermediate_deallocate_temporary(context, offset_target);
+            source_pointer.as_reference = true;
+            dealloc_source_pointer = true;
         } else {
-            assert(false);
+            source_pointer = source;
         }
 
+        if (!target.as_reference) {
+            target_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+
+            Op op = {0};
+            op.kind = op_address_of;
+            op.binary.source = target;
+            op.binary.target = target_pointer;
+            buf_push(context->tmp_ops, op);
+
+            target_pointer.as_reference = true;
+            dealloc_target_pointer = true;
+        } else {
+            target_pointer = target;
+        }
+
+        Op op = {0};
+        op.kind = op_builtin_mem_copy;
+        op.builtin_mem_copy.src = source_pointer;
+        op.builtin_mem_copy.dst = target_pointer;
+        op.builtin_mem_copy.size = type_size_of(type);
+        buf_push(context->tmp_ops, op);
+
+        if (dealloc_source_pointer) {
+            intermediate_deallocate_temporary(context, source_pointer);
+        }
+
+        if (dealloc_target_pointer) {
+            intermediate_deallocate_temporary(context, target_pointer);
+        }
     } else {
         Op op = {0};
         op.kind = op_set;
@@ -6274,14 +6289,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 op.binary.target = assign_to;
                 buf_push(context->tmp_ops, op);
             } else {
-                assert(!primitive_is_compound(target_primitive));
-
-                Op op = {0};
-                op.kind = op_set;
-                op.primitive = target_primitive;
-                op.binary.source = source;
-                op.binary.target = assign_to;
-                buf_push(context->tmp_ops, op);
+                intermediate_write_compound_set(context, source, assign_to, expr->type);
             }
         } break;
 
@@ -6464,23 +6472,67 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
         case expr_call: {
             assert(!get_address);
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+
+            arena_stack_push(&context->stack); // For 'dealloc_queue'
+
+            typedef struct Local_List Local_List;
+            struct Local_List {
+                Local local;
+                Local_List* previous;
+            };
+            Local_List* dealloc_queue = null;
+
+            Func* callee = &context->funcs[expr->call.func_index];
 
             Op_Call_Param* call_params = (Op_Call_Param*) arena_alloc(&context->arena, sizeof(Op_Call_Param) * expr->call.param_count);
-
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
-                Expr* child = expr->call.params[p];
+                Expr* param = expr->call.params[p];
+                u64 param_size = type_size_of(param->type);
 
-                u64 param_size = type_size_of(child->type);
-                if (param_size > 8) unimplemented(); // TODO by-reference semantics
+                if (callee->signature.params[p].reference_semantics) {
+                    Local local = intermediate_allocate_temporary(context, param_size);
+                    linearize_expr(context, param, local, false);
 
-                Local local = {0};
-                if (!linearize_expr_to_local(child, &local)) {
-                    local = intermediate_allocate_temporary(context, param_size);
-                    linearize_expr(context, child, local, false);
+                    Local pointer_local = intermediate_allocate_temporary(context, POINTER_SIZE);
+                    Op op = {0};
+                    op.kind = op_address_of;
+                    op.binary.source = local;
+                    op.binary.target = pointer_local;
+                    buf_push(context->tmp_ops, op);
+
+                    call_params[p].local = pointer_local;
+                    call_params[p].size = POINTER_SIZE;
+
+
+                    Local_List* node;
+
+                    node = arena_new(&context->stack, Local_List);
+                    node->local = local;
+                    node->previous = dealloc_queue;
+                    dealloc_queue = node;
+
+                    node = arena_new(&context->stack, Local_List);
+                    node->local = pointer_local;
+                    node->previous = dealloc_queue;
+                    dealloc_queue = node;
+
+                } else {
+                    assert(param_size <= 8);
+                    Local local = {0};
+                    if (!linearize_expr_to_local(param, &local)) {
+                        local = intermediate_allocate_temporary(context, param_size);
+                        linearize_expr(context, param, local, false);
+
+                        Local_List* node = arena_new(&context->stack, Local_List);
+                        node->local = local;
+                        node->previous = dealloc_queue;
+                        dealloc_queue = node;
+                    }
+                    
+                    call_params[p].local = local;
+                    call_params[p].size = param_size;
                 }
-
-                call_params[p].size = param_size;
-                call_params[p].local = local;
             }
 
             Op op = {0};
@@ -6491,11 +6543,12 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             op.call.params = call_params;
             buf_push(context->tmp_ops, op);
 
-            for (u32 i = 0; i < expr->call.param_count; i += 1) {
-                if (call_params[i].local.kind == local_temporary) {
-                    intermediate_deallocate_temporary(context, call_params[i].local);
-                }
+            while (dealloc_queue != null) {
+                intermediate_deallocate_temporary(context, dealloc_queue->local);
+                dealloc_queue = dealloc_queue->previous;
             }
+
+            arena_stack_pop(&context->stack);
         } break;
 
         case expr_cast: {
@@ -6818,8 +6871,10 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
                 variable_local.value = left->variable.index;
             }
 
-            if (primitive_is_compound(left_primitive)) {
-                if (left_primitive == primitive_array) {
+            switch (left_primitive) {
+                case primitive_struct:
+                case primitive_array:
+                {
                     if (needs_temporary) {
                         Local tmp_local = intermediate_allocate_temporary(context, operand_size);
                         Local pointer_to_tmp_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
@@ -6871,21 +6926,20 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 
                         intermediate_deallocate_temporary(context, pointer_to_variable_local);
                     }
-                } else {
-                    assert(false);
-                }
+                } break;
 
-            } else {
-                assert(operand_size <= POINTER_SIZE);
+                default: {
+                    assert(operand_size <= POINTER_SIZE);
 
-                if (needs_temporary) {
-                    Local tmp_local = intermediate_allocate_temporary(context, operand_size);
-                    linearize_expr(context, right, tmp_local, false);
-                    intermediate_write_compound_set(context, tmp_local, variable_local, left->type);
-                    intermediate_deallocate_temporary(context, tmp_local);
-                } else {
-                    linearize_expr(context, right, variable_local, false);
-                }
+                    if (needs_temporary) {
+                        Local tmp_local = intermediate_allocate_temporary(context, operand_size);
+                        linearize_expr(context, right, tmp_local, false);
+                        intermediate_write_compound_set(context, tmp_local, variable_local, left->type);
+                        intermediate_deallocate_temporary(context, tmp_local);
+                    } else {
+                        linearize_expr(context, right, variable_local, false);
+                    }
+                } break;;
             }
         } break;
 
@@ -7233,6 +7287,7 @@ void build_intermediate(Context* context) {
 
 enum {
     builtin_mem_clear,
+    builtin_mem_copy,
     BUILTIN_COUNT,
 };
 
@@ -8298,6 +8353,21 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             instruction_call(context, true, builtin_mem_clear);
         } break;
 
+        case op_builtin_mem_copy: {
+            Local src = op->builtin_mem_copy.src;
+            Local dst = op->builtin_mem_copy.dst;
+            u64 size = op->builtin_mem_copy.size;
+
+            assert(src.as_reference);
+            assert(dst.as_reference);
+
+            instruction_mov_mem(context, func, mov_from, src, reg_rax, POINTER_SIZE);
+            instruction_mov_mem(context, func, mov_from, dst, reg_rdx, POINTER_SIZE);
+            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(primitive_u64));
+            // NB NB This call clobbers reg_rbx
+            instruction_call(context, true, builtin_mem_copy);
+        } break;
+
         case op_end_of_function: assert(false);
 
         default: assert(false);
@@ -8308,8 +8378,9 @@ void build_machinecode(Context* context) {
     // Builtins
     u32 builtin_text_starts[BUILTIN_COUNT] = {0};
 
+    // TODO we can optimize builtin mem copy/clear by using a bigger mov and looping fewer times
+
     { // builtin mem clear
-        // TODO we could optimize this by using a bigger mov and looping fewer times
 
         builtin_text_starts[builtin_mem_clear] = buf_length(context->seg_text);
 
@@ -8320,6 +8391,30 @@ void build_machinecode(Context* context) {
         buf_push(context->seg_text, 0xc6); buf_push(context->seg_text, 0x00); buf_push(context->seg_text, 0x00);
         instruction_inc_or_dec(&context->seg_text, true, reg_rax, 8);
         instruction_inc_or_dec(&context->seg_text, false, reg_rcx, 8);
+        u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
+        u64 jump_end = buf_length(context->seg_text);
+
+        *((i8*) &context->seg_text[forward_jump_index]) = (i8) (jump_end - forward_jump_from);
+        *((i8*) &context->seg_text[backward_jump_index]) = -((i8) (jump_end - loop_start));
+
+        // ret
+        buf_push(context->seg_text, 0xc3);
+    }
+
+    { // builtin mem copy
+        builtin_text_starts[builtin_mem_copy] = buf_length(context->seg_text);
+
+        u64 loop_start = buf_length(context->seg_text);
+        u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
+        u64 forward_jump_from = buf_length(context->seg_text);
+
+        instruction_mov_pointer(&context->seg_text, mov_from, reg_rax, reg_rbx, 1);
+        instruction_mov_pointer(&context->seg_text, mov_to,   reg_rdx, reg_rbx, 1);
+
+        instruction_inc_or_dec(&context->seg_text, true, reg_rax, 8);
+        instruction_inc_or_dec(&context->seg_text, true, reg_rdx, 8);
+        instruction_inc_or_dec(&context->seg_text, false, reg_rcx, 8);
+
         u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
         u64 jump_end = buf_length(context->seg_text);
 
@@ -9205,11 +9300,9 @@ void print_verbose_info(Context* context) {
                     Var* var = &func->body.vars[v];
                     u8* name = string_table_access(context->string_table, var->name);
 
-                    if (v == 0) {
-                        printf("%s", name);
-                    } else {
-                        printf(", %s", name);
-                    }
+                    if (v > 0) printf(",");
+                    printf("%s: ", name);
+                    print_type(context, var->type);
                 }
                 printf("\n");
 
