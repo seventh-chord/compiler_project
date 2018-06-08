@@ -467,9 +467,9 @@ void printf_flush() {
     #ifdef DEBUG
     buf_push(printf_buf, '\0');
     OutputDebugStringA(printf_buf);
-    #else
-    print(printf_buf, buf_length(printf_buf));
     #endif
+
+    print(printf_buf, buf_length(printf_buf));
 
     buf_clear(printf_buf);
 }
@@ -1701,8 +1701,9 @@ bool primitive_is_compound(Primitive primitive) {
         case primitive_bool: return false;
         case primitive_void: return false;
         case primitive_pointer: return false;
-        case primitive_invalid: assert(false);
+        case primitive_invalid: assert(false); return false;
         case primitive_unsolidified_int: return false;
+        case primitive_unresolved_name: assert(false); return false;
 
         default: assert(false); return false;
     }
@@ -5197,12 +5198,27 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     printf("\n");
                     bad_types = true;
                 }
+            } else {
+                assert(var->type != null);
+                if (var->type->flags & TYPE_FLAG_UNRESOLVED) {
+                    if (!resolve_type(info->context, &var->type, &var->declaration_pos)) {
+                        bad_types = true;
+                    } else {
+                        var->type->flags &= ~TYPE_FLAG_UNRESOLVED;
+                    }
+                }
             }
 
             assert(!info->scope->map[stmt->declaration.var_index]);
             info->scope->map[stmt->declaration.var_index] = true;
 
-            if (bad_types) return false;
+            if (bad_types) {
+                if (var->type == null) {
+                    // This only is here to prevent the compiler from crashing when typechecking further statements
+                    var->type = &info->context->primitive_types[primitive_invalid];
+                }
+                return false;
+            }
         } break;
 
         case stmt_block: {
@@ -5701,14 +5717,16 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
             } break;
 
             case primitive_unresolved_name: {
-                type = parse_user_type_name(context, type->unresolved_name);
+                Type* new = parse_user_type_name(context, type->unresolved_name);
 
-                if (type == null) {
+                if (new == null) {
                     u8* name_string = string_table_access(context->string_table, type->unresolved_name);
                     print_file_pos(pos);
                     printf("No such type: '%s'\n", name_string);
                     return false;
                 }
+
+                type = new;
 
                 done = true;
             } break;
@@ -5756,6 +5774,8 @@ bool typecheck(Context* context) {
                             break;
                         }
 
+                        type->structure.members[m].offset = size;
+
                         u64 member_size = 0;
                         u64 member_align = 0;
 
@@ -5792,7 +5812,6 @@ bool typecheck(Context* context) {
                         if (member_size == 0) continue;
 
                         size = round_to_next(size, member_align);
-                        type->structure.members[m].offset = size;
                         size += member_size;
 
                         max_align = max(max_align, member_align);
@@ -5807,6 +5826,17 @@ bool typecheck(Context* context) {
 
                     type->flags &= ~TYPE_FLAG_SIZE_NOT_COMPUTED;
                 }
+
+                #if 1
+                u8* name = string_table_access(context->string_table, type->structure.name);
+                printf("struct %s\n", name);
+                printf("size = %u, align = %u\n", type->structure.size, type->structure.align);
+                for (u32 m = 0; m < type->structure.member_count; m += 1) {
+                    u8* member_name = string_table_access(context->string_table, type->structure.members[m].name);
+                    u64 offset = type->structure.members[m].offset;
+                    printf("    %s: offset = %u\n", member_name, offset);
+                }
+                #endif
             } break;
 
             default: assert(false);
@@ -7334,7 +7364,6 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8* condition_name;
-    u8* condition_name;
     if (sign) {
         condition_name = X64_CONDITION_SIGNED_POSTFIXES[condition];
     } else {
@@ -7550,7 +7579,7 @@ typedef enum Mov_Mode {
 } Mov_Mode;
 
 void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Reg pointer_reg, X64_Reg value_reg, u8 bytes) {
-    u8 rex = REX_BASE | REX_W;
+    u8 rex = REX_BASE;
     u8 opcode;
 
     if (mode == mov_to) {
@@ -8955,7 +8984,7 @@ bool write_executable(u8* path, Context* context) {
     image.major_subsystem_version = 6;
     image.minor_subsystem_version = 0;
 
-    // TODO switching this disables address-space randomization, which might be nice for debugging
+    // NB switching this disables address-space randomization, which might be nice for debugging
     #if 1
     image.dll_flags =
         IMAGE_DLL_FLAGS_TERMINAL_SERVER_AWARE |
@@ -9067,7 +9096,6 @@ bool build_file_to_executable(u8* source_path, u8* exe_path) {
 
     if (!build_ast(&context, source_path)) return false;
     if (!typecheck(&context)) return false;
-    printf("%u\n", context.arena.current_page->used);
     //print_verbose_info(&context);
     build_intermediate(&context);
     build_machinecode(&context);

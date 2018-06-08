@@ -1,25 +1,4 @@
 
-struct Foo {
-    a: u32;
-}
-
-let mister_worldwide: Foo;
-//let mister_worldwide = Foo { a: 1 }; // TODO next up
-
-fn foozleschmuzle() {
-    mister_worldwide.a = 7;
-    print_foo(&mister_worldwide);
-}
-
-fn print_foo(foo: *Foo) {
-    print("Foo { a: ");
-    print_u64(u64(foo.a), 10);
-    print(" }\n");
-}
-
-
-
-
 extern "kernel32.lib" {
     fn ExitProcess(exit_code: u32);
 
@@ -27,7 +6,7 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 
     fn GetProcessHeap() -> u64;
-    fn HeapAlloc(heap: *void, flags: u32, bytes: u64) -> u64;
+    fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> *void;
 }
 
 fn assert(condition: bool) {
@@ -81,8 +60,8 @@ fn main() {
     test_fancy_casts();
     say_my_name();
     test_is_prime();
-
     foozleschmuzle();
+    arena_test();
 
     ExitProcess(0);
 }
@@ -264,29 +243,80 @@ fn does_return_but_somewhat_sneakily() -> u8 {
 }
 
 
+struct Foo {
+    a: u32;
+}
 
-/*
+let mister_worldwide: Foo;
+//let mister_worldwide = Foo { a: 1 }; // TODO next up
+
+fn foozleschmuzle() {
+    mister_worldwide.a = 7;
+    print_foo(&mister_worldwide);
+}
+
+fn print_foo(foo: *Foo) {
+    print("Foo { a: ");
+    print_u64(u64(foo.a), 10);
+    print(" }\n");
+}
+
+
+
+fn c_string_length(string: *u8) -> u64 {
+    let length: u64 = 0;
+    for (*string != 0) {
+        length += 1;
+        string += 1;
+    }
+    return length;
+}
+
+fn mem_copy(src: *u8, dest: *u8, length: u64) {
+    for (length > 0) {
+        *dest = *src;
+        src += 1;
+        dest += 1;
+        length -= 1;
+    }
+}
+
+fn arena_test() {
+    print("Calvino inbound...\n");
+
+    let original = "[...]: those that through the years and the changes continue to give their form to desires, and those in which desires either erase the city or are reased by it.\n";
+    let length = c_string_length(original);
+
+    let arena: Arena;
+    let copy = arena_new(&arena, length + 1);
+    mem_copy(original, copy, length + 1);
+
+    print_u64(length, 10);
+    print(" characters of Calvino\n");
+    print(copy);
+}
+
+
 let heap = GetProcessHeap();
-let ARENA_BLOCK_SIZE = 8 * 1024 * 1024;
+let ARENA_BLOCK_SIZE = 1024;
 
 struct Arena {
     data: *u8;
     used, capacity: u64;
 }
 
-fn arena_new(arena: *Arena, size: u64) -> *void {
+fn arena_new(arena: *Arena, size: u64) -> *u8 {
     if (arena.data == null) {
         arena.data = cast(*u8, HeapAlloc(heap, 0, ARENA_BLOCK_SIZE));
         arena.used = 0;
         arena.capacity = ARENA_BLOCK_SIZE;
     }
 
-    let result = data + used;
-    used += size;
-    assert(used <= capacity);
-    return cast(*void, result);
+    let result = arena.data + arena.used;
+    arena.used += size;
+    assert(arena.used <= arena.capacity);
+    return result;
 }
-*/
 
 /*
 uninitialized (zeroed) global variables in .bss
@@ -297,6 +327,12 @@ more operators      <<   >>   |   &   ~   ||   &&    /=    *=
 character literals
 variable shadowing
 taking the address of temporaries
+a defer statement
+auto-cast void pointer to any pointer type
+respect stride in poitner addition
+shorthand for multiple function paramters with the same type ('fn foo(a, b: *u8)')
+figure out how to do no parentheses in loops/conditionals
+respect alignment when placing compound types in .data or on the stack
 
 .pdata and unwind info
 debug info
