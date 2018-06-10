@@ -4860,6 +4860,14 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 } break;
 
                 case primitive_struct: {
+                    if (expr->compound.count > expr->type->structure.member_count) {
+                        u64 expected = expr->type->structure.member_count;
+                        u64 given = expr->compound.count;
+                        print_file_pos(&expr->pos);
+                        printf("Expected at most %u %s, but got %u for struct literal\n", expected, expected == 1? "member" : "members", given);
+                        return false;
+                    }
+
                     bool any_named = false;
                     bool any_unnamed = false;
 
@@ -7765,6 +7773,38 @@ void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
     #endif
 }
 
+void instruction_zero_extend_2_bytes(u8** b, X64_Reg reg, u8 target_bytes) {
+    u8 modrm =
+        0xc0 |
+        ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
+        ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
+    u8 rex = REX_BASE;
+
+    if (reg >= reg_r8) {
+        rex |= REX_R | REX_B;
+    }
+
+    switch (target_bytes) {
+        case 1: assert(false); // Can't zero-extend from 2 bytes to 1 byte
+        case 2: assert(false); // Can't zero-extend from 2 bytes to 2 bytes
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, 0x0f);
+    buf_push(*b, 0xb7);
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    u8* reg_name = reg_names[reg];
+    printf("movzx %s %s (8 -> %u)\n", reg_name, reg_name, target_bytes*8);
+    #endif
+}
+
 void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) {
     u8 opcode;
     if (sign) {
@@ -8517,6 +8557,15 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (new_size > old_size) {
                 if (op->cast.local.as_reference) unimplemented(); // TODO
                 instruction_mov_mem(context, func, mov_from, op->cast.local, reg_rax, old_size);
+
+                switch (old_size) {
+                    case 1: instruction_zero_extend_byte(&context->seg_text, reg_rax, new_size); break;
+                    case 2: instruction_zero_extend_2_bytes(&context->seg_text, reg_rax, new_size); break;
+                    case 4: break; // mov eax, ... automatically zeroes high bits
+                    case 8: assert(false); break;
+                    default: assert(false);
+                }
+
                 instruction_mov_mem(context, func, mov_to, op->cast.local, reg_rax, new_size);
             }
         } break;

@@ -20,8 +20,8 @@ The eight higher registers can only be encoded using the REX byte.
 # Operand size prefix
 Instructions have 32-bit and 8-bit variants.
 Prefixes can be used on the 32-bit variants:
-0x66    16-bit mode
-REX.W   64-bit mode
+0x66    16-bit mode instead of 32-bit mode
+REX.W   64-bit mode instead of 32-bit mode
 
 # ModRM and SIB
 ModRM:
