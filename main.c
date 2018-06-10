@@ -293,7 +293,6 @@ struct Arena_Page {
     u8 data[0];
 };
 
-#define arena_insert(a, e) (arena_insert_with_size((a), &(e), sizeof((e))))
 #define arena_new(a, T)    (arena_insert_with_size((a), &((T) {0}), sizeof(T)))
 
 void arena_make_space(Arena* arena, u64 size) {
@@ -927,8 +926,8 @@ struct Type {
             struct {
                 u32 name;
                 Type* type;
-                File_Pos declaration_pos;
                 u64 offset;
+                File_Pos declaration_pos;
             } *members;
 
             u64 size, align;
@@ -1068,7 +1067,7 @@ typedef enum Expr_Kind {
     expr_variable,
     expr_literal,
     expr_string_literal,
-    expr_compound_literal,
+    expr_compound,
     expr_binary,
     expr_unary,
     expr_call,
@@ -1099,9 +1098,14 @@ struct Expr { // 'typedef'd earlier!
         } string;
 
         struct {
-            Expr** content; // []*Expr
+            struct {
+                Expr* expr;
+                enum { expr_compound_no_name, expr_compound_unresolved_name, expr_compound_name } name_mode;
+                union { u32 unresolved_name; u32 member_index; };
+            } *content;
+
             u32 count;
-        } compound_literal;
+        } compound;
 
         struct {
             Binary_Op op;
@@ -1972,12 +1976,33 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             }
         } break;
 
-        case expr_compound_literal: {
+        case expr_compound: {
             print_type(context, expr->type);
+
             printf(" { ");
-            for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
+            for (u32 i = 0; i < expr->compound.count; i += 1) {
                 if (i > 0) printf(", ");
-                Expr* child = expr->compound_literal.content[i];
+
+                switch (expr->compound.content[i].name_mode) {
+                    case expr_compound_no_name: break;
+
+                    case expr_compound_name: {
+                        assert(expr->type->kind == primitive_struct);
+
+                        u32 member_index = expr->compound.content[i].member_index;
+                        u32 name_index = expr->type->structure.members[member_index].name;
+                        u8* name = string_table_access(context->string_table, name_index);
+                        printf("%s: ", name);
+                    } break;
+
+                    case expr_compound_unresolved_name: {
+                        u32 name_index = expr->compound.content[i].unresolved_name;
+                        u8* name = string_table_access(context->string_table, name_index);
+                        printf("%s: ", name);
+                    } break;
+                }
+
+                Expr* child = expr->compound.content[i].expr;
                 print_expr(context, func, child);
             }
             printf(" }");
@@ -2550,8 +2575,8 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
 
     type->structure.members = (void*) arena_alloc(&context->arena, type->structure.member_count * sizeof(*type->structure.members));
 
-    u32 i = 0;
-    for (Member* m = first; m != null; m = m->next, i += 1) {
+    Member* m = first;
+    for (u32 i = 0; i < type->structure.member_count; i += 1, m = m->next) {
         type->structure.members[i].name = m->name;
         type->structure.members[i].type = m->type;
         type->structure.members[i].declaration_pos = m->pos;
@@ -2706,7 +2731,8 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
-Expr* parse_compound_literal(Context* context, Token* t, u32* length);
+Expr* parse_compound(Context* context, Token* t, u32* length);
+Expr** parse_parameter_list(Context* context, Token* t, u32* length, u32* count);
 
 Expr* parse_expr(Context* context, Token* t, u32* length) {
     Token* t_start = t;
@@ -2781,63 +2807,16 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         File_Pos start_pos = t->pos;
                         t += 1;
 
-                        typedef struct Param Param;
-                        struct Param {
-                            Expr* expr;
-                            Param *next, *previous;
-                        };
-
+                        u32 param_list_length = 0;
                         u32 param_count = 0;
-                        Param* first_param = null;
-                        Param* last_param = null;
-
-                        arena_stack_push(&context->stack);
-
-                        while (t->kind != token_bracket_round_close) {
-                            u32 param_length = 0;
-                            Expr* param = parse_expr(context, t, &param_length);
-                            t += param_length;
-
-                            if (param == null) {
-                                *length = t - t_start;
-                                return null;
-                            }
-
-                            if (t->kind != token_bracket_round_close) {
-                                if (t->kind != token_comma) {
-                                    print_file_pos(&t->pos);
-                                    printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
-                                    print_token(context->string_table, t);
-                                    printf("\n");
-                                    *length = t - t_start;
-                                    return null;
-                                }
-                                t += 1;
-                            }
-
-                            Param* next = arena_new(&context->stack, Param);
-                            next->expr = param;
-
-                            if (first_param == null) {
-                                first_param = next;
-                            } else {
-                                next->previous = last_param;
-                                last_param->next = next;
-                            }
-                            last_param = next;
-
-                            param_count += 1;
-                        }
-
-                        if (!expect_single_token(context, t, token_bracket_round_close, "after function call")) {
+                        Expr** params = parse_parameter_list(context, t, &param_list_length, &param_count);
+                        t += param_list_length;
+                        if (params == null) {
                             *length = t - t_start;
                             return null;
                         }
-                        t += 1;
-
 
                         Type* cast_to_primitive = parse_primitive_name(context, name_index);
-
                         if (cast_to_primitive != null) {
                             if (!primitive_is_integer(cast_to_primitive->kind)) {
                                 print_file_pos(&start_pos);
@@ -2859,7 +2838,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                             Expr* expr = arena_new(&context->arena, Expr);
                             expr->pos = start_pos;
                             expr->kind = expr_cast;
-                            expr->cast_from = first_param->expr;
+                            expr->cast_from = params[0];
                             expr->type = cast_to_primitive;
 
                             shunting_yard_push_expr(context, yard, expr);
@@ -2870,24 +2849,36 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                             expr->kind = expr_call;
                             expr->call.unresolved_name = name_index;
                             expr->flags |= EXPR_FLAG_UNRESOLVED;
-
+                            expr->call.params = params;
                             expr->call.param_count = param_count;
-                            expr->call.params = (void*) arena_alloc(&context->arena, param_count * sizeof(Expr*));
-                            u32 i = 0;
-                            for (Param* p = first_param; p != null; p = p->next, i += 1) {
-                                expr->call.params[i] = p->expr;
-                            }
 
                             shunting_yard_push_expr(context, yard, expr);
                             could_parse = true;
                         }
-
-
-                        arena_stack_pop(&context->stack);
                     
-                    // Structure literal
+                    // Struct literal
                     } else if (t->kind == token_bracket_curly_open) {
-                        unimplemented(); // TODO
+                        u32 struct_length = 0;
+                        Expr* expr = parse_compound(context, t, &struct_length);
+                        t += struct_length;
+
+                        if (expr == null) {
+                            *length = t - t_start;
+                            return null;
+                        }
+
+                        Type* type = parse_user_type_name(context, name_index);
+                        if (type == null) {
+                            type = arena_new(&context->arena, Type);
+                            type->kind = primitive_unresolved_name;
+                            type->unresolved_name = name_index;
+                            type->flags |= TYPE_FLAG_UNRESOLVED;
+                        }
+
+                        expr->type = type;
+
+                        shunting_yard_push_expr(context, yard, expr);
+                        could_parse = true;
 
                     // Variable
                     } else {
@@ -2979,7 +2970,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     could_parse = true;
                 } break;
 
-                // Array compound literal, or untyped compound literals
+                // Array literal, or untyped compound literals
                 case token_bracket_curly_open:
                 case token_bracket_square_open:
                 {
@@ -2995,9 +2986,9 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         }
                     }
 
-                    u32 compound_literal_length = 0;
-                    Expr* expr = parse_compound_literal(context, t, &compound_literal_length);
-                    t += compound_literal_length;
+                    u32 array_literal_length = 0;
+                    Expr* expr = parse_compound(context, t, &array_literal_length);
+                    t += array_literal_length;
 
                     if (expr == null) {
                         *length = t - t_start;
@@ -3161,28 +3152,118 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
     return expr;
 }
 
-Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
+Expr* parse_compound(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
-    if (!expect_single_token(context, t, token_bracket_curly_open, "after type of compound literal")) {
+    if (!expect_single_token(context, t, token_bracket_curly_open, "after type of array literal")) {
         *length = t - t_start;
         return null;
     }
     t += 1;
 
-    typedef struct Param Param;
-    struct Param {
+    typedef struct Member_Expr Member_Expr;
+    struct Member_Expr {
         Expr* expr;
-        Param *next, *previous;
+        u32 name_index;
+        Member_Expr *next, *previous;
     };
 
-    u32 param_count = 0;
-    Param* first_param = null;
-    Param* last_param = null;
+    u32 member_count = 0;
+    Member_Expr* first_member = null;
+    Member_Expr* last_member = null;
 
     arena_stack_push(&context->stack);
 
     while (t->kind != token_bracket_curly_close) {
+        u32 name_index = U32_MAX;
+        if (t->kind == token_identifier && (t + 1)->kind == token_colon) {
+            name_index = t->identifier_string_table_index;
+            t += 2;
+        }
+
+        u32 member_length = 0;
+        Expr* member = parse_expr(context, t, &member_length);
+        t += member_length;
+
+        if (member == null) {
+            *length = t - t_start;
+            return null;
+        }
+
+        Member_Expr* next = arena_new(&context->stack, Member_Expr);
+        next->name_index = name_index;
+        next->expr = member;
+
+        if (first_member == null) {
+            first_member = next;
+        } else {
+            next->previous = last_member;
+            last_member->next = next;
+        }
+        last_member = next;
+
+        member_count += 1;
+
+        if (t->kind != token_bracket_curly_close) {
+            if (t->kind != token_comma) {
+                print_file_pos(&t->pos);
+                printf("Expected comma ',' or closing parenthesis '}' after value in array litereral, but got ");
+                print_token(context->string_table, t);
+                printf("\n");
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+        }
+    }
+
+    if (!expect_single_token(context, t, token_bracket_curly_close, "to close array literal")) {
+        *length = t - t_start;
+        return null;
+    }
+    t += 1;
+
+    Expr* expr = arena_new(&context->arena, Expr);
+    expr->kind = expr_compound;
+    expr->pos = t_start->pos;
+
+    expr->compound.count = member_count;
+    expr->compound.content = (void*) arena_alloc(&context->arena, member_count * sizeof(*expr->compound.content));
+
+    Member_Expr* p = first_member;
+    for (u32 i = 0; i < member_count; i += 1, p = p->next) {
+        expr->compound.content[i].expr = p->expr;
+
+        if (p->name_index == U32_MAX) {
+            expr->compound.content[i].name_mode = expr_compound_no_name;
+        } else {
+            expr->compound.content[i].unresolved_name = p->name_index;
+            expr->compound.content[i].name_mode = expr_compound_unresolved_name;
+        }
+    }
+
+    arena_stack_pop(&context->stack);
+
+    *length = t - t_start;
+    return expr;
+}
+
+Expr** parse_parameter_list(Context* context, Token* t, u32* length, u32* count) {
+    Token* t_start = t;
+
+    typedef struct Param_Expr Param_Expr;
+    struct Param_Expr {
+        Expr* expr;
+        Param_Expr *next, *previous;
+    };
+
+    u32 param_count = 0;
+    Param_Expr* first_param = null;
+    Param_Expr* last_param = null;
+
+    arena_stack_push(&context->stack);
+
+    while (t->kind != token_bracket_round_close) {
         u32 param_length = 0;
         Expr* param = parse_expr(context, t, &param_length);
         t += param_length;
@@ -3192,10 +3273,10 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
             return null;
         }
 
-        if (t->kind != token_bracket_curly_close) {
+        if (t->kind != token_bracket_round_close) {
             if (t->kind != token_comma) {
                 print_file_pos(&t->pos);
-                printf("Expected comma ',' or closing parenthesis '}' after value in compound litereral, but got ");
+                printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
                 print_token(context->string_table, t);
                 printf("\n");
                 *length = t - t_start;
@@ -3204,7 +3285,7 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
             t += 1;
         }
 
-        Param* next = arena_new(&context->stack, Param);
+        Param_Expr* next = arena_new(&context->stack, Param_Expr);
         next->expr = param;
 
         if (first_param == null) {
@@ -3217,28 +3298,20 @@ Expr* parse_compound_literal(Context* context, Token* t, u32* length) {
 
         param_count += 1;
     }
-
-    if (!expect_single_token(context, t, token_bracket_curly_close, "to close compound literal")) {
-        *length = t - t_start;
-        return null;
-    }
     t += 1;
 
-    Expr* expr = arena_new(&context->arena, Expr);
-    expr->kind = expr_compound_literal;
-    expr->pos = t_start->pos;
+    *count = param_count;
+    Expr** exprs = (void*) arena_alloc(&context->arena, param_count * sizeof(Expr*));
 
-    expr->compound_literal.count = param_count;
-    expr->compound_literal.content = (void*) arena_alloc(&context->arena, param_count * sizeof(Expr*));
-    u32 i = 0;
-    for (Param* p = first_param; p != null; p = p->next, i += 1) {
-        expr->compound_literal.content[i] = p->expr;
+    Param_Expr* p = first_param;
+    for (u32 i = 0; i < param_count; i += 1, p = p->next) {
+        exprs[i] = p->expr;
     }
 
     arena_stack_pop(&context->stack);
 
     *length = t - t_start;
-    return expr;
+    return exprs;
 }
 
 Stmt* parse_stmts(Context* context, Token* t, u32* length);
@@ -4331,7 +4404,7 @@ bool build_ast(Context* context, u8* path) {
 
             if (all_brackets_matched) {
                 if (open) {
-                    Bracket_Info* info = arena_insert(&context->stack, ((Bracket_Info) {0}));
+                    Bracket_Info* info = arena_new(&context->stack, Bracket_Info);
                     info->our_char = our_char;
                     info->our_pos = file_pos;
                     info->needed_match = matching_kind;
@@ -4715,9 +4788,17 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             assert(expr->type == info->context->string_type);
         } break;
 
-        case expr_compound_literal: {
+        case expr_compound: {
             if (expr->type == null) {
                 expr->type = solidify_to;
+            }
+            
+            if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
+                if (resolve_type(info->context, &expr->type, &expr->pos)) {
+                    expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
+                } else {
+                    return false;
+                }
             }
 
             Primitive primitive = expr->type->kind;
@@ -4726,19 +4807,41 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     u64 expected_child_count = expr->type->array.length;
                     Type* expected_child_type = expr->type->array.of;
 
-                    if (expr->compound_literal.count != expected_child_count) {
+                    if (expr->compound.count != expected_child_count) {
                         print_file_pos(&expr->pos);
                         printf(
                             "Too %s values in compound literal: expected %u, got %u\n",
-                            (expr->compound_literal.count > expected_child_count)? "many" : "few",
+                            (expr->compound.count > expected_child_count)? "many" : "few",
                             (u64) expected_child_count,
-                            (u64) expr->compound_literal.count
+                            (u64) expr->compound.count
                         );
                         return false;
                     }
 
-                    for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
-                        Expr* child = expr->compound_literal.content[i];
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        if (expr->compound.content[i].name_mode != expr_compound_no_name) {
+                            u32 name_index;
+                            switch (expr->compound.content[i].name_mode) {
+                                case expr_compound_name: {
+                                    assert(expr->type->kind == primitive_struct);
+                                    u32 member_index = expr->compound.content[i].member_index;
+                                    name_index = expr->type->structure.members[member_index].name;
+                                } break;
+
+                                case expr_compound_unresolved_name: {
+                                    name_index = expr->compound.content[i].unresolved_name;
+                                } break;
+
+                                default: assert(false);
+                            }
+                            u8* member_name = string_table_access(info->context->string_table, name_index);
+
+                            print_file_pos(&expr->pos);
+                            printf("Unexpected member name '%s' given inside array literal\n", member_name);
+                            return false;
+                        }
+
+                        Expr* child = expr->compound.content[i].expr;
 
                         if (!typecheck_expr(info, child, expected_child_type)) {
                             return false;
@@ -4757,7 +4860,82 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 } break;
 
                 case primitive_struct: {
-                    unimplemented();
+                    bool any_named = false;
+                    bool any_unnamed = false;
+
+                    u8* set_map = arena_alloc(&info->context->stack, expr->type->structure.member_count);
+                    mem_clear(set_map, expr->type->structure.member_count);
+
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        Expr* child = expr->compound.content[i].expr;
+
+                        if (expr->compound.content[i].name_mode == expr_compound_unresolved_name) {
+                            u32 unresolved_name = expr->compound.content[i].unresolved_name;
+                            u32 member_index = U32_MAX;
+
+                            for (u32 m = 0; m < expr->type->structure.member_count; m += 1) {
+                                if (expr->type->structure.members[m].name == unresolved_name) {
+                                    member_index = m;
+                                    break;
+                                }
+                            }
+
+                            if (member_index == U32_MAX) {
+                                u8* member_name = string_table_access(info->context->string_table, unresolved_name);
+                                u8* struct_name = string_table_access(info->context->string_table, expr->type->structure.name);
+                                print_file_pos(&expr->pos);
+                                printf("Struct '%s' has no member '%s'\n", struct_name, member_name);
+                                return false;
+                            } else {
+                                expr->compound.content[i].name_mode = expr_compound_name;
+                                expr->compound.content[i].member_index = member_index;
+                            }
+                        }
+
+                        if (expr->compound.content[i].name_mode == expr_compound_name) {
+                            u32 m = expr->compound.content[i].member_index;
+                            Type* member_type = expr->type->structure.members[m].type;
+                            
+                            if (!typecheck_expr(info, child, member_type)) {
+                                return false;
+                            }
+
+                            if (member_type != child->type) {
+                                u8* member_name = string_table_access(info->context->string_table, expr->type->structure.members[m].name);
+                                u8* struct_name = string_table_access(info->context->string_table, expr->type->structure.name);
+
+                                print_file_pos(&child->pos);
+                                printf("Expected ");
+                                print_type(info->context, member_type);
+                                printf(" but got ");
+                                print_type(info->context, child->type);
+                                printf(" for member '%s' of struct '%s'\n", member_name, struct_name);
+                                return false;
+                            }
+                            any_named = true;
+                        } else {
+                            assert(expr->compound.content[i].member_index == 0);
+                            expr->compound.content[i].member_index = i;
+                            any_unnamed = true;
+                        }
+
+                        u32 m = expr->compound.content[i].member_index;
+                        if (set_map[i]) {
+                            u32 name_index = expr->type->structure.members[m].name;
+                            u8* member_name = string_table_access(info->context->string_table, name_index);
+
+                            print_file_pos(&child->pos);
+                            printf("'%s' is set more than once in structure literal.\n", member_name);
+                            return false;
+                        }
+                        set_map[i] = true;
+                    }
+
+                    if (any_named && any_unnamed) {
+                        print_file_pos(&expr->pos);
+                        printf("Struct literal can't have both named and unnamed members\n");
+                        return false;
+                    }
                 } break;
 
                 default: {
@@ -5286,9 +5464,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
                 if (!typecheck_expr(info, right, solidify_to)) {
                     bad_types = true;
-                } else if (var->type == null) {
-                    var->type = right->type;
-                } else if (!type_can_assign(info->context, var->type, right->type)) {
+                } else if (var->type != null && !type_can_assign(info->context, var->type, right->type)) {
                     print_file_pos(&stmt->pos);
                     printf("Right hand side of variable declaration doesn't have correct type. Expected ");
                     print_type(info->context, var->type);
@@ -5296,6 +5472,10 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     print_type(info->context, right->type);
                     printf("\n");
                     bad_types = true;
+                }
+
+                if (var->type == null) {
+                    var->type = right->type;
                 }
             } else {
                 assert(var->type != null);
@@ -5535,8 +5715,8 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             if (result != eval_ok) return result;
 
             Type* array_type = expr->subscript.array->type;
-            Primitive compound_literal_primitive = array_type->kind;
-            assert(compound_literal_primitive == primitive_array);
+            Primitive array_literal_primitive = array_type->kind;
+            assert(array_literal_primitive == primitive_array);
 
             Type* child_type = array_type->array.of;
             u64 child_size = type_size_of(child_type);
@@ -5658,22 +5838,29 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             return eval_ok;
         } break;
 
-        case expr_compound_literal: {
+        case expr_compound: {
             Primitive primitive = expr->type->kind;
 
-            if (primitive == primitive_array) {
-                Type* child_type = expr->type->array.of;
-                u64 child_size = type_size_of(child_type);
+            switch (primitive) {
+                case primitive_array: {
+                    Type* child_type = expr->type->array.of;
+                    u64 child_size = type_size_of(child_type);
 
-                u8* mem = result_into;
-                for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
-                    Expr* child = expr->compound_literal.content[i];
-                    Eval_Result result = eval_compile_time_expr(info, child, mem);
-                    if (result != eval_ok) return result;
-                    mem += child_size;
-                }
-            } else {
-                assert(false);
+                    u8* mem = result_into;
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        assert(expr->compound.content[i].name_mode == expr_compound_no_name);
+                        Expr* child = expr->compound.content[i].expr;
+                        Eval_Result result = eval_compile_time_expr(info, child, mem);
+                        if (result != eval_ok) return result;
+                        mem += child_size;
+                    }
+                } break;
+
+                case primitive_struct: {
+                    unimplemented(); // TODO compile time struct literals
+                } break;
+
+                default: assert(false);
             }
 
             return eval_ok;
@@ -6306,49 +6493,100 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             buf_push(context->tmp_ops, op);
         } break;
 
-        case expr_compound_literal: {
+        case expr_compound: {
             assert(!get_address);
             assert(assign_to.as_reference);
             assert(primitive_is_compound(target_primitive));
 
-            if (target_primitive == primitive_array) {
-                u64 array_length = expr->type->array.length;
-                assert(array_length == expr->compound_literal.count);
+            switch (target_primitive) {
+                case primitive_array: {
+                    u64 array_length = expr->type->array.length;
+                    assert(array_length == expr->compound.count);
 
-                Type* child_type = expr->type->array.of;
-                u64 stride = type_size_of(child_type);
+                    Type* child_type = expr->type->array.of;
+                    u64 stride = type_size_of(child_type);
 
-                Local element_pointer = assign_to;
+                    Local element_pointer = assign_to;
 
-                for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        element_pointer.as_reference = false;
+
+                        if (i > 0) {
+                            buf_push(context->tmp_ops, ((Op) {
+                                .kind = op_add,
+                                .primitive = primitive_pointer,
+                                .binary = { (Local) { local_literal, false, stride }, element_pointer }
+                            }));
+                        }
+
+                        element_pointer.as_reference = true;
+
+                        assert(expr->compound.content[i].name_mode == expr_compound_no_name);
+                        Expr* child = expr->compound.content[i].expr;
+                        linearize_expr(context, child, element_pointer, false);
+                    }
+
+                    u64 negative_offset = stride * (expr->compound.count - 1);
+
+                    element_pointer.as_reference = false;
+                    buf_push(context->tmp_ops, ((Op) {
+                        .kind = op_sub,
+                        .primitive = primitive_pointer,
+                        .binary = { (Local) { local_literal, false, negative_offset }, element_pointer },
+                    }));
+                } break;
+
+                case primitive_struct: {
+                    Local element_pointer = assign_to;
+
+                    u64 current_offset = 0;
+
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        element_pointer.as_reference = false;
+
+                        u32 m = expr->compound.content[i].member_index;
+                        u64 target_offset  = expr->type->structure.members[m].offset;
+
+                        if (current_offset == target_offset) {
+                            // element_pointer allready is right
+                        } else if (current_offset < target_offset) {
+                            u64 stride = target_offset - current_offset;
+                            buf_push(context->tmp_ops, ((Op) {
+                                .kind = op_add,
+                                .primitive = primitive_pointer,
+                                .binary = { (Local) { local_literal, false, stride }, element_pointer }
+                            }));
+                        } else {
+                            assert(current_offset > target_offset);
+                            u64 stride = current_offset - target_offset;
+                            buf_push(context->tmp_ops, ((Op) {
+                                .kind = op_sub,
+                                .primitive = primitive_pointer,
+                                .binary = { (Local) { local_literal, false, stride }, element_pointer }
+                            }));
+                        }
+                        current_offset = target_offset;
+
+                        element_pointer.as_reference = true;
+
+                        Expr* child = expr->compound.content[i].expr;
+                        linearize_expr(context, child, element_pointer, false);
+                    }
+
                     element_pointer.as_reference = false;
 
-                    if (i > 0) {
+                    if (current_offset > 0) {
+                        u64 stride = current_offset;
                         buf_push(context->tmp_ops, ((Op) {
-                            .kind = op_add,
+                            .kind = op_sub,
                             .primitive = primitive_pointer,
                             .binary = { (Local) { local_literal, false, stride }, element_pointer }
                         }));
                     }
-
-                    element_pointer.as_reference = true;
-
-                    Expr* child = expr->compound_literal.content[i];
-                    linearize_expr(context, child, element_pointer, false);
-                }
-
-                u64 negative_offset = stride * (expr->compound_literal.count - 1);
-
-                element_pointer.as_reference = false;
-                buf_push(context->tmp_ops, ((Op) {
-                    .kind = op_sub,
-                    .primitive = primitive_pointer,
-                    .binary = { (Local) { local_literal, false, negative_offset }, element_pointer },
-                }));
-            } else {
-                assert(false);
+                } break;
+                
+                default: assert(false);
             }
-
         } break;
 
         case expr_binary: {
@@ -6771,9 +7009,9 @@ bool linearize_assignment_needs_temporary(Expr* expr, u32 var_index) {
             return !(expr->flags & EXPR_FLAG_UNRESOLVED) && expr->variable.index == var_index;
         } break;
 
-        case expr_compound_literal: {
-            for (u32 i = 0; i < expr->compound_literal.count; i += 1) {
-                Expr* child = expr->compound_literal.content[i];
+        case expr_compound: {
+            for (u32 i = 0; i < expr->compound.count; i += 1) {
+                Expr* child = expr->compound.content[i].expr;
                 if (linearize_assignment_needs_temporary(child, var_index)) return true;
             }
         } break;

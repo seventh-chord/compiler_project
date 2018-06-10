@@ -328,9 +328,12 @@ fn stride_test() {
 
 
 fn farwell() {
-    let pages: The_Pages_Of_History;
+    let pages = The_Pages_Of_History {
+        seeds_that_we_let_grow:   3,
+        castles_in_the_distance:  2,
+        path_of_least_resistance: 1234,
+    };
 
-    pages.path_of_least_resistance = 40;
     turn(pages);
     print(", ");
     print_u64(pages.path_of_least_resistance, 10);
@@ -349,7 +352,6 @@ struct The_Pages_Of_History {
 }
 
 /*
-struct literals
 dont generate jump after return if return is the last stmt
 
 enums
