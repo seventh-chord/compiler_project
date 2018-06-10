@@ -337,6 +337,14 @@ fn farwell() {
     print(", ");
     print_u64(pages.path_of_least_resistance, 10);
     print("\n");
+
+    let vector = Vector { 1, 2, 3 };
+    print_u64(u64(vector.x), 10);
+    print(", ");
+    print_u64(u64(vector.y), 10);
+    print(", ");
+    print_u64(u64(vector.z), 10);
+    print("\n");
 }
 
 fn turn(pages: The_Pages_Of_History) {
@@ -349,6 +357,8 @@ struct The_Pages_Of_History {
     castles_in_the_distance: u64;
     path_of_least_resistance: u64;
 }
+
+struct Vector { x, y, z: u64; }
 
 /*
 dont generate jump after return if return is the last stmt

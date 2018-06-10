@@ -4892,40 +4892,40 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                             }
                         }
 
-                        if (expr->compound.content[i].name_mode == expr_compound_name) {
-                            u32 m = expr->compound.content[i].member_index;
-                            Type* member_type = expr->type->structure.members[m].type;
-                            
-                            if (!typecheck_expr(info, child, member_type)) {
-                                return false;
-                            }
-
-                            if (member_type != child->type) {
-                                u8* member_name = string_table_access(info->context->string_table, expr->type->structure.members[m].name);
-                                u8* struct_name = string_table_access(info->context->string_table, expr->type->structure.name);
-
-                                print_file_pos(&child->pos);
-                                printf("Expected ");
-                                print_type(info->context, member_type);
-                                printf(" but got ");
-                                print_type(info->context, child->type);
-                                printf(" for member '%s' of struct '%s'\n", member_name, struct_name);
-                                return false;
-                            }
-                            any_named = true;
-                        } else {
+                        if (expr->compound.content[i].name_mode == expr_compound_no_name) {
                             assert(expr->compound.content[i].member_index == 0);
                             expr->compound.content[i].member_index = i;
                             any_unnamed = true;
+                        } else {
+                            any_named = true;
                         }
 
                         u32 m = expr->compound.content[i].member_index;
+                        Type* member_type = expr->type->structure.members[m].type;
+                        
+                        if (!typecheck_expr(info, child, member_type)) {
+                            return false;
+                        }
+
+                        if (member_type != child->type) {
+                            u8* member_name = string_table_access(info->context->string_table, expr->type->structure.members[m].name);
+                            u8* struct_name = string_table_access(info->context->string_table, expr->type->structure.name);
+
+                            print_file_pos(&child->pos);
+                            printf("Expected ");
+                            print_type(info->context, member_type);
+                            printf(" but got ");
+                            print_type(info->context, child->type);
+                            printf(" for member '%s' of struct '%s'\n", member_name, struct_name);
+                            return false;
+                        }
+
                         if (set_map[i]) {
                             u32 name_index = expr->type->structure.members[m].name;
                             u8* member_name = string_table_access(info->context->string_table, name_index);
 
                             print_file_pos(&child->pos);
-                            printf("'%s' is set more than once in structure literal.\n", member_name);
+                            printf("'%s' is set more than once in struct literal\n", member_name);
                             return false;
                         }
                         set_map[i] = true;
@@ -4937,8 +4937,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                         return false;
                     }
 
-                    if (any_unnamed) {
-                        unimplemented(); // Check if there we specify values for all fields
+                    if (any_unnamed && expr->compound.count != expr->type->structure.member_count) {
+                        print_file_pos(&expr->pos);
+                        printf("Expected %u members, but got %u for struct literal\n", expr->type->structure.member_count, expr->compound.count);
+                        return false;
                     }
                 } break;
 
