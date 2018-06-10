@@ -13,7 +13,7 @@ cl /nologo /c /WX^
     /Fo"build\main.obj"^
     /TC^
     /D%DEBUG_VAR%^
-    "main.c"^
+    "compiler\main.c"^
  &&^
 link /nologo^
     /nodefaultlib /subsystem:console^
@@ -21,7 +21,7 @@ link /nologo^
     /debug^
     /incremental:no^
     /entry:program_entry^
-    /out:"build\program.exe"^
+    /out:"build\compiler.exe"^
     build\main.obj kernel32.lib^
  &&^
-build\program.exe
+build\compiler.exe

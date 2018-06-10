@@ -9669,7 +9669,7 @@ void compile_and_run(u8* source_path, u8* exe_path) {
 void main() {
     i64 start_time = perf_time();
 
-    compile_and_run("W:/asm2/code.foo", "out.exe");
+    compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);

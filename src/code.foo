@@ -365,8 +365,6 @@ fn vector_test() {
 struct Vector { x, y, z: u8; }
 
 /*
-dont generate jump after return if return is the last stmt
-
 enums
 slices (also, make strings slices)
 size_of, align_of, type_of
@@ -379,6 +377,7 @@ variable shadowing
 taking the address of temporaries
 a defer statement
 figure out how to do no parentheses in loops/conditionals
+dont generate jump after return if return is the last stmt
 
 .pdata and unwind info
 debug info
