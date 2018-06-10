@@ -4936,6 +4936,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                         printf("Struct literal can't have both named and unnamed members\n");
                         return false;
                     }
+
+                    if (any_unnamed) {
+                        unimplemented(); // Check if there we specify values for all fields
+                    }
                 } break;
 
                 default: {
@@ -6539,8 +6543,17 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 case primitive_struct: {
                     Local element_pointer = assign_to;
 
-                    u64 current_offset = 0;
+                    if (expr->compound.count != expr->type->structure.member_count) {
+                        element_pointer.as_reference = true;
 
+                        Op op = {0};
+                        op.kind = op_builtin_mem_clear;
+                        op.builtin_mem_clear.pointer = element_pointer;
+                        op.builtin_mem_clear.size = type_size_of(expr->type);
+                        buf_push(context->tmp_ops, op);
+                    }
+
+                    u64 current_offset = 0;
                     for (u32 i = 0; i < expr->compound.count; i += 1) {
                         element_pointer.as_reference = false;
 

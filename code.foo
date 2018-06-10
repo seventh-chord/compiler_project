@@ -331,7 +331,6 @@ fn farwell() {
     let pages = The_Pages_Of_History {
         seeds_that_we_let_grow:   3,
         castles_in_the_distance:  2,
-        path_of_least_resistance: 1234,
     };
 
     turn(pages);
