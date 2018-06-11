@@ -127,6 +127,7 @@ fn main() {
     stride_test();
     farwell(); // to kings
     vector_test();
+    enum_test();
 
     ExitProcess(0);
 }
@@ -364,8 +365,34 @@ fn vector_test() {
 
 struct Vector { x, y, z: u8; }
 
+
+enum Type_Kind {
+    INVALID = 0,
+    VOID,
+    BOOL,
+    UNSOLIDIFIED_INT,
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    POINTER,
+    ARRAY,
+    UNRESOLVED_NAME,
+    STRUCT,
+    ENUM,
+}
+
+fn enum_test() {
+}
+
 /*
-enums
+'enum_length'
+'enum_string'
+enum specify default value size
 slices (also, make strings slices)
 size_of, align_of, type_of
 a 'any' type

@@ -858,50 +858,52 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 };
 
 
-typedef enum Primitive {
-    primitive_invalid = 0,
-    primitive_void,
-    primitive_bool,
+typedef enum Type_Kind {
+    type_invalid = 0,
+    type_void = 1,
+    type_bool = 2,
 
-    primitive_unsolidified_int,
-    primitive_u8 ,
-    primitive_u16,
-    primitive_u32,
-    primitive_u64,
-    primitive_i8 ,
-    primitive_i16,
-    primitive_i32,
-    primitive_i64,
+    type_unsolidified_int = 3,
+    type_u8  = 4,
+    type_u16 = 5,
+    type_u32 = 6,
+    type_u64 = 7,
+    type_i8  = 8,
+    type_i16 = 9,
+    type_i32 = 10,
+    type_i64 = 11,
 
-    primitive_pointer,
-    primitive_array,
-    primitive_unresolved_name,
-    primitive_struct,
+    type_pointer = 12,
+    type_array = 13,
+    type_unresolved_name = 14,
+    type_struct = 15,
+    type_enum = 16,
 
-    PRIMITIVE_COUNT = 16,
-} Primitive;
+    TYPE_KIND_COUNT = 17,
+} Type_Kind;
 
 enum { POINTER_SIZE = 8 };
-Primitive DEFAULT_INTEGER_TYPE = primitive_u64; // TODO make this primitive_i64
+Type_Kind DEFAULT_INTEGER_TYPE = type_u64; // TODO make this type_i64
 
-u8* PRIMITIVE_NAMES[PRIMITIVE_COUNT] = {
-    [primitive_void]             = "void",
-    [primitive_bool]             = "bool",
-    [primitive_u8]               = "u8",
-    [primitive_u16]              = "u16",
-    [primitive_u32]              = "u32",
-    [primitive_u64]              = "u64",
-    [primitive_i8]               = "i8",
-    [primitive_i16]              = "i16",
-    [primitive_i32]              = "i32",
-    [primitive_i64]              = "i64",
+u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
+    [type_void]             = "void",
+    [type_bool]             = "bool",
+    [type_u8]               = "u8",
+    [type_u16]              = "u16",
+    [type_u32]              = "u32",
+    [type_u64]              = "u64",
+    [type_i8]               = "i8",
+    [type_i16]              = "i16",
+    [type_i32]              = "i32",
+    [type_i64]              = "i64",
 
-    [primitive_invalid]          = "<invalid>",
-    [primitive_unsolidified_int] = "<int>",
-    [primitive_pointer]          = "<pointer>",
-    [primitive_array]            = "<array>",
-    [primitive_unresolved_name]  = "<unresolved>",
-    [primitive_struct]           = "<struct>",
+    [type_invalid]          = "<invalid>",
+    [type_unsolidified_int] = "<int>",
+    [type_pointer]          = "<pointer>",
+    [type_array]            = "<array>",
+    [type_unresolved_name]  = "<unresolved>",
+    [type_struct]           = "<struct>",
+    [type_enum]             = "<enum>",
 };
 
 
@@ -912,7 +914,7 @@ typedef struct Type Type;
 typedef struct Type_List Type_List;
 
 struct Type {
-    Primitive kind;
+    Type_Kind kind;
     u32 flags;
 
     union {
@@ -932,6 +934,19 @@ struct Type {
 
             u64 size, align;
         } structure;
+
+        struct {
+            u32 name;
+
+            u32 member_count;
+            struct {
+                u32 name;
+                u32 value;
+                File_Pos declaration_pos;
+            } *members;
+
+            u8 value_size; // should be 1, 2, 4 or 8
+        } enumeration;
         
         struct {
             u64 length;
@@ -1527,7 +1542,7 @@ typedef struct Context {
     // AST & intermediate representation
     Func* funcs; // stretchy-buffer
     u32 global_init_func_index; // 0 if we don't need it
-    Type primitive_types[PRIMITIVE_COUNT];
+    Type primitive_types[TYPE_KIND_COUNT];
     Type *void_pointer_type, *string_type;
     Type* user_types; // stretchy-buffer
 
@@ -1553,7 +1568,7 @@ typedef struct Context {
 Type* get_pointer_type(Context* context, Type* type) {
     if (type->pointer_type == null) {
         type->pointer_type = arena_new(&context->arena, Type);
-        type->pointer_type->kind = primitive_pointer;
+        type->pointer_type->kind = type_pointer;
         type->pointer_type->pointer_to = type;
 
         if (type->flags & TYPE_FLAG_UNRESOLVED) {
@@ -1575,7 +1590,7 @@ Type* get_array_type(Context* context, Type* type, u64 length) {
     new->next = type->array_types;
     type->array_types = new;
 
-    new->type.kind = primitive_array;
+    new->type.kind = type_array;
     new->type.array.length = length;
     new->type.array.of = type;
 
@@ -1589,21 +1604,21 @@ Type* get_array_type(Context* context, Type* type, u64 length) {
 void init_primitive_types(Context* context) {
     #define init_primitive(kind) context->primitive_types[kind] = (Type) { kind, .primitive_name = string_table_intern_cstr(&context->string_table, PRIMITIVE_NAMES[kind]) };
 
-    init_primitive(primitive_invalid);
-    init_primitive(primitive_void);
-    init_primitive(primitive_bool);
-    init_primitive(primitive_unsolidified_int);
-    init_primitive(primitive_u8);
-    init_primitive(primitive_u16);
-    init_primitive(primitive_u32);
-    init_primitive(primitive_u64);
-    init_primitive(primitive_i8);
-    init_primitive(primitive_i16);
-    init_primitive(primitive_i32);
-    init_primitive(primitive_i64);
+    init_primitive(type_invalid);
+    init_primitive(type_void);
+    init_primitive(type_bool);
+    init_primitive(type_unsolidified_int);
+    init_primitive(type_u8);
+    init_primitive(type_u16);
+    init_primitive(type_u32);
+    init_primitive(type_u64);
+    init_primitive(type_i8);
+    init_primitive(type_i16);
+    init_primitive(type_i32);
+    init_primitive(type_i64);
 
-    context->void_pointer_type = get_pointer_type(context, &context->primitive_types[primitive_void]);
-    context->string_type = get_pointer_type(context, &context->primitive_types[primitive_u8]);
+    context->void_pointer_type = get_pointer_type(context, &context->primitive_types[type_void]);
+    context->string_type = get_pointer_type(context, &context->primitive_types[type_u8]);
 }
 
 // Says '*[3]foo' is equal to '*foo'
@@ -1611,29 +1626,29 @@ bool type_can_assign(Context* context, Type* a, Type* b) {
     if (a == b) return true;
 
     while (true) {
-        Primitive a_primitive = a->kind;
-        Primitive b_primitive = b->kind;
+        Type_Kind a_primitive = a->kind;
+        Type_Kind b_primitive = b->kind;
 
         if (a_primitive != b_primitive) {
             return false;
         }
 
         switch (a_primitive) {
-            case primitive_pointer: {
+            case type_pointer: {
                 a = a->pointer_to;
                 b = b->pointer_to;
-                if (a->kind == primitive_array) a = a->array.of;
-                if (b->kind == primitive_array) b = b->array.of;
+                if (a->kind == type_array) a = a->array.of;
+                if (b->kind == type_array) b = b->array.of;
             } break;
 
-            case primitive_array: {
+            case type_array: {
                 if (a->array.length != b->array.length) return false;
                 a = a->array.of;
                 b = b->array.of;
             } break;
 
-            case primitive_unresolved_name: assert(false); return false;
-            case primitive_unsolidified_int: assert(false); return false;
+            case type_unresolved_name: assert(false); return false;
+            case type_unsolidified_int: assert(false); return false;
 
             default: return true;
         }
@@ -1643,23 +1658,24 @@ bool type_can_assign(Context* context, Type* a, Type* b) {
     return false;
 }
 
-u8 primitive_size_of(Primitive primitive) {
+u8 primitive_size_of(Type_Kind primitive) {
     switch (primitive) {
-        case primitive_bool: return 1;
-        case primitive_void: return 0;
-        case primitive_unsolidified_int: assert(false); return 0;
-        case primitive_u8:  return 1;
-        case primitive_u16: return 2;
-        case primitive_u32: return 4;
-        case primitive_u64: return 8;
-        case primitive_i8:  return 1;
-        case primitive_i16: return 2;
-        case primitive_i32: return 4;
-        case primitive_i64: return 8;
-        case primitive_pointer: return POINTER_SIZE;
-        case primitive_invalid: assert(false); return 0;
-        case primitive_array: assert(false); return 0;
-        case primitive_struct: assert(false); return 0;
+        case type_bool: return 1;
+        case type_void: return 0;
+        case type_unsolidified_int: assert(false); return 0;
+        case type_u8:  return 1;
+        case type_u16: return 2;
+        case type_u32: return 4;
+        case type_u64: return 8;
+        case type_i8:  return 1;
+        case type_i16: return 2;
+        case type_i32: return 4;
+        case type_i64: return 8;
+        case type_pointer: return POINTER_SIZE;
+        case type_invalid: assert(false); return 0;
+        case type_array: assert(false); return 0;
+        case type_struct: assert(false); return 0;
+        case type_enum: assert(false); return 0;
         default: assert(false); return 0;
     }
 }
@@ -1668,7 +1684,7 @@ u64 type_size_of(Type* type) {
     u64 array_multiplier = 1;
 
     while (true) {
-        if (type->kind == primitive_array) {
+        if (type->kind == type_array) {
             array_multiplier *= type->array.length;
             type = type->array.of;
 
@@ -1676,10 +1692,10 @@ u64 type_size_of(Type* type) {
             assert(!(type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED));
 
             u64 base_size;
-            if (type->kind == primitive_struct) {
-                base_size = type->structure.size;
-            } else {
-                base_size = primitive_size_of(type->kind);
+            switch (type->kind) {
+                case type_struct: base_size = type->structure.size; break;
+                case type_enum:   base_size = type->enumeration.value_size; break;
+                default:          base_size = primitive_size_of(type->kind); break;
             }
 
             return base_size * array_multiplier;
@@ -1692,12 +1708,12 @@ u64 type_size_of(Type* type) {
 
 u64 type_align_of(Type* type) {
     while (true) {
-        if (type->kind == primitive_array) {
+        if (type->kind == type_array) {
             type = type->array.of;
         } else {
             assert(!(type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED));
 
-            if (type->kind == primitive_struct) {
+            if (type->kind == type_struct) {
                 return type->structure.align;
             } else {
                 return primitive_size_of(type->kind);
@@ -1709,52 +1725,52 @@ u64 type_align_of(Type* type) {
     return 0;
 }
 
-bool primitive_is_compound(Primitive primitive) {
+bool primitive_is_compound(Type_Kind primitive) {
     switch (primitive) {
-        case primitive_array: return true;
-        case primitive_struct: return true;
+        case type_array: return true;
+        case type_struct: return true;
 
-        case primitive_u8:  return false;
-        case primitive_u16: return false;
-        case primitive_u32: return false;
-        case primitive_u64: return false;
-        case primitive_i8:  return false;
-        case primitive_i16: return false;
-        case primitive_i32: return false;
-        case primitive_i64: return false;
-        case primitive_bool: return false;
-        case primitive_void: return false;
-        case primitive_pointer: return false;
-        case primitive_invalid: assert(false); return false;
-        case primitive_unsolidified_int: return false;
-        case primitive_unresolved_name: assert(false); return false;
+        case type_u8:  return false;
+        case type_u16: return false;
+        case type_u32: return false;
+        case type_u64: return false;
+        case type_i8:  return false;
+        case type_i16: return false;
+        case type_i32: return false;
+        case type_i64: return false;
+        case type_bool: return false;
+        case type_void: return false;
+        case type_pointer: return false;
+        case type_invalid: assert(false); return false;
+        case type_unsolidified_int: return false;
+        case type_unresolved_name: assert(false); return false;
 
         default: assert(false); return false;
     }
 }
 
-bool primitive_is_integer(Primitive primitive) {
+bool primitive_is_integer(Type_Kind primitive) {
     switch (primitive) {
-        case primitive_void:
-        case primitive_pointer:
-        case primitive_array:
-        case primitive_struct:
-        case primitive_bool:
-        case primitive_unsolidified_int:
-        case primitive_unresolved_name:
-        case primitive_invalid:
+        case type_void:
+        case type_pointer:
+        case type_array:
+        case type_struct:
+        case type_bool:
+        case type_unsolidified_int:
+        case type_unresolved_name:
+        case type_invalid:
         {
             return false;
         } break;
 
-        case primitive_u8:
-        case primitive_u16:
-        case primitive_u32:
-        case primitive_u64:
-        case primitive_i8:
-        case primitive_i16:
-        case primitive_i32:
-        case primitive_i64:
+        case type_u8:
+        case type_u16:
+        case type_u32:
+        case type_u64:
+        case type_i8:
+        case type_i16:
+        case type_i32:
+        case type_i64:
         {
             return true;
         } break;
@@ -1766,31 +1782,31 @@ bool primitive_is_integer(Primitive primitive) {
     }
 }
 
-bool primitive_is_signed(Primitive primitive) {
+bool primitive_is_signed(Type_Kind primitive) {
     switch (primitive) {
-        case primitive_u8:
-        case primitive_u16:
-        case primitive_u32:
-        case primitive_u64:
-        case primitive_void:
-        case primitive_pointer:
-        case primitive_array:
-        case primitive_struct:
-        case primitive_unsolidified_int:
-        case primitive_bool:
+        case type_u8:
+        case type_u16:
+        case type_u32:
+        case type_u64:
+        case type_void:
+        case type_pointer:
+        case type_array:
+        case type_struct:
+        case type_unsolidified_int:
+        case type_bool:
         {
             return false;
         } break;
 
-        case primitive_i8:
-        case primitive_i16:
-        case primitive_i32:
-        case primitive_i64:
+        case type_i8:
+        case type_i16:
+        case type_i32:
+        case type_i64:
         {
             return true;
         } break;
 
-        case primitive_invalid:
+        case type_invalid:
         default:
         {
             assert(false);
@@ -1882,23 +1898,29 @@ void print_file_pos(File_Pos* pos) {
 void print_type(Context* context, Type* type) {
     while (type != null) {
         switch (type->kind) {
-            case primitive_pointer: {
+            case type_pointer: {
                 printf("*");
                 type = type->pointer_to;
             } break;
 
-            case primitive_array: {
+            case type_array: {
                 printf("[%u]", type->array.length);
                 type = type->array.of;
             } break;
 
-            case primitive_struct: {
+            case type_struct: {
                 u8* name = string_table_access(context->string_table, type->structure.name);
                 printf(name);
                 type = null;
             } break;
 
-            case primitive_unresolved_name: {
+            case type_enum: {
+                u8* name = string_table_access(context->string_table, type->enumeration.name);
+                printf(name);
+                type = null;
+            } break;
+
+            case type_unresolved_name: {
                 u8* name = string_table_access(context->string_table, type->unresolved_name);
                 printf("<unresolved %s>", name);
                 type = null;
@@ -1987,7 +2009,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                     case expr_compound_no_name: break;
 
                     case expr_compound_name: {
-                        assert(expr->type->kind == primitive_struct);
+                        assert(expr->type->kind == type_struct);
 
                         u32 member_index = expr->compound.content[i].member_index;
                         u32 name_index = expr->type->structure.members[member_index].name;
@@ -2066,10 +2088,10 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 printf("<unresolved %s>", name);
             } else {
                 Type* s = expr->member_access.parent->type;
-                if (s->kind == primitive_pointer) {
+                if (s->kind == type_pointer) {
                     s = s->pointer_to;
                 }
-                assert(s->kind == primitive_struct);
+                assert(s->kind == type_struct);
 
                 u32 name_index = s->structure.members[expr->member_access.member_index].name;
                 u8* name = string_table_access(context->string_table, name_index);
@@ -2354,7 +2376,7 @@ bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
 }
 
 Type* parse_primitive_name(Context* context, u32 name_index) {
-    for (u32 i = 0; i < PRIMITIVE_COUNT; i += 1) {
+    for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
         Type* type = &context->primitive_types[i];
         if (type->primitive_name == name_index) {
             return type;
@@ -2368,7 +2390,7 @@ Type* parse_user_type_name(Context* context, u32 name_index) {
     buf_foreach (Type, user_type, context->user_types) {
         u32 user_type_name = 0;
         switch (user_type->kind) {
-            case primitive_struct: {
+            case type_struct: {
                 user_type_name = user_type->structure.name;
             } break;
 
@@ -2409,7 +2431,7 @@ Type* parse_type(Context* context, Token* t, u32* length) {
 
                 if (base_type == null) {
                     base_type = arena_new(&context->arena, Type);
-                    base_type->kind = primitive_unresolved_name;
+                    base_type->kind = type_unresolved_name;
                     base_type->unresolved_name = t->identifier_string_table_index;
                     base_type->flags |= TYPE_FLAG_UNRESOLVED;
                 }
@@ -2488,7 +2510,7 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
     t += 1;
 
     Type* type = arena_new(&context->arena, Type);
-    type->kind = primitive_struct;
+    type->kind = type_struct;
 
     if (t->kind != token_identifier) {
         print_file_pos(&t->pos);
@@ -2585,6 +2607,122 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
     arena_stack_pop(&context->stack);
 
     type->flags |= TYPE_FLAG_SIZE_NOT_COMPUTED;
+
+    *length = t - t_start;
+    return type;
+}
+
+Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
+    Token* t_start = t;
+
+    assert(t->kind == token_keyword_enum);
+    t += 1;
+
+    Type* type = arena_new(&context->arena, Type);
+    type->kind = type_enum;
+
+    if (t->kind != token_identifier) {
+        print_file_pos(&t->pos);
+        printf("Expected enum name, but got ");
+        print_token(context->string_table, t);
+        printf("\n");
+        return null;
+    }
+    type->enumeration.name = t->identifier_string_table_index;
+    t += 1;
+
+    if (!expect_single_token(context, t, token_bracket_curly_open, "after enum name")) return null;
+    t += 1;
+
+
+    typedef struct Member Member;
+    struct Member {
+        u32 name;
+        u64 value;
+        File_Pos pos;
+        Member *next, *previous;
+    };
+
+    Member* first = null;
+    Member* last = null;
+
+    arena_stack_push(&context->stack);
+
+    u64 next_value = 0;
+
+    while (t->kind != token_bracket_curly_close) {
+        if (t->kind != token_identifier) {
+            print_file_pos(&t->pos);
+            printf("Expected a member name, but got ");
+            print_token(context->string_table, t);
+            printf("\n");
+            *length = t - t_start;
+            return null;
+        }
+
+        Member* next = arena_new(&context->stack, Member);
+        next->name = t->identifier_string_table_index;
+        next->pos = t->pos;
+
+        t += 1;
+
+        if (t->kind == token_assign) {
+            t += 1;
+
+            if (t->kind != token_literal) {
+                print_file_pos(&t->pos);
+                printf("Expected literal value, but got ");
+                print_token(context->string_table, t);
+                printf("\n");
+                *length = t - t_start;
+                return null;
+            }
+
+            next->value = t->literal_value;
+            t += 1;
+        } else {
+            next->value = next_value;
+        }
+
+        next_value = next->value + 1;
+
+        if (first == null) {
+            first = next;
+        } else {
+            next->previous = last;
+            last->next = next;
+        }
+        last = next;
+
+        type->enumeration.member_count += 1;
+
+        if (t->kind != token_bracket_curly_close) {
+            if (t->kind == token_comma) {
+                t += 1;
+            } else {
+                print_file_pos(&t->pos);
+                printf("Expected comma ',' or closing curly brace '}' after value in enum, but got ");
+                print_token(context->string_table, t);
+                printf("\n");
+                *length = t - t_start;
+                return null;
+            }
+        }
+    }
+    t += 1;
+
+    type->enumeration.members = (void*) arena_alloc(&context->arena, type->enumeration.member_count * sizeof(*type->enumeration.members));
+
+    Member* m = first;
+    for (u32 i = 0; i < type->structure.member_count; i += 1, m = m->next) {
+        type->enumeration.members[i].name = m->name;
+        type->enumeration.members[i].value = m->value;
+        type->enumeration.members[i].declaration_pos = m->pos;
+    }
+
+    type->enumeration.value_size = primitive_size_of(type_u8);
+
+    arena_stack_pop(&context->stack);
 
     *length = t - t_start;
     return type;
@@ -2870,7 +3008,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         Type* type = parse_user_type_name(context, name_index);
                         if (type == null) {
                             type = arena_new(&context->arena, Type);
-                            type->kind = primitive_unresolved_name;
+                            type->kind = type_unresolved_name;
                             type->unresolved_name = name_index;
                             type->flags |= TYPE_FLAG_UNRESOLVED;
                         }
@@ -3893,7 +4031,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
     // Return type
     func->signature.has_output = false;
-    func->signature.output_type = &context->primitive_types[primitive_void];
+    func->signature.output_type = &context->primitive_types[type_void];
     func->body.output_var_index = U32_MAX;
 
     if (t->kind == token_arrow) {
@@ -3905,7 +4043,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
         if (output_type == null) {
             return null;
-        } else if (output_type->kind != primitive_void) {
+        } else if (output_type->kind != type_void) {
             func->signature.has_output = true;
             func->signature.output_type = output_type;
             func->body.output_var_index = buf_length(context->tmp_vars);
@@ -4661,13 +4799,25 @@ bool build_ast(Context* context, u8* path) {
             Type* type = parse_struct_declaration(context, t, &length);
             t += length;
 
-            // NB in order to avoid to many nested pointers, we just copy the full type into our buffer.
-            // This essentially orphans/leaks the type allocated by 'parse_struct_declaration'.
-            buf_push(context->user_types, *type);
+            if (type == null) {
+                valid = false;
+            } else {
+                // NB in order to avoid to many nested pointers, we just copy the full type into our buffer.
+                // This essentially orphans/leaks the type allocated by 'parse_struct_declaration'.
+                buf_push(context->user_types, *type);
+            }
         } break;
 
         case token_keyword_enum: {
-            unimplemented(); // TODO
+            u32 length = 0;
+            Type* type = parse_enum_declaration(context, t, &length);
+            t += length;
+
+            if (type == null) {
+                valid = false;
+            } else {
+                buf_push(context->user_types, *type);
+            }
         } break;
 
         case token_keyword_union: {
@@ -4736,13 +4886,13 @@ void typecheck_scope_pop(Typecheck_Info* info) {
 bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
-            Primitive solidify_to_primitive = solidify_to->kind;
+            Type_Kind solidify_to_primitive = solidify_to->kind;
 
             switch (expr->literal.kind) {
                 case expr_literal_integer: {
-                    if (solidify_to_primitive == primitive_pointer) {
+                    if (solidify_to_primitive == type_pointer) {
                         // This case handles pointer-integer addition/subtraction
-                        solidify_to_primitive = primitive_u64;
+                        solidify_to_primitive = type_u64;
                         solidify_to = &info->context->primitive_types[solidify_to_primitive];
                     }
 
@@ -4762,12 +4912,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
                         expr->literal.value &= mask;
                     } else {
-                        expr->type = &info->context->primitive_types[primitive_unsolidified_int];
+                        expr->type = &info->context->primitive_types[type_unsolidified_int];
                     }
                 } break;
 
                 case expr_literal_pointer: {
-                    if (solidify_to_primitive == primitive_pointer) {
+                    if (solidify_to_primitive == type_pointer) {
                         expr->type = solidify_to;
                     } else {
                         expr->type = info->context->void_pointer_type;
@@ -4776,7 +4926,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
                 case expr_literal_bool: {
                     assert(expr->literal.value == true || expr->literal.value == false);
-                    expr->type = &info->context->primitive_types[primitive_bool];
+                    expr->type = &info->context->primitive_types[type_bool];
                 } break;
 
                 default: assert(false);
@@ -4801,9 +4951,9 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 }
             }
 
-            Primitive primitive = expr->type->kind;
+            Type_Kind primitive = expr->type->kind;
             switch (primitive) {
-                case primitive_array: {
+                case type_array: {
                     u64 expected_child_count = expr->type->array.length;
                     Type* expected_child_type = expr->type->array.of;
 
@@ -4823,7 +4973,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                             u32 name_index;
                             switch (expr->compound.content[i].name_mode) {
                                 case expr_compound_name: {
-                                    assert(expr->type->kind == primitive_struct);
+                                    assert(expr->type->kind == type_struct);
                                     u32 member_index = expr->compound.content[i].member_index;
                                     name_index = expr->type->structure.members[member_index].name;
                                 } break;
@@ -4859,7 +5009,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     }
                 } break;
 
-                case primitive_struct: {
+                case type_struct: {
                     if (expr->compound.count > expr->type->structure.member_count) {
                         u64 expected = expr->type->structure.member_count;
                         u64 given = expr->compound.count;
@@ -5047,8 +5197,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             if (!typecheck_expr(info, expr->binary.left, solidify_to))  return false;
             if (!typecheck_expr(info, expr->binary.right, solidify_to)) return false;
 
-            assert(expr->binary.left->type->kind  != primitive_unsolidified_int);
-            assert(expr->binary.right->type->kind != primitive_unsolidified_int);
+            assert(expr->binary.left->type->kind  != type_unsolidified_int);
+            assert(expr->binary.right->type->kind != type_unsolidified_int);
 
             // We take one shot at matching the types to each other by changing what we try solidifying to
             if (expr->binary.left->type != expr->binary.right->type) {
@@ -5064,11 +5214,11 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
             expr->type = null;
 
-            Primitive left_primitive = expr->binary.left->type->kind;
-            Primitive right_primitive = expr->binary.right->type->kind;
+            Type_Kind left_primitive = expr->binary.left->type->kind;
+            Type_Kind right_primitive = expr->binary.right->type->kind;
 
             if (is_comparasion) {
-                expr->type = &info->context->primitive_types[primitive_bool];
+                expr->type = &info->context->primitive_types[type_bool];
 
                 bool valid;
                 if (expr->binary.op == binary_eq) {
@@ -5093,17 +5243,17 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 // Handle special cases for pointer arithmetic
                 } else switch (expr->binary.op) {
                     case binary_add: {
-                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                        if (left_primitive == type_pointer && right_primitive == type_u64) {
                             expr->type = expr->binary.left->type;
                         }
 
-                        if (left_primitive == primitive_u64 && right_primitive == primitive_pointer) {
+                        if (left_primitive == type_u64 && right_primitive == type_pointer) {
                             expr->type = expr->binary.right->type;
                         }
                     } break;
 
                     case binary_sub: {
-                        if (left_primitive == primitive_pointer && right_primitive == primitive_u64) {
+                        if (left_primitive == type_pointer && right_primitive == type_u64) {
                             expr->type = expr->binary.left->type;
                         }
                     } break;
@@ -5161,7 +5311,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
                 Type* expected_type = callee->signature.params[p].type;
                 if (callee->signature.params[p].reference_semantics) {
-                    assert(expected_type->kind == primitive_pointer);
+                    assert(expected_type->kind == type_pointer);
                     expected_type = expected_type->pointer_to;
                 }
 
@@ -5185,21 +5335,21 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         } break;
 
         case expr_cast: {
-            Primitive primitive = expr->type->kind;
+            Type_Kind primitive = expr->type->kind;
 
             u32 invalid = 0;
 
-            if (primitive == primitive_pointer) {
+            if (primitive == type_pointer) {
                 if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
 
-                Primitive from_primitive = expr->cast_from->type->kind;
-                if (from_primitive != primitive_pointer) {
+                Type_Kind from_primitive = expr->cast_from->type->kind;
+                if (from_primitive != type_pointer) {
                     invalid = 2;
                 }
             } else if (primitive_is_integer(primitive)) {
                 if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
 
-                Primitive from_primitive = expr->cast_from->type->kind;
+                Type_Kind from_primitive = expr->cast_from->type->kind;
                 if (!primitive_is_integer(from_primitive)) {
                     invalid = 2;
                 }
@@ -5227,7 +5377,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         } break;
 
         case expr_unary: {
-            Type* inner_solidify_to = &info->context->primitive_types[primitive_invalid];
+            Type* inner_solidify_to = &info->context->primitive_types[type_invalid];
 
             switch (expr->unary.op) {
                 case unary_not: case unary_neg: {
@@ -5239,7 +5389,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 } break;
 
                 case unary_address_of: {
-                    if (inner_solidify_to->kind == primitive_pointer) {
+                    if (inner_solidify_to->kind == type_pointer) {
                         inner_solidify_to = inner_solidify_to->pointer_to;
                     }
                 } break;
@@ -5254,8 +5404,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             switch (expr->unary.op) {
                 case unary_not: {
                     // TODO allow using unary_not to do a bitwise not on integers
-                    Primitive child_primitive = expr->unary.inner->type->kind;
-                    if (child_primitive != primitive_bool) {
+                    Type_Kind child_primitive = expr->unary.inner->type->kind;
+                    if (child_primitive != type_bool) {
                         print_file_pos(&expr->unary.inner->pos);
                         printf("Can only 'not' a 'bool', not a ");
                         print_type(info->context, expr->unary.inner->type);
@@ -5267,7 +5417,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 } break;
 
                 case unary_neg: {
-                    Primitive child_primitive = expr->unary.inner->type->kind;
+                    Type_Kind child_primitive = expr->unary.inner->type->kind;
                     if (!primitive_is_integer(child_primitive)) {
                         print_file_pos(&expr->unary.inner->pos);
                         printf("Can only negatve integers, not a ");
@@ -5280,8 +5430,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 } break;
 
                 case unary_dereference: {
-                    Primitive child_primitive = expr->unary.inner->type->kind;
-                    if (child_primitive != primitive_pointer) {
+                    Type_Kind child_primitive = expr->unary.inner->type->kind;
+                    if (child_primitive != type_pointer) {
                         print_file_pos(&expr->pos);
                         printf("Can't dereference non-pointer ");
                         print_expr(info->context, info->func, expr->unary.inner);
@@ -5289,8 +5439,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                         return false;
                     }
 
-                    Primitive pointer_to = expr->unary.inner->type->pointer_to->kind;
-                    if (pointer_to == primitive_void) {
+                    Type_Kind pointer_to = expr->unary.inner->type->pointer_to->kind;
+                    if (pointer_to == type_void) {
                         print_file_pos(&expr->pos);
                         printf("Can't dereference the void pointer ");
                         print_expr(info->context, info->func, expr->unary.inner);
@@ -5319,20 +5469,20 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         } break;
 
         case expr_subscript: {
-            if (!typecheck_expr(info, expr->subscript.array, &info->context->primitive_types[primitive_invalid])) {
+            if (!typecheck_expr(info, expr->subscript.array, &info->context->primitive_types[type_invalid])) {
                 return false;
             }
 
-            if (!typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[primitive_u64])) {
+            if (!typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[type_u64])) {
                 return false;
             }
 
             bool bad = false;
 
             Type* array_type = expr->subscript.array->type;
-            if (array_type->kind == primitive_array) {
+            if (array_type->kind == type_array) {
                 expr->type = array_type->array.of;
-            } else if (array_type->kind == primitive_pointer && array_type->pointer_to->kind == primitive_array) {
+            } else if (array_type->kind == type_pointer && array_type->pointer_to->kind == type_array) {
                 expr->type = array_type->pointer_to->array.of;
             } else {
                 print_file_pos(&expr->pos);
@@ -5347,7 +5497,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             }
 
             Type* index_type = expr->subscript.index->type;
-            if (index_type->kind != primitive_u64) {
+            if (index_type->kind != type_u64) {
                 // TODO should we allow other integer types and insert automatic promotions as neccesary here??
                 print_file_pos(&expr->subscript.index->pos);
                 printf("Can only use u64 as an array index, not ");
@@ -5362,7 +5512,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         case expr_member_access: {
             Expr* parent = expr->member_access.parent;
 
-            if (!typecheck_expr(info, parent, &info->context->primitive_types[primitive_invalid])) {
+            if (!typecheck_expr(info, parent, &info->context->primitive_types[type_invalid])) {
                 return false;
             }
 
@@ -5370,12 +5520,12 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 u32 access_name = expr->member_access.member_name;
 
                 Type* s = parent->type;
-                if (s->kind == primitive_pointer && s->pointer_to->kind == primitive_struct) {
+                if (s->kind == type_pointer && s->pointer_to->kind == type_struct) {
                     s = s->pointer_to;
                 }
 
                 bool has_member = false;
-                if (s->kind == primitive_struct) {
+                if (s->kind == type_struct) {
                     for (u32 m = 0; m < s->structure.member_count; m += 1) {
                         u32 member_name = s->structure.members[m].name;
                         if (member_name == access_name) {
@@ -5414,7 +5564,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
     }
 
     // Autocast from '*void' to any other pointer kind
-    if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && solidify_to->kind == primitive_pointer) {
+    if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && solidify_to->kind == type_pointer) {
         expr->type = solidify_to;
     }
 
@@ -5424,7 +5574,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
     switch (stmt->kind) {
         case stmt_assignment: {
-            if (!typecheck_expr(info, stmt->assignment.left, &info->context->primitive_types[primitive_invalid])) {
+            if (!typecheck_expr(info, stmt->assignment.left, &info->context->primitive_types[type_invalid])) {
                 return false;
             }
             Type* left_type = stmt->assignment.left->type;
@@ -5454,7 +5604,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case stmt_expr: {
-            if (!typecheck_expr(info, stmt->expr, &info->context->primitive_types[primitive_invalid])) {
+            if (!typecheck_expr(info, stmt->expr, &info->context->primitive_types[type_invalid])) {
                 return false;
             }
         } break;
@@ -5508,7 +5658,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             if (bad_types) {
                 if (var->type == null) {
                     // This only is here to prevent the compiler from crashing when typechecking further statements
-                    var->type = &info->context->primitive_types[primitive_invalid];
+                    var->type = &info->context->primitive_types[type_invalid];
                 }
                 return false;
             }
@@ -5523,10 +5673,10 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case stmt_if: {
-            if (!typecheck_expr(info, stmt->conditional.condition, &info->context->primitive_types[primitive_bool])) return false;
+            if (!typecheck_expr(info, stmt->conditional.condition, &info->context->primitive_types[type_bool])) return false;
 
-            Primitive condition_primitive = stmt->conditional.condition->type->kind;
-            if (condition_primitive != primitive_bool) {
+            Type_Kind condition_primitive = stmt->conditional.condition->type->kind;
+            if (condition_primitive != type_bool) {
                 print_file_pos(&stmt->conditional.condition->pos);
                 printf("Expected bool but got ");
                 print_type(info->context, stmt->conditional.condition->type);
@@ -5551,10 +5701,10 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case stmt_loop: {
             if (stmt->loop.condition != null) {
-                if (!typecheck_expr(info, stmt->loop.condition, &info->context->primitive_types[primitive_bool])) return false;
+                if (!typecheck_expr(info, stmt->loop.condition, &info->context->primitive_types[type_bool])) return false;
 
-                Primitive condition_primitive = stmt->loop.condition->type->kind;
-                if (condition_primitive != primitive_bool) {
+                Type_Kind condition_primitive = stmt->loop.condition->type->kind;
+                if (condition_primitive != type_bool) {
                     print_file_pos(&stmt->loop.condition->pos);
                     printf("Expected bool but got ");
                     print_type(info->context, stmt->loop.condition->type);
@@ -5668,8 +5818,8 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_cast: {
-            Primitive primitive = expr->type->kind;
-            Primitive inner_primitive = expr->cast_from->type->kind;
+            Type_Kind primitive = expr->type->kind;
+            Type_Kind inner_primitive = expr->cast_from->type->kind;
 
             u64 inner_type_size = type_size_of(expr->cast_from->type);
             assert(type_size <= 8 && inner_type_size <= 8);
@@ -5729,8 +5879,8 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             if (result != eval_ok) return result;
 
             Type* array_type = expr->subscript.array->type;
-            Primitive array_literal_primitive = array_type->kind;
-            assert(array_literal_primitive == primitive_array);
+            Type_Kind array_literal_primitive = array_type->kind;
+            assert(array_literal_primitive == type_array);
 
             Type* child_type = array_type->array.of;
             u64 child_size = type_size_of(child_type);
@@ -5742,8 +5892,8 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_unary: {
-            Primitive primitive = expr->type->kind;
-            Primitive inner_primitive = expr->unary.inner->type->kind;
+            Type_Kind primitive = expr->type->kind;
+            Type_Kind inner_primitive = expr->unary.inner->type->kind;
 
             u64 inner_type_size = type_size_of(expr->unary.inner->type);
 
@@ -5853,10 +6003,10 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_compound: {
-            Primitive primitive = expr->type->kind;
+            Type_Kind primitive = expr->type->kind;
 
             switch (primitive) {
-                case primitive_array: {
+                case type_array: {
                     Type* child_type = expr->type->array.of;
                     u64 child_size = type_size_of(child_type);
 
@@ -5870,7 +6020,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     }
                 } break;
 
-                case primitive_struct: {
+                case type_struct: {
                     unimplemented(); // TODO compile time struct literals
                 } break;
 
@@ -5998,7 +6148,7 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
         bool done = false;
 
         switch (type->kind) {
-            case primitive_pointer: {
+            case type_pointer: {
                 Prefix* new = arena_new(&context->stack, Prefix);
                 new->kind = prefix_pointer;
                 new->link = prefix;
@@ -6007,7 +6157,7 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
                 type = type->pointer_to;
             } break;
 
-            case primitive_array: {
+            case type_array: {
                 Prefix* new = arena_new(&context->stack, Prefix);
                 new->kind = prefix_array;
                 new->array_length = type->array.length;
@@ -6017,7 +6167,7 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
                 type = type->array.of;
             } break;
 
-            case primitive_unresolved_name: {
+            case type_unresolved_name: {
                 Type* new = parse_user_type_name(context, type->unresolved_name);
 
                 if (new == null) {
@@ -6061,7 +6211,7 @@ bool typecheck(Context* context) {
     // User types (structs, enums, unions)
     buf_foreach (Type, type, context->user_types) {
         switch (type->kind) {
-            case primitive_struct: {
+            case type_struct: {
                 if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
                     u64 max_align = 0;
                     u64 size = 0;
@@ -6082,7 +6232,7 @@ bool typecheck(Context* context) {
 
                         u64 array_multiplier = 1;
                         while (true) {
-                            if (member_type->kind == primitive_array) {
+                            if (member_type->kind == type_array) {
                                 array_multiplier *= member_type->array.length;
                                 member_type = member_type->array.of;
 
@@ -6097,7 +6247,7 @@ bool typecheck(Context* context) {
                                 }
 
                                 u64 base_size;
-                                if (member_type->kind == primitive_struct) {
+                                if (member_type->kind == type_struct) {
                                     member_size = member_type->structure.size;
                                     member_align = member_type->structure.align;
                                 } else {
@@ -6138,6 +6288,65 @@ bool typecheck(Context* context) {
                     printf("    %s: offset = %u\n", member_name, offset);
                 }
                 #endif
+            } break;
+
+            case type_enum: {
+                u64 mask = size_mask(type->enumeration.value_size);
+                u32 count = type->enumeration.member_count;
+                for (u32 i = 0; i < count; i += 1) {
+                    u64 value_i = type->enumeration.members[i].value;
+                    u32 name_index_i = type->enumeration.members[i].name;
+
+                    if ((value_i & mask) != value_i) {
+                        u8* member_name = string_table_access(context->string_table, name_index_i);
+                        u64 max_value = mask;
+
+                        print_file_pos(&type->enumeration.members[i].declaration_pos);
+                        printf(
+                            "Member '%s' has the value %u, which is larger than the max value for the enum, %u\n",
+                            member_name, value_i, max_value
+                        );
+                        valid = false;
+                        break;
+                    }
+
+                    bool done = false;
+
+                    for (u32 j = i + 1; j < count; j += 1) {
+                        u64 value_j = type->enumeration.members[j].value;
+                        u32 name_index_j = type->enumeration.members[j].name;
+
+                        if (value_i == value_j) {
+                            u8* name_i = string_table_access(context->string_table, name_index_i);
+                            u8* name_j = string_table_access(context->string_table, name_index_j);
+
+                            print_file_pos(&type->enumeration.members[i].declaration_pos);
+                            printf("and ");
+                            print_file_pos(&type->enumeration.members[j].declaration_pos);
+                            printf("Members '%s' and '%s' both equal %u\n", name_i, name_j, value_i);
+
+                            valid = false;
+                            done = true;
+                            break;
+                        }
+                        
+                        if (name_index_i == name_index_j) {
+                            u8* member_name = string_table_access(context->string_table, name_index_i);
+                            u8* enum_name = string_table_access(context->string_table, type->enumeration.name);
+
+                            print_file_pos(&type->enumeration.members[i].declaration_pos);
+                            printf("and ");
+                            print_file_pos(&type->enumeration.members[j].declaration_pos);
+                            printf("Enum '%s' has multiple members with the name '%s'\n", enum_name, member_name);
+
+                            valid = false;
+                            done = true;
+                            break;
+                        }
+                    }
+
+                    if (done) break;
+                }
             } break;
 
             default: assert(false);
@@ -6357,7 +6566,7 @@ void intermediate_deallocate_temporary(Context* context, Local local) {
 }
 
 void intermediate_write_compound_set(Context* context, Local source, Local target, Type* type) {
-    Primitive primitive = type->kind;
+    Type_Kind primitive = type->kind;
 
     if (primitive_is_compound(primitive)) {
         Local source_pointer, target_pointer;
@@ -6420,7 +6629,7 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
 
 void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
     Var* var = &func->body.vars[var_index];
-    Primitive primitive = var->type->kind;
+    Type_Kind primitive = var->type->kind;
 
     if (primitive_is_compound(primitive)) {
         Local pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
@@ -6455,7 +6664,7 @@ void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
 
 
 void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_address) {
-    Primitive target_primitive = expr->type->kind;
+    Type_Kind target_primitive = expr->type->kind;
     assert(assign_to.kind != local_literal);
 
     switch (expr->kind) {
@@ -6513,7 +6722,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             assert(primitive_is_compound(target_primitive));
 
             switch (target_primitive) {
-                case primitive_array: {
+                case type_array: {
                     u64 array_length = expr->type->array.length;
                     assert(array_length == expr->compound.count);
 
@@ -6528,7 +6737,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                         if (i > 0) {
                             buf_push(context->tmp_ops, ((Op) {
                                 .kind = op_add,
-                                .primitive = primitive_pointer,
+                                .primitive = type_pointer,
                                 .binary = { (Local) { local_literal, false, stride }, element_pointer }
                             }));
                         }
@@ -6545,12 +6754,12 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     element_pointer.as_reference = false;
                     buf_push(context->tmp_ops, ((Op) {
                         .kind = op_sub,
-                        .primitive = primitive_pointer,
+                        .primitive = type_pointer,
                         .binary = { (Local) { local_literal, false, negative_offset }, element_pointer },
                     }));
                 } break;
 
-                case primitive_struct: {
+                case type_struct: {
                     Local element_pointer = assign_to;
 
                     if (expr->compound.count != expr->type->structure.member_count) {
@@ -6576,7 +6785,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                             u64 stride = target_offset - current_offset;
                             buf_push(context->tmp_ops, ((Op) {
                                 .kind = op_add,
-                                .primitive = primitive_pointer,
+                                .primitive = type_pointer,
                                 .binary = { (Local) { local_literal, false, stride }, element_pointer }
                             }));
                         } else {
@@ -6584,7 +6793,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                             u64 stride = current_offset - target_offset;
                             buf_push(context->tmp_ops, ((Op) {
                                 .kind = op_sub,
-                                .primitive = primitive_pointer,
+                                .primitive = type_pointer,
                                 .binary = { (Local) { local_literal, false, stride }, element_pointer }
                             }));
                         }
@@ -6602,7 +6811,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                         u64 stride = current_offset;
                         buf_push(context->tmp_ops, ((Op) {
                             .kind = op_sub,
-                            .primitive = primitive_pointer,
+                            .primitive = type_pointer,
                             .binary = { (Local) { local_literal, false, stride }, element_pointer }
                         }));
                     }
@@ -6631,11 +6840,11 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
 
             if (expr->binary.op == binary_add || expr->binary.op == binary_sub) {
-                Primitive left_primitive = expr->binary.left->type->kind;
-                Primitive right_primitive = expr->binary.right->type->kind;
+                Type_Kind left_primitive = expr->binary.left->type->kind;
+                Type_Kind right_primitive = expr->binary.right->type->kind;
 
-                if (left_primitive == primitive_pointer) {
-                    assert(right_primitive != primitive_pointer);
+                if (left_primitive == type_pointer) {
+                    assert(right_primitive != type_pointer);
 
                     if (right_local.kind == local_literal) {
                         u64 right_size = primitive_size_of(right_primitive);
@@ -6661,8 +6870,8 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     buf_push(context->tmp_ops, op);
                 }
 
-                if (right_primitive == primitive_pointer) {
-                    assert(left_primitive != primitive_pointer);
+                if (right_primitive == type_pointer) {
+                    assert(left_primitive != type_pointer);
 
                     u64 stride = type_size_of(expr->binary.right->type->pointer_to);
 
@@ -6715,8 +6924,8 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 {
                     // NB for comparative operations, 'op.primitive' should be the type we are comparing, not the
                     // type we are producing (which always is bool)
-                    Primitive left_primitive  = expr->binary.left->type->kind;
-                    Primitive right_primitive = expr->binary.right->type->kind;
+                    Type_Kind left_primitive  = expr->binary.left->type->kind;
+                    Type_Kind right_primitive = expr->binary.right->type->kind;
                     assert(left_primitive == right_primitive);
                     op.primitive = left_primitive;
                 } break;
@@ -6893,12 +7102,12 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             Type* child_type;
             bool is_pointer;
 
-            if (subscript_type->kind == primitive_pointer) {
-                assert(subscript_type->pointer_to->kind == primitive_array);
+            if (subscript_type->kind == type_pointer) {
+                assert(subscript_type->pointer_to->kind == type_array);
                 child_type = subscript_type->pointer_to->array.of;
                 is_pointer = true;
             } else {
-                assert(subscript_type->kind == primitive_array);
+                assert(subscript_type->kind == type_array);
                 child_type = subscript_type->array.of;
                 is_pointer = false;
             }
@@ -6913,14 +7122,14 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
             linearize_expr(context, expr->subscript.array, base_pointer, !is_pointer);
 
-            u64 index_size = primitive_size_of(primitive_u64);
+            u64 index_size = primitive_size_of(type_u64);
             Local offset = intermediate_allocate_temporary(context, index_size);
             linearize_expr(context, expr->subscript.index, offset, false);
 
             if (stride > 1) {
                 Op op = {0};
                 op.kind = op_mul;
-                op.primitive = primitive_pointer;
+                op.primitive = type_pointer;
                 op.binary.source = (Local) { local_literal, false, stride };
                 op.binary.target = offset;
                 buf_push(context->tmp_ops, op);
@@ -6928,7 +7137,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             Op op = {0};
             op.kind = op_add;
-            op.primitive = primitive_pointer;
+            op.primitive = type_pointer;
             op.binary.source = offset;
             op.binary.target = base_pointer;
             buf_push(context->tmp_ops, op);
@@ -6952,8 +7161,8 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             Type* struct_type = parent_type;
             bool is_pointer = false;
-            if (struct_type->kind == primitive_pointer) {
-                assert(struct_type->pointer_to->kind == primitive_struct);
+            if (struct_type->kind == type_pointer) {
+                assert(struct_type->pointer_to->kind == type_struct);
                 struct_type = struct_type->pointer_to;
                 is_pointer = true;
             }
@@ -6971,7 +7180,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             Op op = {0};
             op.kind = op_add;
-            op.primitive = primitive_pointer;
+            op.primitive = type_pointer;
             op.binary.source = (Local) { local_literal, false, offset };
             op.binary.target = base_pointer;
             buf_push(context->tmp_ops, op);
@@ -7116,7 +7325,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
         case expr_variable: {
             assert(!(left->flags & EXPR_FLAG_UNRESOLVED));
 
-            Primitive left_primitive = left->type->kind;
+            Type_Kind left_primitive = left->type->kind;
             u64 operand_size = type_size_of(left->type);
 
             bool needs_temporary = linearize_assignment_needs_temporary(right, left->variable.index);
@@ -7133,8 +7342,8 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
             }
 
             switch (left_primitive) {
-                case primitive_struct:
-                case primitive_array:
+                case type_struct:
+                case type_array:
                 {
                     if (needs_temporary) {
                         Local tmp_local = intermediate_allocate_temporary(context, operand_size);
@@ -7149,7 +7358,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
                             Local tmp_pointer  = intermediate_allocate_temporary(context, POINTER_SIZE);
                             buf_push(context->tmp_ops, ((Op) {
                                 .kind = op_set,
-                                .primitive = primitive_pointer,
+                                .primitive = type_pointer,
                                 .binary = { pointer_to_tmp_local, tmp_pointer },
                             }));
                             tmp_pointer.as_reference = true;
@@ -8320,7 +8529,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
                 case op_not: {
                     // NB this only works if we assume the bools value was either 1 or 0
-                    assert(op->primitive == primitive_bool);
+                    assert(op->primitive == type_bool);
                     instruction_xor_reg_imm(&context->seg_text, reg_rax, 1, primitive_size);
                 } break;
 
@@ -8535,7 +8744,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             printf("call %s\n", name);
             #endif
 
-            if (op->primitive != primitive_void) {
+            if (op->primitive != type_void) {
                 if (op->call.target.as_reference) {
                     instruction_mov_mem(context, func, mov_from, op->call.target, reg_rcx, POINTER_SIZE);
                     instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size_of(op->primitive));
@@ -8651,7 +8860,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             assert(pointer.as_reference);
             instruction_mov_mem(context, func, mov_from, pointer, reg_rax, POINTER_SIZE);
-            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(primitive_u64));
+            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(type_u64));
             instruction_call(context, true, builtin_mem_clear);
         } break;
 
@@ -8665,7 +8874,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             instruction_mov_mem(context, func, mov_from, src, reg_rax, POINTER_SIZE);
             instruction_mov_mem(context, func, mov_from, dst, reg_rdx, POINTER_SIZE);
-            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(primitive_u64));
+            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(type_u64));
             // NB NB This call clobbers reg_rbx
             instruction_call(context, true, builtin_mem_copy);
         } break;
@@ -8905,10 +9114,10 @@ void build_machinecode(Context* context) {
         if (func->signature.has_output) {
             u32 var_index = func->body.output_var_index;
             Local output_local = { local_variable, false, var_index };
-            Primitive output_primitive = func->signature.output_type->kind;
+            Type_Kind output_primitive = func->signature.output_type->kind;
 
             if (primitive_is_compound(output_primitive)) {
-                if (output_primitive == primitive_array) {
+                if (output_primitive == type_array) {
                     unimplemented(); // TODO by-reference semantics
                 } else {
                     assert(false);
