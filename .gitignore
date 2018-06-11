@@ -3,3 +3,4 @@
 build
 out.exe
 reference/*.pdf
+debug_test/*

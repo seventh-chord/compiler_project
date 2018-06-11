@@ -9557,6 +9557,36 @@ bool write_executable(u8* path, Context* context) {
     image.data_directories[3].virtual_address = pdata_memory_start;
     image.data_directories[3].size = pdata_length;
 
+    #if 0
+    if (write_debug_info) {
+        /*
+        In test project
+        debug_size = 38
+        debug_offset = 984B0
+        
+        There, we find the following raw data
+        characteristics     00 00 00 00
+        timestamp           7E 56 1E 5B         (which is a valid unix timestamp, for about now, in little endian)
+        major version       00 00
+        minor version       00 00
+        type                02 00 00 00         (visual c++ debug information)
+        size of data        34 00 00 00         (not included in the debug directory itself) - What does this mean???
+        rva of debug data   EC 8F 09 00
+        file pointer data   EC CF 06 00
+        more data           00 00 00 00 7E 56 1E 5B 00 00 (looks like the start of another debug directory, not sure if we should look at it)
+
+        This points to the following raw data, which appears to contain a reference to the .pdb file
+        "RSDS"                              52 53 44 53
+        Some UUID                           99 B3 A7 A8 D4 BB C4 41 97 67 92 E3 93 6C 08 A7
+        ????                                01 00 00 00
+        "W:\asm2\debug_test\main.pdb\0"     57 3A 5C 61 73 6D 32 5C 64 65 62 75 67 5F 74 65 73 74 5C 6D 61 69 6E 2E 70 64 62 00
+        */
+
+        image.data_directories[6].virtual_address = rdata_memory_start + rdata_debug_offset;
+        image.data_directories[6].size = debug_size;
+    }
+    #endif
+
     // Write headers
     u64 header_offset = dos_prepend_size;
 
