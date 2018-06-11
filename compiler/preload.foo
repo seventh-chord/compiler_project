@@ -1,0 +1,26 @@
+
+#define QUOTE(...) #__VA_ARGS__
+
+u8 *preload_code_text = QUOTE(
+
+enum Type_Kind {
+    INVALID = 0,
+    VOID = 1,
+    BOOL = 2,
+    UNSOLIDIFIED_INT = 3,
+    U8  = 4,
+    U16 = 5,
+    U32 = 6,
+    U64 = 7,
+    I8  = 8,
+    I16 = 9,
+    I32 = 10,
+    I64 = 11,
+    POINTER = 12,
+    ARRAY = 13,
+    UNRESOLVED_NAME = 14,
+    STRUCT = 15,
+    ENUM = 16,
+}
+
+);

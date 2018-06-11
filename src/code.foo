@@ -377,26 +377,6 @@ fn vector_test() {
 struct Vector { x, y, z: u8; }
 
 
-enum Type_Kind {
-    INVALID = 0,
-    VOID,
-    BOOL,
-    UNSOLIDIFIED_INT,
-    U8,
-    U16,
-    U32,
-    U64,
-    I8,
-    I16,
-    I32,
-    I64,
-    POINTER,
-    ARRAY,
-    UNRESOLVED_NAME,
-    STRUCT,
-    ENUM,
-}
-
 let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
 
 fn enum_test() {
@@ -413,7 +393,7 @@ fn enum_test() {
 
     /*
     print("This enum has ");
-    print_u64(enum_length(Type_Kind), 10);
+    print_u64(u64(type_info_of(Type_Kind)), 10);
     print(" members!\n");
     */
 }

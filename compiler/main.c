@@ -49,6 +49,8 @@ void printf_flush();
 #define panic(x, ...)    (printf("(%s:%u) Panic: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
 #define unimplemented()  (printf("(%s:%u) Reached unimplemented code\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
 
+#include "preload.foo"
+
 void main();
 void program_entry() {
     stdout = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -717,6 +719,8 @@ typedef struct File_Pos {
     u32 line;
 } File_Pos;
 
+enum { KEYWORD_COUNT = 15 };
+
 typedef struct Token {
     enum {
         token_end_of_stream = 0,
@@ -864,14 +868,14 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 typedef enum Builtin_Func {
     builtin_invalid = 0,
 
-    builtin_enum_length,
-    builtin_stringify,
+    builtin_type_info,
     builtin_cast,
 
     BUILTIN_COUNT,
 } Builtin_Func;
 
 
+// NB NB NB This MUST always be synchronized with the values in preload.foo
 typedef enum Type_Kind {
     type_invalid = 0,
     type_void = 1,
@@ -1104,6 +1108,7 @@ typedef enum Expr_Kind {
     expr_subscript,
     expr_member_access, // a.b
     expr_static_member_access, // a::b
+    expr_type_info,
 } Expr_Kind;
 
 struct Expr { // 'typedef'd earlier!
@@ -1156,6 +1161,7 @@ struct Expr { // 'typedef'd earlier!
         } call;
 
         Expr* cast_from;
+        Type* type_info_of;
 
         struct {
             Expr* array;
@@ -1558,14 +1564,15 @@ typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
 
     u8* string_table; // stretchy-buffer string table
+    u32 keyword_token_table[KEYWORD_COUNT][2];
     u32 builtin_names[BUILTIN_COUNT];
 
     // AST & intermediate representation
     Func* funcs; // stretchy-buffer
     u32 global_init_func_index; // 0 if we don't need it
     Type primitive_types[TYPE_KIND_COUNT];
-    Type *void_pointer_type, *string_type;
-    Type* user_types; // stretchy-buffer
+    Type *void_pointer_type, *string_type, *type_info_type;
+    Type **user_types; // stretchy-buffer
 
     // These are only for temporary use, we copy to arena buffers & clear
     Global_Var* global_vars;
@@ -1638,13 +1645,42 @@ void init_primitive_types(Context* context) {
     init_primitive(type_i32);
     init_primitive(type_i64);
 
+    #undef init_primitives
+
     context->void_pointer_type = get_pointer_type(context, &context->primitive_types[type_void]);
     context->string_type = get_pointer_type(context, &context->primitive_types[type_u8]);
 }
 
 void init_builtin_func_names(Context* context) {
-    context->builtin_names[builtin_enum_length] = string_table_intern_cstr(&context->string_table, "enum_length");
-    context->builtin_names[builtin_cast]        = string_table_intern_cstr(&context->string_table, "cast");
+    context->builtin_names[builtin_type_info] = string_table_intern_cstr(&context->string_table, "type_info_of");
+    context->builtin_names[builtin_cast]      = string_table_intern_cstr(&context->string_table, "cast");
+}
+
+void init_keyword_names(Context* context) {
+    u32 i = 0;
+
+    #define add_keyword(token, name) \
+    context->keyword_token_table[i][0] = token; \
+    context->keyword_token_table[i][1] = string_table_intern_cstr(&context->string_table, name); \
+    i += 1;
+
+    add_keyword(token_keyword_fn,       "fn");
+    add_keyword(token_keyword_extern,   "extern");
+    add_keyword(token_keyword_let,      "let");
+    add_keyword(token_keyword_if,       "if");
+    add_keyword(token_keyword_else,     "else");
+    add_keyword(token_keyword_for,      "for");
+    add_keyword(token_keyword_return,   "return");
+    add_keyword(token_keyword_continue, "continue");
+    add_keyword(token_keyword_break,    "break");
+    add_keyword(token_keyword_struct,   "struct");
+    add_keyword(token_keyword_enum,     "enum");
+    add_keyword(token_keyword_union,    "union");
+    add_keyword(token_keyword_null,     "null");
+    add_keyword(token_keyword_true,     "true");
+    add_keyword(token_keyword_false,    "false");
+
+    #undef add_keyword
 }
 
 // Says '*[3]foo' is equal to '*foo'
@@ -2159,6 +2195,12 @@ void print_expr(Context* context, Func* func, Expr* expr) {
 
         } break;
 
+        case expr_type_info: {
+            printf("type_info(");
+            print_type(context, expr->type_info_of);
+            printf(")");
+        } break;
+
         default: assert(false);
     }
 }
@@ -2457,21 +2499,20 @@ Builtin_Func parse_builtin_func_name(Context* context, u32 name_index) {
 }
 
 Type* parse_user_type_name(Context* context, u32 name_index) {
-    buf_foreach (Type, user_type, context->user_types) {
+    buf_foreach (Type*, user_type, context->user_types) {
         u32 user_type_name = 0;
-        switch (user_type->kind) {
+        switch ((*user_type)->kind) {
             case type_struct: {
-                user_type_name = user_type->structure.name;
+                user_type_name = (*user_type)->structure.name;
             } break;
             case type_enum: {
-                user_type_name = user_type->enumeration.name;
+                user_type_name = (*user_type)->enumeration.name;
             } break;
             default: assert(false);
         }
 
         if (name_index == user_type_name) {
-            return user_type;
-            break;
+            return *user_type;
         }
     }
 
@@ -3479,19 +3520,49 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
 
     Token* t_start = t;
     File_Pos start_pos = t->pos;
+
+    t += 1;
+    assert(t->kind == token_bracket_round_open);
     t += 1;
 
     switch (parse_builtin_func_name(context, name_index)) {
-        case builtin_enum_length: {
-            unimplemented();
+        case builtin_type_info: {
+            if (t->kind != token_identifier) {
+                print_file_pos(&t->pos);
+                printf("Expected simple type name in 'type_info_of', but got ");
+                print_token(context->string_table, t);
+                printf("\n");
+                *length = t - t_start;
+                return null;
+            }
+
+            u32 type_name = t->identifier_string_table_index;
+            Type* type = parse_user_type_name(context, type_name);
+            if (type == null) {
+                type = arena_new(&context->arena, Type);
+                type->kind = type_unresolved_name;
+                type->unresolved_name = t->identifier_string_table_index;
+                type->flags |= TYPE_FLAG_UNRESOLVED;
+            }
+            t += 1;
+
+            if (!expect_single_token(context, t, token_bracket_round_close, "after type name in 'type_info_of'")) {
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            Expr* expr = arena_new(&context->arena, Expr);
+            expr->pos = start_pos;
+            expr->kind = expr_type_info;
+            expr->type_info_of = type;
+            expr->type = context->type_info_type;
 
             *length = t - t_start;
-            return null;
+            return expr;
         } break;
 
         case builtin_cast: {
-            t += 1;
-
             u32 type_length = 0;
             Type* cast_to = parse_type(context, t, &type_length);
             t += type_length;
@@ -3532,10 +3603,8 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
             return expr;
         } break;
 
-        // A normal function call
+        // A normal function call or a simple cast
         case builtin_invalid: {
-            t += 1;
-
             u32 param_list_length = 0;
             u32 param_count = 0;
             Expr** params = parse_parameter_list(context, t, &param_list_length, &param_count);
@@ -4327,38 +4396,46 @@ bool parse_extern(Context* context, Token* t, u32* length) {
 }
 
 
-bool build_ast(Context* context, u8* path) {
+bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_length);
+
+bool build_ast(Context* context, u8* file_name) {
+    init_keyword_names(context);
+    init_builtin_func_names(context);
+    init_primitive_types(context);
+
     u8* file;
     u32 file_length;
 
-    IO_Result read_result = read_entire_file(path, &file, &file_length);
+    IO_Result read_result = read_entire_file(file_name, &file, &file_length);
     if (read_result != io_ok) {
-        printf("Couldn't load \"%s\": %s\n", path, io_result_message(read_result));
+        printf("Couldn't load \"%s\": %s\n", file_name, io_result_message(read_result));
         return false;
     }
 
     bool valid = true;
 
-    enum { KEYWORD_COUNT = 15 };
-    u32 keyword_token_table[KEYWORD_COUNT][2] = {
-        { token_keyword_fn,       string_table_intern_cstr(&context->string_table, "fn") },
-        { token_keyword_extern,   string_table_intern_cstr(&context->string_table, "extern") },
-        { token_keyword_let,      string_table_intern_cstr(&context->string_table, "let") },
-        { token_keyword_if,       string_table_intern_cstr(&context->string_table, "if") },
-        { token_keyword_else,     string_table_intern_cstr(&context->string_table, "else") },
-        { token_keyword_for,      string_table_intern_cstr(&context->string_table, "for") },
-        { token_keyword_return,   string_table_intern_cstr(&context->string_table, "return") },
-        { token_keyword_continue, string_table_intern_cstr(&context->string_table, "continue") },
-        { token_keyword_break,    string_table_intern_cstr(&context->string_table, "break") },
-        { token_keyword_struct,   string_table_intern_cstr(&context->string_table, "struct") },
-        { token_keyword_enum,     string_table_intern_cstr(&context->string_table, "enum") },
-        { token_keyword_union,    string_table_intern_cstr(&context->string_table, "union") },
-        { token_keyword_null,     string_table_intern_cstr(&context->string_table, "null") },
-        { token_keyword_true,     string_table_intern_cstr(&context->string_table, "true") },
-        { token_keyword_false,    string_table_intern_cstr(&context->string_table, "false") },
-    };
-    init_builtin_func_names(context);
-    init_primitive_types(context);
+    valid &= lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text));
+
+    u32 type_kind_name_index = string_table_intern_cstr(&context->string_table, "Type_Kind");
+    context->type_info_type = parse_user_type_name(context, type_kind_name_index);
+    assert(context->type_info_type != null);
+    assert(context->type_info_type->kind == type_enum);
+    assert(context->type_info_type->enumeration.name == type_kind_name_index);
+
+    valid &= lex_and_parse_text(context, file_name, file, file_length);
+
+    free(file);
+
+    if (valid) {
+        return true;
+    } else {
+        printf("Encountered errors while lexing / parsing, exiting compiler!\n");
+        return false;
+    }
+}
+
+bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_length) {
+    bool valid = true;
 
     // Lex
     arena_stack_push(&context->stack); // pop at end of lexing
@@ -4378,7 +4455,7 @@ bool build_ast(Context* context, u8* path) {
 
     Token* tokens = null;
     File_Pos file_pos = {0};
-    file_pos.file_name = path;
+    file_pos.file_name = file_name;
     file_pos.line = 1;
 
     #define LOWERCASE \
@@ -4412,8 +4489,8 @@ bool build_ast(Context* context, u8* path) {
 
             bool is_keyword = false;
             for (u32 k = 0; k < KEYWORD_COUNT; k += 1) {
-                if (string_table_index == keyword_token_table[k][1]) {
-                    buf_push(tokens, ((Token) { keyword_token_table[k][0], .pos = file_pos }));
+                if (string_table_index == context->keyword_token_table[k][1]) {
+                    buf_push(tokens, ((Token) { context->keyword_token_table[k][0], .pos = file_pos }));
                     is_keyword = true;
                     break;
                 }
@@ -4955,9 +5032,7 @@ bool build_ast(Context* context, u8* path) {
             if (type == null) {
                 valid = false;
             } else {
-                // NB in order to avoid to many nested pointers, we just copy the full type into our buffer.
-                // This essentially orphans/leaks the type allocated by 'parse_struct_declaration'.
-                buf_push(context->user_types, *type);
+                buf_push(context->user_types, type);
             }
         } break;
 
@@ -4969,7 +5044,7 @@ bool build_ast(Context* context, u8* path) {
             if (type == null) {
                 valid = false;
             } else {
-                buf_push(context->user_types, *type);
+                buf_push(context->user_types, type);
             }
         } break;
 
@@ -4987,14 +5062,7 @@ bool build_ast(Context* context, u8* path) {
         } break;
     }
 
-    free(file);
-
-    if (!valid) {
-        printf("Encountered errors while lexing / parsing, exiting compiler!\n");
-        return false;
-    } else {
-        return true;
-    }
+    return valid;
 }
 
 
@@ -5839,6 +5907,14 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             expr->type = expr->static_member_access.parent_type;
         } break;
 
+        case expr_type_info: {
+            if (resolve_type(info->context, &expr->type_info_of, &expr->pos)) {
+                expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
+            } else {
+                return false;
+            }
+        } break;
+
         default: assert(false);
     }
 
@@ -6367,6 +6443,11 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             return eval_ok;
         } break;
 
+        case expr_type_info: {
+            unimplemented();
+            return eval_bad;
+        } break;
+
         default: assert(false); return eval_bad;
     }
 }
@@ -6461,7 +6542,9 @@ bool typecheck(Context* context) {
     info.context = context;
 
     // User types (structs, enums, unions)
-    buf_foreach (Type, type, context->user_types) {
+    buf_foreach (Type*, type_ptr, context->user_types) {
+        Type* type = *type_ptr;
+
         switch (type->kind) {
             case type_struct: {
                 if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
@@ -7465,6 +7548,10 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             op.binary.source = (Local) { local_literal, false, member_value };
             op.binary.target = assign_to;
             buf_push(context->tmp_ops, op);
+        } break;
+
+        case expr_type_info: {
+            unimplemented();
         } break;
 
         default: assert(false);
