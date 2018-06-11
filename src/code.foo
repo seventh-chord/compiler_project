@@ -386,13 +386,25 @@ enum Type_Kind {
     ENUM,
 }
 
+//let DEFAULT_TYPE_KIND = Type_Kind::I64;
+
 fn enum_test() {
+    let kind = Type_Kind::POINTER;
+  
+    if (kind == Type_Kind::POINTER) {
+        print("Its pointy and sharp\n");
+    } else {
+        print("You don't know what that is\n");
+    }
+
+    print_u64(u64(kind), 10);
+    print("\n");
 }
 
 /*
 'enum_length'
 'enum_string'
-enum specify default value size
+enum specify value size
 slices (also, make strings slices)
 size_of, align_of, type_of
 a 'any' type

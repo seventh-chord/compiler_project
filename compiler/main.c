@@ -749,6 +749,8 @@ typedef struct Token {
 
         token_SEPARATOR = 128, // Values before this use literal ascii character codes, to simplify some parsing
 
+        token_static_access, // "::"
+
         token_greater_or_equal, // ">="
         token_less_or_equal, // "<="
         token_equal, // "=="
@@ -832,6 +834,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_semicolon]            = "a semicolon ';'",
     [token_comma]                = "a comma ','",
     [token_colon]                = "a colon ':'",
+    [token_static_access]        = "::",
 
     [token_bracket_round_open]   = "an opening parenthesis '('",
     [token_bracket_round_close]  = "a closing parenthesis ')'",
@@ -945,7 +948,7 @@ struct Type {
                 File_Pos declaration_pos;
             } *members;
 
-            u8 value_size; // should be 1, 2, 4 or 8
+            Type_Kind value_primitive;
         } enumeration;
         
         struct {
@@ -1088,7 +1091,8 @@ typedef enum Expr_Kind {
     expr_call,
     expr_cast,
     expr_subscript,
-    expr_member_access,
+    expr_member_access, // a.b
+    expr_static_member_access, // a::b
 } Expr_Kind;
 
 struct Expr { // 'typedef'd earlier!
@@ -1151,6 +1155,12 @@ struct Expr { // 'typedef'd earlier!
             Expr* parent;
             union { u32 member_name; u32 member_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
         } member_access;
+
+        struct {
+            // Both unions discriminated by EXPR_FLAG_UNRESOLVED
+            union { u32 parent_name; Type* parent_type; };
+            union { u32 member_name; u32 member_index; };
+        } static_member_access;
     };
 
     Type* type;
@@ -1694,7 +1704,7 @@ u64 type_size_of(Type* type) {
             u64 base_size;
             switch (type->kind) {
                 case type_struct: base_size = type->structure.size; break;
-                case type_enum:   base_size = type->enumeration.value_size; break;
+                case type_enum:   base_size = primitive_size_of(type->enumeration.value_primitive); break;
                 default:          base_size = primitive_size_of(type->kind); break;
             }
 
@@ -1704,6 +1714,14 @@ u64 type_size_of(Type* type) {
 
     assert(false);
     return 0;
+}
+
+Type_Kind primitive_of(Type* type) {
+    if (type->kind == type_enum) {
+        return type->enumeration.value_primitive;
+    } else {
+        return type->kind;
+    }
 }
 
 u64 type_align_of(Type* type) {
@@ -1740,6 +1758,7 @@ bool primitive_is_compound(Type_Kind primitive) {
         case type_i64: return false;
         case type_bool: return false;
         case type_void: return false;
+        case type_enum: return false;
         case type_pointer: return false;
         case type_invalid: assert(false); return false;
         case type_unsolidified_int: return false;
@@ -1755,6 +1774,7 @@ bool primitive_is_integer(Type_Kind primitive) {
         case type_pointer:
         case type_array:
         case type_struct:
+        case type_enum:
         case type_bool:
         case type_unsolidified_int:
         case type_unresolved_name:
@@ -1784,16 +1804,21 @@ bool primitive_is_integer(Type_Kind primitive) {
 
 bool primitive_is_signed(Type_Kind primitive) {
     switch (primitive) {
-        case type_u8:
-        case type_u16:
-        case type_u32:
-        case type_u64:
         case type_void:
         case type_pointer:
         case type_array:
         case type_struct:
+        case type_enum:
         case type_unsolidified_int:
         case type_bool:
+        {
+            return false;
+        } break;
+
+        case type_u8:
+        case type_u16:
+        case type_u32:
+        case type_u64:
         {
             return false;
         } break;
@@ -2099,6 +2124,25 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             }
         } break;
 
+        case expr_static_member_access: {
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                u8* parent_name = string_table_access(context->string_table, expr->static_member_access.parent_name);
+                u8* member_name = string_table_access(context->string_table, expr->static_member_access.member_name);
+                printf("<unresolved %s::%s>", parent_name, member_name);
+            } else {
+                Type* parent = expr->static_member_access.parent_type;
+                assert(parent->kind == type_enum);
+
+                u8* parent_name = string_table_access(context->string_table, parent->enumeration.name);
+
+                u32 m = expr->static_member_access.member_index;
+                u32 member_name_index = parent->enumeration.members[m].name;
+                u8* member_name = string_table_access(context->string_table, member_name_index);
+                printf("%s::%s", parent_name, member_name);
+            }
+
+        } break;
+
         default: assert(false);
     }
 }
@@ -2393,7 +2437,9 @@ Type* parse_user_type_name(Context* context, u32 name_index) {
             case type_struct: {
                 user_type_name = user_type->structure.name;
             } break;
-
+            case type_enum: {
+                user_type_name = user_type->enumeration.name;
+            } break;
             default: assert(false);
         }
 
@@ -2720,7 +2766,7 @@ Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
         type->enumeration.members[i].declaration_pos = m->pos;
     }
 
-    type->enumeration.value_size = primitive_size_of(type_u8);
+    type->enumeration.value_primitive = type_u8;
 
     arena_stack_pop(&context->stack);
 
@@ -2891,6 +2937,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
             switch (t->kind) {
                 // Variable, function call, structure literal
                 case token_identifier: {
+                    File_Pos start_pos = t->pos;
+
                     u32 name_index = t->identifier_string_table_index;
                     expect_value = false;
                     t += 1;
@@ -2898,7 +2946,6 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     // "Advanced" casts
                     // These need to be parsed differently as the first parameter is a type
                     if (t->kind == token_bracket_round_open && name_index == context->cast_name) {
-                        File_Pos start_pos = t->pos;
                         t += 1;
 
                         u32 type_length = 0;
@@ -2942,7 +2989,6 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     
                     // Function call or simple cast
                     } else if (t->kind == token_bracket_round_open) {
-                        File_Pos start_pos = t->pos;
                         t += 1;
 
                         u32 param_list_length = 0;
@@ -3000,6 +3046,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         Expr* expr = parse_compound(context, t, &struct_length);
                         t += struct_length;
 
+                        expr->pos = start_pos;
+
                         if (expr == null) {
                             *length = t - t_start;
                             return null;
@@ -3017,6 +3065,31 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                         shunting_yard_push_expr(context, yard, expr);
                         could_parse = true;
+                    
+                    } else if (t->kind == token_static_access) {
+                        t += 1;
+
+                        if (t->kind != token_identifier) {
+                            print_file_pos(&t->pos);
+                            printf("Expected struct name, but got ");
+                            print_token(context->string_table, t);
+                            printf("\n");
+                            *length = t - t_start;
+                            return null;
+                        }
+
+                        u32 member_name_index = t->identifier_string_table_index;
+                        t += 1;
+
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = expr_static_member_access;
+                        expr->static_member_access.parent_name = name_index;;
+                        expr->static_member_access.member_name = member_name_index;;
+                        expr->flags |= EXPR_FLAG_UNRESOLVED;
+                        expr->pos = start_pos;
+
+                        shunting_yard_push_expr(context, yard, expr);
+                        could_parse = true;
 
                     // Variable
                     } else {
@@ -3024,7 +3097,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         expr->kind = expr_variable;
                         expr->variable.unresolved_name = name_index;
                         expr->flags |= EXPR_FLAG_UNRESOLVED;
-                        expr->pos = t->pos;
+                        expr->pos = start_pos;
 
                         shunting_yard_push_expr(context, yard, expr);
                         could_parse = true;
@@ -4655,14 +4728,22 @@ bool build_ast(Context* context, u8* path) {
             i += 1;
             buf_push(tokens, ((Token) { token_comma, .pos = file_pos }));
         } break;
+
         case '.': {
             i += 1;
             buf_push(tokens, ((Token) { token_dot, .pos = file_pos }));
         } break;
+
         case ':': {
-            i += 1;
-            buf_push(tokens, ((Token) { token_colon, .pos = file_pos }));
+            if (i + 1 < file_length && file[i + 1] == ':') {
+                i += 2;
+                buf_push(tokens, ((Token) { token_static_access, .pos = file_pos }));
+            } else {
+                i += 1;
+                buf_push(tokens, ((Token) { token_colon, .pos = file_pos }));
+            }
         } break;
+
         case ';': {
             i += 1;
             buf_push(tokens, ((Token) { token_semicolon, .pos = file_pos }));
@@ -4883,10 +4964,87 @@ void typecheck_scope_pop(Typecheck_Info* info) {
     info->scope = info->scope->parent;
 }
 
+bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
+    // The reason we have a pretty complex system here is because we want types to be pointer-equal
+
+    Type* type = *type_slot;
+
+    if (!(type->flags & TYPE_FLAG_UNRESOLVED)) {
+        return true;
+    }
+
+    typedef struct Prefix Prefix;
+    struct Prefix {
+        enum { prefix_pointer, prefix_array } kind;
+        u64 array_length;
+        Prefix* link;
+    };
+    Prefix* prefix = null;
+
+    arena_stack_push(&context->stack); // We allocate prefixes, if any, on the stack
+
+    while (true) {
+        bool done = false;
+
+        switch (type->kind) {
+            case type_pointer: {
+                Prefix* new = arena_new(&context->stack, Prefix);
+                new->kind = prefix_pointer;
+                new->link = prefix;
+                prefix = new;
+
+                type = type->pointer_to;
+            } break;
+
+            case type_array: {
+                Prefix* new = arena_new(&context->stack, Prefix);
+                new->kind = prefix_array;
+                new->array_length = type->array.length;
+                new->link = prefix;
+                prefix = new;
+
+                type = type->array.of;
+            } break;
+
+            case type_unresolved_name: {
+                Type* new = parse_user_type_name(context, type->unresolved_name);
+
+                if (new == null) {
+                    u8* name_string = string_table_access(context->string_table, type->unresolved_name);
+                    print_file_pos(pos);
+                    printf("No such type: '%s'\n", name_string);
+                    return false;
+                }
+
+                type = new;
+
+                done = true;
+            } break;
+
+            default: assert(false);
+        }
+
+        if (done) break;
+    }
+
+    while (prefix != null) {
+        switch (prefix->kind) {
+            case prefix_pointer: type = get_pointer_type(context, type); break;
+            case prefix_array:   type = get_array_type(context, type, prefix->array_length); break;
+        }
+        prefix = prefix->link;
+    }
+
+    arena_stack_pop(&context->stack);
+
+    *type_slot = type;
+    return true;
+}
+
 bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
-            Type_Kind solidify_to_primitive = solidify_to->kind;
+            Type_Kind solidify_to_primitive = primitive_of(solidify_to);
 
             switch (expr->literal.kind) {
                 case expr_literal_integer: {
@@ -4951,8 +5109,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 }
             }
 
-            Type_Kind primitive = expr->type->kind;
-            switch (primitive) {
+            switch (expr->type->kind) {
                 case type_array: {
                     u64 expected_child_count = expr->type->array.length;
                     Type* expected_child_type = expr->type->array.of;
@@ -5214,8 +5371,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
             expr->type = null;
 
-            Type_Kind left_primitive = expr->binary.left->type->kind;
-            Type_Kind right_primitive = expr->binary.right->type->kind;
+            Type_Kind left_primitive = primitive_of(expr->binary.left->type);
+            Type_Kind right_primitive = primitive_of(expr->binary.right->type);
 
             if (is_comparasion) {
                 expr->type = &info->context->primitive_types[type_bool];
@@ -5339,11 +5496,17 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
             u32 invalid = 0;
 
-            if (primitive == type_pointer) {
+            if (primitive == type_pointer || primitive == type_enum || primitive_is_integer(primitive)) {
                 if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
 
                 Type_Kind from_primitive = expr->cast_from->type->kind;
-                if (from_primitive != type_pointer) {
+
+                bool to_int_or_enum = primitive == type_enum || primitive_is_integer(primitive);
+                bool to_pointer = primitive == type_pointer;
+                bool from_int_or_enum = from_primitive == type_enum || primitive_is_integer(from_primitive);
+                bool from_pointer = from_primitive == type_pointer;
+
+                if (!((to_int_or_enum && from_int_or_enum) || (to_pointer && from_pointer))) {
                     invalid = 2;
                 }
             } else if (primitive_is_integer(primitive)) {
@@ -5550,6 +5713,50 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             if (parent->flags & EXPR_FLAG_ASSIGNABLE) {
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
             }
+        } break;
+
+        case expr_static_member_access: {
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                Type* parent = parse_user_type_name(info->context, expr->static_member_access.parent_name);
+
+                if (parent == null) {
+                    u8* name_string = string_table_access(info->context->string_table, expr->static_member_access.parent_name);
+                    print_file_pos(&expr->pos);
+                    printf("No such type: '%s'\n", name_string);
+                    return false;
+                }
+
+                if (parent->kind != type_enum) {
+                    print_file_pos(&expr->pos);
+                    printf("Can't use operator :: on non-enum type ");
+                    print_type(info->context, parent);
+                    printf("\n");
+                    return false;
+                }
+
+                u32 member_index = U32_MAX;
+                for (u32 i = 0; i < parent->enumeration.member_count; i += 1) {
+                    if (parent->enumeration.members[i].name == expr->static_member_access.member_name) {
+                        member_index = i;
+                        break;
+                    }
+                }
+
+                if (member_index == U32_MAX) {
+                    u8* member_name = string_table_access(info->context->string_table, expr->static_member_access.member_name);
+                    print_file_pos(&expr->pos);
+                    print_type(info->context, parent);
+                    printf(" has no member '%s'\n", member_name);
+                    return false;
+                }
+
+                expr->static_member_access.parent_type = parent;
+                expr->static_member_access.member_index = member_index;
+
+                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
+            }
+
+            expr->type = expr->static_member_access.parent_type;
         } break;
 
         default: assert(false);
@@ -6038,6 +6245,16 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             return eval_do_at_runtime;
         } break;
 
+        case expr_member_access: {
+            unimplemented();
+            return eval_bad;
+        } break;
+
+        case expr_static_member_access: {
+            unimplemented();
+            return eval_bad;
+        } break;
+
         default: assert(false); return eval_bad;
     }
 }
@@ -6123,83 +6340,6 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop) {
     } else {
         return control_flow_might_return;
     }
-}
-
-bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
-    // The reason we have a pretty complex system here is because we want types to be pointer-equal
-
-    Type* type = *type_slot;
-
-    if (!(type->flags & TYPE_FLAG_UNRESOLVED)) {
-        return true;
-    }
-
-    typedef struct Prefix Prefix;
-    struct Prefix {
-        enum { prefix_pointer, prefix_array } kind;
-        u64 array_length;
-        Prefix* link;
-    };
-    Prefix* prefix = null;
-
-    arena_stack_push(&context->stack); // We allocate prefixes, if any, on the stack
-
-    while (true) {
-        bool done = false;
-
-        switch (type->kind) {
-            case type_pointer: {
-                Prefix* new = arena_new(&context->stack, Prefix);
-                new->kind = prefix_pointer;
-                new->link = prefix;
-                prefix = new;
-
-                type = type->pointer_to;
-            } break;
-
-            case type_array: {
-                Prefix* new = arena_new(&context->stack, Prefix);
-                new->kind = prefix_array;
-                new->array_length = type->array.length;
-                new->link = prefix;
-                prefix = new;
-
-                type = type->array.of;
-            } break;
-
-            case type_unresolved_name: {
-                Type* new = parse_user_type_name(context, type->unresolved_name);
-
-                if (new == null) {
-                    u8* name_string = string_table_access(context->string_table, type->unresolved_name);
-                    print_file_pos(pos);
-                    printf("No such type: '%s'\n", name_string);
-                    return false;
-                }
-
-                type = new;
-
-                done = true;
-            } break;
-
-            default: assert(false);
-        }
-
-        if (done) break;
-    }
-
-    while (prefix != null) {
-        switch (prefix->kind) {
-            case prefix_pointer: type = get_pointer_type(context, type); break;
-            case prefix_array:   type = get_array_type(context, type, prefix->array_length); break;
-        }
-        prefix = prefix->link;
-    }
-
-    arena_stack_pop(&context->stack);
-
-    *type_slot = type;
-    return true;
 }
 
 bool typecheck(Context* context) {
@@ -6291,7 +6431,7 @@ bool typecheck(Context* context) {
             } break;
 
             case type_enum: {
-                u64 mask = size_mask(type->enumeration.value_size);
+                u64 mask = size_mask(primitive_size_of(type->enumeration.value_primitive));
                 u32 count = type->enumeration.member_count;
                 for (u32 i = 0; i < count; i += 1) {
                     u64 value_i = type->enumeration.members[i].value;
@@ -6566,9 +6706,7 @@ void intermediate_deallocate_temporary(Context* context, Local local) {
 }
 
 void intermediate_write_compound_set(Context* context, Local source, Local target, Type* type) {
-    Type_Kind primitive = type->kind;
-
-    if (primitive_is_compound(primitive)) {
+    if (primitive_is_compound(type->kind)) {
         Local source_pointer, target_pointer;
         bool dealloc_source_pointer = false;
         bool dealloc_target_pointer = false;
@@ -6620,7 +6758,7 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
     } else {
         Op op = {0};
         op.kind = op_set;
-        op.primitive = primitive;
+        op.primitive = primitive_of(type);
         op.binary.source = source;
         op.binary.target = target;
         buf_push(context->tmp_ops, op);
@@ -6629,9 +6767,8 @@ void intermediate_write_compound_set(Context* context, Local source, Local targe
 
 void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
     Var* var = &func->body.vars[var_index];
-    Type_Kind primitive = var->type->kind;
 
-    if (primitive_is_compound(primitive)) {
+    if (primitive_is_compound(var->type->kind)) {
         Local pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
         u64 type_size = type_size_of(var->type);
 
@@ -6651,6 +6788,7 @@ void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
 
         intermediate_deallocate_temporary(context, pointer);
     } else {
+        Type_Kind primitive = primitive_of(var->type);
         u8 size = primitive_size_of(primitive);
 
         Op op = {0};
@@ -6664,8 +6802,9 @@ void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
 
 
 void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_address) {
-    Type_Kind target_primitive = expr->type->kind;
     assert(assign_to.kind != local_literal);
+
+    Type_Kind target_primitive = primitive_of(expr->type);
 
     switch (expr->kind) {
         case expr_literal:
@@ -6840,8 +6979,8 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
 
             if (expr->binary.op == binary_add || expr->binary.op == binary_sub) {
-                Type_Kind left_primitive = expr->binary.left->type->kind;
-                Type_Kind right_primitive = expr->binary.right->type->kind;
+                Type_Kind left_primitive = primitive_of(expr->binary.left->type);
+                Type_Kind right_primitive = primitive_of(expr->binary.right->type);
 
                 if (left_primitive == type_pointer) {
                     assert(right_primitive != type_pointer);
@@ -6924,8 +7063,8 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 {
                     // NB for comparative operations, 'op.primitive' should be the type we are comparing, not the
                     // type we are producing (which always is bool)
-                    Type_Kind left_primitive  = expr->binary.left->type->kind;
-                    Type_Kind right_primitive = expr->binary.right->type->kind;
+                    Type_Kind left_primitive  = primitive_of(expr->binary.left->type);
+                    Type_Kind right_primitive = primitive_of(expr->binary.right->type);
                     assert(left_primitive == right_primitive);
                     op.primitive = left_primitive;
                 } break;
@@ -7037,7 +7176,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 op.kind = op_cast;
                 op.primitive = target_primitive;
                 op.cast.local = assign_to;
-                op.cast.old_primitive = expr->cast_from->type->kind;
+                op.cast.old_primitive = primitive_of(expr->cast_from->type);
                 buf_push(context->tmp_ops, op);
             }
         } break;
@@ -7199,6 +7338,23 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
         } break;
 
+        case expr_static_member_access: {
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+
+            Type* type = expr->static_member_access.parent_type;
+            u32 member_index = expr->static_member_access.member_index;
+            assert(type->kind == type_enum);
+
+            u64 member_value = type->enumeration.members[member_index].value;
+
+            Op op = {0};
+            op.kind = op_set;
+            op.primitive = target_primitive;
+            op.binary.source = (Local) { local_literal, false, member_value };
+            op.binary.target = assign_to;
+            buf_push(context->tmp_ops, op);
+        } break;
+
         default: assert(false);
     }
 }
@@ -7325,7 +7481,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
         case expr_variable: {
             assert(!(left->flags & EXPR_FLAG_UNRESOLVED));
 
-            Type_Kind left_primitive = left->type->kind;
+            Type_Kind left_primitive = primitive_of(left->type);
             u64 operand_size = type_size_of(left->type);
 
             bool needs_temporary = linearize_assignment_needs_temporary(right, left->variable.index);
@@ -7448,7 +7604,7 @@ u64 linearize_conditional_jump(Context* context, Expr* condition) {
 
         Op cmp_op = {0};
         cmp_op.kind = cmp_op_kind;
-        cmp_op.primitive = condition->binary.left->type->kind;
+        cmp_op.primitive = primitive_of(condition->binary.left->type);
         cmp_op.binary.ignore_result = true; // we just set flags, and move on
         cmp_op.binary.source = right_local;
         cmp_op.binary.target = left_local;
@@ -7686,7 +7842,7 @@ void build_intermediate(Context* context) {
         buf_clear(context->tmp_ops);
         buf_clear(context->tmp_tmps);
 
-        #if 0
+        #if 1
         u8* name = string_table_access(context->string_table, func->name);
         printf("%s has %u operations:\n", name, (u64) func->body.op_count);
         for (u32 i = 0; i < func->body.op_count; i += 1) {
@@ -9114,7 +9270,7 @@ void build_machinecode(Context* context) {
         if (func->signature.has_output) {
             u32 var_index = func->body.output_var_index;
             Local output_local = { local_variable, false, var_index };
-            Type_Kind output_primitive = func->signature.output_type->kind;
+            Type_Kind output_primitive = primitive_of(func->signature.output_type);
 
             if (primitive_is_compound(output_primitive)) {
                 if (output_primitive == type_array) {
