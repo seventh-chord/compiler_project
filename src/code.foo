@@ -353,7 +353,16 @@ struct The_Pages_Of_History {
 }
 
 
+let X_AXIS = Vector { 1, 0, 0 };
+let Y_AXIS = Vector { y: 1 };
+let Z_AXIS = Vector { z: 1 };
+let SIXTY_FOUR = Vector { z: 60 }.z + Vector { x: 4 }.x;
+
 fn vector_test() {
+    assert(X_AXIS.x == 1, "x bad");
+    assert(Y_AXIS.y == 1, "y bad");
+    assert(Z_AXIS.z == 1, "z bad");
+
     let vector = Vector { 1, 2, 3 };
     print_u64(u64(vector.x), 10);
     print(", ");
@@ -361,6 +370,8 @@ fn vector_test() {
     print(", ");
     print_u64(u64(vector.z), 10);
     print("\n");
+
+    assert(SIXTY_FOUR == 64, "Will you still need me, will you still feed me?");
 }
 
 struct Vector { x, y, z: u8; }

@@ -6086,6 +6086,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             assert(index_size <= 8);
 
             u8* inner_data = arena_alloc(&info->context->stack, array_size);
+            mem_clear(inner_data, array_size);
             result = eval_compile_time_expr(info, expr->subscript.array, inner_data);
             if (result != eval_ok) return result;
 
@@ -6218,9 +6219,9 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_compound: {
-            Type_Kind primitive = expr->type->kind;
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
-            switch (primitive) {
+            switch (expr->type->kind) {
                 case type_array: {
                     Type* child_type = expr->type->array.of;
                     u64 child_size = type_size_of(child_type);
@@ -6236,7 +6237,17 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                 } break;
 
                 case type_struct: {
-                    unimplemented(); // TODO compile time struct literals
+                    u8* mem = result_into;
+
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        assert(expr->compound.content[i].name_mode != expr_compound_unresolved_name);
+                        u32 m = expr->compound.content[i].member_index;
+                        u64 offset = expr->type->structure.members[m].offset;
+
+                        Expr* child = expr->compound.content[i].expr;
+                        Eval_Result result = eval_compile_time_expr(info, child, mem + offset);
+                        if (result != eval_ok) return result;
+                    }
                 } break;
 
                 default: assert(false);
@@ -6254,8 +6265,21 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_member_access: {
-            unimplemented();
-            return eval_bad;
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+            assert(expr->member_access.parent->type->kind == type_struct);
+
+            u64 parent_size = type_size_of(expr->member_access.parent->type);
+            u8* inner_data = arena_alloc(&info->context->stack, parent_size);
+            mem_clear(inner_data, parent_size);
+            Eval_Result result = eval_compile_time_expr(info, expr->member_access.parent, inner_data);
+            if (result != eval_ok) return result;
+
+            u32 m = expr->member_access.member_index;
+            u64 offset = expr->member_access.parent->type->structure.members[m].offset;
+
+            mem_copy(inner_data + offset, result_into, type_size);
+
+            return eval_ok;
         } break;
 
         case expr_static_member_access: {
