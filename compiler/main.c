@@ -1734,7 +1734,7 @@ u64 type_align_of(Type* type) {
             if (type->kind == type_struct) {
                 return type->structure.align;
             } else {
-                return primitive_size_of(type->kind);
+                return primitive_size_of(primitive_of(type));
             }
         }
     }
@@ -5371,10 +5371,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
             expr->type = null;
 
-            Type_Kind left_primitive = primitive_of(expr->binary.left->type);
-            Type_Kind right_primitive = primitive_of(expr->binary.right->type);
-
             if (is_comparasion) {
+                Type_Kind left_primitive = primitive_of(expr->binary.left->type);
+                Type_Kind right_primitive = primitive_of(expr->binary.right->type);
+
                 expr->type = &info->context->primitive_types[type_bool];
 
                 bool valid;
@@ -5394,23 +5394,23 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     return false;
                 }
             } else {
-                if (left_primitive == right_primitive && primitive_is_integer(left_primitive)) {
+                if (expr->binary.left->type == expr->binary.right->type && primitive_is_integer(expr->binary.left->type->kind)) {
                     expr->type = expr->binary.left->type;
 
                 // Handle special cases for pointer arithmetic
                 } else switch (expr->binary.op) {
                     case binary_add: {
-                        if (left_primitive == type_pointer && right_primitive == type_u64) {
+                        if (expr->binary.left->type->kind == type_pointer && expr->binary.right->type->kind == type_u64) {
                             expr->type = expr->binary.left->type;
                         }
 
-                        if (left_primitive == type_u64 && right_primitive == type_pointer) {
+                        if (expr->binary.left->type->kind == type_u64 && expr->binary.right->type->kind == type_pointer) {
                             expr->type = expr->binary.right->type;
                         }
                     } break;
 
                     case binary_sub: {
-                        if (left_primitive == type_pointer && right_primitive == type_u64) {
+                        if (expr->binary.left->type->kind == type_pointer && expr->binary.right->type->kind == type_u64) {
                             expr->type = expr->binary.left->type;
                         }
                     } break;
@@ -5424,13 +5424,21 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             }
 
             if (expr->type == null) {
-                print_file_pos(&expr->pos);
-                printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
-                print_type(info->context, expr->binary.left->type);
-                printf(" vs ");
-                print_type(info->context, expr->binary.right->type);
-                printf("\n");
-                return false;
+                if (expr->binary.left->type != expr->binary.right->type) {
+                    print_file_pos(&expr->pos);
+                    printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
+                    print_type(info->context, expr->binary.left->type);
+                    printf(" vs ");
+                    print_type(info->context, expr->binary.right->type);
+                    printf("\n");
+                    return false;
+                } else {
+                    print_file_pos(&expr->pos);
+                    printf("Can't use operator %s on ", BINARY_OP_SYMBOL[expr->binary.op]);
+                    print_type(info->context, expr->binary.left->type);
+                    printf("\n");
+                    return false;
+                }
             }
         } break;
 
@@ -5570,9 +5578,9 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     Type_Kind child_primitive = expr->unary.inner->type->kind;
                     if (child_primitive != type_bool) {
                         print_file_pos(&expr->unary.inner->pos);
-                        printf("Can only 'not' a 'bool', not a ");
+                        printf("Can only apply unary not (!) to ");
                         print_type(info->context, expr->unary.inner->type);
-                        printf("\n");
+                        printf(", its not a bool\n");
                         return false;
                     }
 
@@ -5583,9 +5591,9 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     Type_Kind child_primitive = expr->unary.inner->type->kind;
                     if (!primitive_is_integer(child_primitive)) {
                         print_file_pos(&expr->unary.inner->pos);
-                        printf("Can only negatve integers, not a ");
+                        printf("Can not apply unary negative (-) to ");
                         print_type(info->context, expr->unary.inner->type);
-                        printf("\n");
+                        printf(", its not an integer\n");
                         return false;
                     }
 
@@ -6025,8 +6033,8 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_cast: {
-            Type_Kind primitive = expr->type->kind;
-            Type_Kind inner_primitive = expr->cast_from->type->kind;
+            Type_Kind primitive = primitive_of(expr->type);
+            Type_Kind inner_primitive = primitive_of(expr->cast_from->type);
 
             u64 inner_type_size = type_size_of(expr->cast_from->type);
             assert(type_size <= 8 && inner_type_size <= 8);
@@ -6251,8 +6259,16 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_static_member_access: {
-            unimplemented();
-            return eval_bad;
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+
+            Type* type = expr->static_member_access.parent_type;
+            u32 member_index = expr->static_member_access.member_index;
+            assert(type->kind == type_enum);
+
+            u64 member_value = type->enumeration.members[member_index].value;
+            mem_copy((u8*) &member_value, result_into, type_size);
+
+            return eval_ok;
         } break;
 
         default: assert(false); return eval_bad;
@@ -7842,7 +7858,7 @@ void build_intermediate(Context* context) {
         buf_clear(context->tmp_ops);
         buf_clear(context->tmp_tmps);
 
-        #if 1
+        #if 0
         u8* name = string_table_access(context->string_table, func->name);
         printf("%s has %u operations:\n", name, (u64) func->body.op_count);
         for (u32 i = 0; i < func->body.op_count; i += 1) {

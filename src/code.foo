@@ -386,10 +386,10 @@ enum Type_Kind {
     ENUM,
 }
 
-//let DEFAULT_TYPE_KIND = Type_Kind::I64;
+let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
 
 fn enum_test() {
-    let kind = Type_Kind::POINTER;
+    let kind = cast(Type_Kind, u64(DEFAULT_TYPE_KIND) + 1); // Hmm, this is a bit gnarly...
   
     if (kind == Type_Kind::POINTER) {
         print("Its pointy and sharp\n");
