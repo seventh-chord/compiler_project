@@ -861,6 +861,17 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 };
 
 
+typedef enum Builtin_Func {
+    builtin_invalid = 0,
+
+    builtin_enum_length,
+    builtin_stringify,
+    builtin_cast,
+
+    BUILTIN_COUNT,
+} Builtin_Func;
+
+
 typedef enum Type_Kind {
     type_invalid = 0,
     type_void = 1,
@@ -1547,7 +1558,7 @@ typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
 
     u8* string_table; // stretchy-buffer string table
-    u32 cast_name; // string table index of the name of the cast function
+    u32 builtin_names[BUILTIN_COUNT];
 
     // AST & intermediate representation
     Func* funcs; // stretchy-buffer
@@ -1629,6 +1640,11 @@ void init_primitive_types(Context* context) {
 
     context->void_pointer_type = get_pointer_type(context, &context->primitive_types[type_void]);
     context->string_type = get_pointer_type(context, &context->primitive_types[type_u8]);
+}
+
+void init_builtin_func_names(Context* context) {
+    context->builtin_names[builtin_enum_length] = string_table_intern_cstr(&context->string_table, "enum_length");
+    context->builtin_names[builtin_cast]        = string_table_intern_cstr(&context->string_table, "cast");
 }
 
 // Says '*[3]foo' is equal to '*foo'
@@ -2430,6 +2446,16 @@ Type* parse_primitive_name(Context* context, u32 name_index) {
     return null;
 }
 
+Builtin_Func parse_builtin_func_name(Context* context, u32 name_index) {
+    for (u32 i = 0; i < BUILTIN_COUNT; i += 1) {
+        if (context->builtin_names[i] == name_index) {
+            return i;
+        }
+    }
+
+    return builtin_invalid;
+}
+
 Type* parse_user_type_name(Context* context, u32 name_index) {
     buf_foreach (Type, user_type, context->user_types) {
         u32 user_type_name = 0;
@@ -2917,6 +2943,7 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
 
 Expr* parse_compound(Context* context, Token* t, u32* length);
 Expr** parse_parameter_list(Context* context, Token* t, u32* length, u32* count);
+Expr* parse_call(Context* context, Token* t, u32* length);
 
 Expr* parse_expr(Context* context, Token* t, u32* length) {
     Token* t_start = t;
@@ -2940,168 +2967,89 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     File_Pos start_pos = t->pos;
 
                     u32 name_index = t->identifier_string_table_index;
-                    expect_value = false;
-                    t += 1;
 
-                    // "Advanced" casts
-                    // These need to be parsed differently as the first parameter is a type
-                    if (t->kind == token_bracket_round_open && name_index == context->cast_name) {
-                        t += 1;
+                    switch ((t + 1)->kind) {
+                        // Some call (either a function or a builtin)
+                        case token_bracket_round_open: {
+                            u32 call_length = 0;
+                            Expr* expr = parse_call(context, t, &call_length);
+                            t += call_length;
 
-                        u32 type_length = 0;
-                        Type* cast_to = parse_type(context, t, &type_length);
-                        t += type_length;
-
-                        if (cast_to == null) {
-                            *length = t - t_start;
-                            return null;
-                        }
-
-                        if (!expect_single_token(context, t, token_comma, "after type in cast")) {
-                            *length = t - t_start;
-                            return null;
-                        }
-                        t += 1;
-
-                        u32 inner_length = 0;
-                        Expr* cast_from = parse_expr(context, t, &inner_length);
-                        t += inner_length;
-
-                        if (cast_from == null) {
-                            *length = t - t_start;
-                            return null;
-                        }
-
-                        if (!expect_single_token(context, t, token_bracket_round_close, "after cast")) {
-                            *length = t - t_start;
-                            return null;
-                        }
-                        t += 1;
-
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->pos = start_pos;
-                        expr->kind = expr_cast;
-                        expr->cast_from = cast_from;
-                        expr->type = cast_to;
-
-                        shunting_yard_push_expr(context, yard, expr);
-                        could_parse = true;
-                    
-                    // Function call or simple cast
-                    } else if (t->kind == token_bracket_round_open) {
-                        t += 1;
-
-                        u32 param_list_length = 0;
-                        u32 param_count = 0;
-                        Expr** params = parse_parameter_list(context, t, &param_list_length, &param_count);
-                        t += param_list_length;
-                        if (params == null) {
-                            *length = t - t_start;
-                            return null;
-                        }
-
-                        Type* cast_to_primitive = parse_primitive_name(context, name_index);
-                        if (cast_to_primitive != null) {
-                            if (!primitive_is_integer(cast_to_primitive->kind)) {
-                                print_file_pos(&start_pos);
-                                printf("Can't cast to %s\n", PRIMITIVE_NAMES[cast_to_primitive->kind]);
+                            if (expr == null) {
                                 *length = t - t_start;
                                 return null;
                             }
-
-                            if (param_count != 1) {
-                                print_file_pos(&start_pos);
-                                printf(
-                                    "Expected 1 parameter for cast to %s, but got %u\n",
-                                    PRIMITIVE_NAMES[cast_to_primitive->kind], (u64) param_count
-                                );
-                                *length = t - t_start;
-                                return null;
-                            }
-
-                            Expr* expr = arena_new(&context->arena, Expr);
-                            expr->pos = start_pos;
-                            expr->kind = expr_cast;
-                            expr->cast_from = params[0];
-                            expr->type = cast_to_primitive;
 
                             shunting_yard_push_expr(context, yard, expr);
-                            could_parse = true;
-                        } else {
+                        } break;
+
+                        // Structure literal
+                        case token_bracket_curly_open: {
+                            File_Pos start_pos = t->pos;
+
+                            Type* type = parse_user_type_name(context, t->identifier_string_table_index);
+                            if (type == null) {
+                                type = arena_new(&context->arena, Type);
+                                type->kind = type_unresolved_name;
+                                type->unresolved_name = t->identifier_string_table_index;
+                                type->flags |= TYPE_FLAG_UNRESOLVED;
+                            }
+                            t += 1;
+
+                            u32 struct_length = 0;
+                            Expr* expr = parse_compound(context, t, &struct_length);
+                            t += struct_length;
+
+                            if (expr == null) {
+                                *length = t - t_start;
+                                return null;
+                            }
+
+                            expr->type = type;
+                            shunting_yard_push_expr(context, yard, expr);
+                        } break;
+
+                        case token_static_access: {
+                            File_Pos start_pos = t->pos;
+                            t += 2;
+
+                            if (t->kind != token_identifier) {
+                                print_file_pos(&t->pos);
+                                printf("Expected struct name, but got ");
+                                print_token(context->string_table, t);
+                                printf("\n");
+                                *length = t - t_start;
+                                return null;
+                            }
+
+                            u32 member_name_index = t->identifier_string_table_index;
+                            t += 1;
+
                             Expr* expr = arena_new(&context->arena, Expr);
-                            expr->pos = start_pos;
-                            expr->kind = expr_call;
-                            expr->call.unresolved_name = name_index;
+                            expr->kind = expr_static_member_access;
+                            expr->static_member_access.parent_name = name_index;;
+                            expr->static_member_access.member_name = member_name_index;;
                             expr->flags |= EXPR_FLAG_UNRESOLVED;
-                            expr->call.params = params;
-                            expr->call.param_count = param_count;
+                            expr->pos = start_pos;
 
                             shunting_yard_push_expr(context, yard, expr);
-                            could_parse = true;
-                        }
-                    
-                    // Struct literal
-                    } else if (t->kind == token_bracket_curly_open) {
-                        u32 struct_length = 0;
-                        Expr* expr = parse_compound(context, t, &struct_length);
-                        t += struct_length;
+                        } break;
 
-                        expr->pos = start_pos;
+                        default: {
+                            Expr* expr = arena_new(&context->arena, Expr);
+                            expr->kind = expr_variable;
+                            expr->variable.unresolved_name = name_index;
+                            expr->flags |= EXPR_FLAG_UNRESOLVED;
+                            expr->pos = t->pos;
 
-                        if (expr == null) {
-                            *length = t - t_start;
-                            return null;
-                        }
+                            shunting_yard_push_expr(context, yard, expr);
 
-                        Type* type = parse_user_type_name(context, name_index);
-                        if (type == null) {
-                            type = arena_new(&context->arena, Type);
-                            type->kind = type_unresolved_name;
-                            type->unresolved_name = name_index;
-                            type->flags |= TYPE_FLAG_UNRESOLVED;
-                        }
-
-                        expr->type = type;
-
-                        shunting_yard_push_expr(context, yard, expr);
-                        could_parse = true;
-                    
-                    } else if (t->kind == token_static_access) {
-                        t += 1;
-
-                        if (t->kind != token_identifier) {
-                            print_file_pos(&t->pos);
-                            printf("Expected struct name, but got ");
-                            print_token(context->string_table, t);
-                            printf("\n");
-                            *length = t - t_start;
-                            return null;
-                        }
-
-                        u32 member_name_index = t->identifier_string_table_index;
-                        t += 1;
-
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->kind = expr_static_member_access;
-                        expr->static_member_access.parent_name = name_index;;
-                        expr->static_member_access.member_name = member_name_index;;
-                        expr->flags |= EXPR_FLAG_UNRESOLVED;
-                        expr->pos = start_pos;
-
-                        shunting_yard_push_expr(context, yard, expr);
-                        could_parse = true;
-
-                    // Variable
-                    } else {
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->kind = expr_variable;
-                        expr->variable.unresolved_name = name_index;
-                        expr->flags |= EXPR_FLAG_UNRESOLVED;
-                        expr->pos = start_pos;
-
-                        shunting_yard_push_expr(context, yard, expr);
-                        could_parse = true;
+                            t += 1;
+                        } break;
                     }
+
+                    could_parse = true;
+                    expect_value = false;
                 } break;
 
                 case token_literal:
@@ -3523,6 +3471,126 @@ Expr** parse_parameter_list(Context* context, Token* t, u32* length, u32* count)
 
     *length = t - t_start;
     return exprs;
+}
+
+Expr* parse_call(Context* context, Token* t, u32* length) {
+    assert(t->kind == token_identifier);
+    u32 name_index = t->identifier_string_table_index;
+
+    Token* t_start = t;
+    File_Pos start_pos = t->pos;
+    t += 1;
+
+    switch (parse_builtin_func_name(context, name_index)) {
+        case builtin_enum_length: {
+            unimplemented();
+
+            *length = t - t_start;
+            return null;
+        } break;
+
+        case builtin_cast: {
+            t += 1;
+
+            u32 type_length = 0;
+            Type* cast_to = parse_type(context, t, &type_length);
+            t += type_length;
+
+            if (cast_to == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            if (!expect_single_token(context, t, token_comma, "after type in cast")) {
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            u32 inner_length = 0;
+            Expr* cast_from = parse_expr(context, t, &inner_length);
+            t += inner_length;
+
+            if (cast_from == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            if (!expect_single_token(context, t, token_bracket_round_close, "after cast")) {
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            Expr* expr = arena_new(&context->arena, Expr);
+            expr->pos = start_pos;
+            expr->kind = expr_cast;
+            expr->cast_from = cast_from;
+            expr->type = cast_to;
+
+            *length = t - t_start;
+            return expr;
+        } break;
+
+        // A normal function call
+        case builtin_invalid: {
+            t += 1;
+
+            u32 param_list_length = 0;
+            u32 param_count = 0;
+            Expr** params = parse_parameter_list(context, t, &param_list_length, &param_count);
+            t += param_list_length;
+            if (params == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            Type* cast_to_primitive = parse_primitive_name(context, name_index);
+            if (cast_to_primitive != null) {
+                if (!primitive_is_integer(cast_to_primitive->kind)) {
+                    print_file_pos(&start_pos);
+                    printf("Can't cast to %s\n", PRIMITIVE_NAMES[cast_to_primitive->kind]);
+                    *length = t - t_start;
+                    return null;
+                }
+
+                if (param_count != 1) {
+                    print_file_pos(&start_pos);
+                    printf(
+                        "Expected 1 parameter for cast to %s, but got %u\n",
+                        PRIMITIVE_NAMES[cast_to_primitive->kind], (u64) param_count
+                    );
+                    *length = t - t_start;
+                    return null;
+                }
+
+                Expr* expr = arena_new(&context->arena, Expr);
+                expr->pos = start_pos;
+                expr->kind = expr_cast;
+                expr->cast_from = params[0];
+                expr->type = cast_to_primitive;
+
+                *length = t - t_start;
+                return expr;
+            } else {
+                Expr* expr = arena_new(&context->arena, Expr);
+                expr->pos = start_pos;
+                expr->kind = expr_call;
+                expr->call.unresolved_name = name_index;
+                expr->flags |= EXPR_FLAG_UNRESOLVED;
+                expr->call.params = params;
+                expr->call.param_count = param_count;
+
+                *length = t - t_start;
+                return expr;
+            }
+        } break;
+
+        default: assert(false);
+    }
+
+    assert(false);
+    return null;
 }
 
 Stmt* parse_stmts(Context* context, Token* t, u32* length);
@@ -4082,10 +4150,15 @@ Func* parse_function(Context* context, Token* t, u32* length) {
         valid = false;
     }
 
-    if (parse_primitive_name(context, name_index) != null || name_index == context->cast_name) {
+    if (parse_primitive_name(context, name_index) != null || context->builtin_names[builtin_cast] == name_index) {
         u8* name = string_table_access(context->string_table, name_index);
         print_file_pos(&start->pos);
         printf("Can't use '%s' as a function name, as it is reserved for casts\n", name);
+        valid = false;
+    } else if (parse_builtin_func_name(context, name_index) != builtin_invalid) {
+        u8* name = string_table_access(context->string_table, name_index);
+        print_file_pos(&start->pos);
+        printf("Can't use '%s' as a function name, as it would shadow a builtin function\n", name);
         valid = false;
     }
 
@@ -4284,8 +4357,7 @@ bool build_ast(Context* context, u8* path) {
         { token_keyword_true,     string_table_intern_cstr(&context->string_table, "true") },
         { token_keyword_false,    string_table_intern_cstr(&context->string_table, "false") },
     };
-    context->cast_name = string_table_intern_cstr(&context->string_table, "cast");
-
+    init_builtin_func_names(context);
     init_primitive_types(context);
 
     // Lex
@@ -7952,9 +8024,9 @@ void build_intermediate(Context* context) {
 
 
 enum {
-    builtin_mem_clear,
-    builtin_mem_copy,
-    BUILTIN_COUNT,
+    runtime_builtin_mem_clear,
+    runtime_builtin_mem_copy,
+    RUNTIME_BUILTIN_COUNT,
 };
 
 enum {
@@ -9057,7 +9129,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             assert(pointer.as_reference);
             instruction_mov_mem(context, func, mov_from, pointer, reg_rax, POINTER_SIZE);
             instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(type_u64));
-            instruction_call(context, true, builtin_mem_clear);
+            instruction_call(context, true, runtime_builtin_mem_clear);
         } break;
 
         case op_builtin_mem_copy: {
@@ -9072,7 +9144,7 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             instruction_mov_mem(context, func, mov_from, dst, reg_rdx, POINTER_SIZE);
             instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(type_u64));
             // NB NB This call clobbers reg_rbx
-            instruction_call(context, true, builtin_mem_copy);
+            instruction_call(context, true, runtime_builtin_mem_copy);
         } break;
 
         case op_end_of_function: assert(false);
@@ -9083,13 +9155,13 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
 void build_machinecode(Context* context) {
     // Builtins
-    u32 builtin_text_starts[BUILTIN_COUNT] = {0};
+    u32 runtime_builtin_text_starts[RUNTIME_BUILTIN_COUNT] = {0};
 
     // TODO we can optimize builtin mem copy/clear by using a bigger mov and looping fewer times
 
-    { // builtin mem clear
+    { // mem clear
 
-        builtin_text_starts[builtin_mem_clear] = buf_length(context->seg_text);
+        runtime_builtin_text_starts[runtime_builtin_mem_clear] = buf_length(context->seg_text);
 
         u64 loop_start = buf_length(context->seg_text);
         u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
@@ -9108,8 +9180,8 @@ void build_machinecode(Context* context) {
         buf_push(context->seg_text, 0xc3);
     }
 
-    { // builtin mem copy
-        builtin_text_starts[builtin_mem_copy] = buf_length(context->seg_text);
+    { // mem copy
+        runtime_builtin_text_starts[runtime_builtin_mem_copy] = buf_length(context->seg_text);
 
         u64 loop_start = buf_length(context->seg_text);
         u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
@@ -9356,7 +9428,7 @@ void build_machinecode(Context* context) {
 
         u32 jump_to;
         if (fixup->builtin) {
-            jump_to = builtin_text_starts[fixup->func_index];
+            jump_to = runtime_builtin_text_starts[fixup->func_index];
         } else {
             Func* callee = &context->funcs[fixup->func_index];
             assert(callee->kind == func_kind_normal);
