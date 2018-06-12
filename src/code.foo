@@ -375,8 +375,13 @@ fn vector_test() {
 }
 
 struct Vector { x, y, z: u8; }
+struct Vector { x, y, z: u8; }
 
 
+let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
+let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
+let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
+let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
 let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
 
 fn enum_test() {

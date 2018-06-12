@@ -4000,6 +4000,17 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                     return null;
                 }
 
+                buf_foreach (Var, old_var, context->tmp_vars) {
+                    if (old_var->name == name_index) {
+                        u8* name_string = string_table_access(context->string_table, name_index);
+                        u32 initial_decl_line = old_var->declaration_pos.line;
+                        print_file_pos(&stmt->pos);
+                        printf("Redeclaration of variable '%s'. Initial declaration on line %u\n", name_string, (u64) initial_decl_line);
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+                }
+
                 u32 var_index = buf_length(context->tmp_vars);
                 buf_push(context->tmp_vars, ((Var) {
                     .name = name_index,
