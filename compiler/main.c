@@ -3527,26 +3527,16 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
 
     switch (parse_builtin_func_name(context, name_index)) {
         case builtin_type_info: {
-            if (t->kind != token_identifier) {
-                print_file_pos(&t->pos);
-                printf("Expected simple type name in 'type_info_of', but got ");
-                print_token(context->string_table, t);
-                printf("\n");
+            u32 type_length = 0;
+            Type* type = parse_type(context, t, &type_length);
+            t += type_length;
+
+            if (type == null) {
                 *length = t - t_start;
                 return null;
             }
 
-            u32 type_name = t->identifier_string_table_index;
-            Type* type = parse_user_type_name(context, type_name);
-            if (type == null) {
-                type = arena_new(&context->arena, Type);
-                type->kind = type_unresolved_name;
-                type->unresolved_name = t->identifier_string_table_index;
-                type->flags |= TYPE_FLAG_UNRESOLVED;
-            }
-            t += 1;
-
-            if (!expect_single_token(context, t, token_bracket_round_close, "after type name in 'type_info_of'")) {
+            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'type_info_of'")) {
                 *length = t - t_start;
                 return null;
             }
@@ -7551,7 +7541,14 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_type_info: {
-            unimplemented();
+            u64 type_info_value = expr->type_info_of->kind;
+
+            Op op = {0};
+            op.kind = op_set;
+            op.primitive = primitive_of(context->type_info_type);
+            op.binary.source = (Local) { local_literal, false, type_info_value };
+            op.binary.target = assign_to;
+            buf_push(context->tmp_ops, op);
         } break;
 
         default: assert(false);

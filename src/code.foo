@@ -391,15 +391,12 @@ fn enum_test() {
     print_u64(u64(kind), 10);
     print("\n");
 
-    /*
-    print("This enum has ");
-    print_u64(u64(type_info_of(Type_Kind)), 10);
-    print(" members!\n");
-    */
+    print("This thing has type ");
+    print_u64(u64(type_info_of(*Vector)), 10);
+    print("!\n");
 }
 
 /*
-builtin stringify
 specify what primitive to treat enum as internally (fixed to u8 atm)
 size_of, align_of, type_of
 slices, make strings slices
