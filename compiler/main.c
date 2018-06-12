@@ -5029,7 +5029,8 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                 printf("Expected global variable name, but found ");
                 print_token(context->string_table, t);
                 printf("\n");
-                return null;
+                valid = false;
+                break;
             }
             u32 name_index = t->identifier_string_table_index;
             t += 1;
@@ -5041,7 +5042,10 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                 u32 type_length = 0;
                 type = parse_type(context, t, &type_length);
                 t += type_length;
-                if (type == null) return null;
+                if (type == null) {
+                    valid = false;
+                    break;
+                }
             }
 
             Expr* expr = null;
@@ -5050,7 +5054,10 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
 
                 u32 right_length = 0;
                 expr = parse_expr(context, t, &right_length); 
-                if (expr == null) return null;
+                if (expr == null) {
+                    valid = false;
+                    break;
+                }
                 t += right_length;
             }
 
@@ -5058,21 +5065,41 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                 u8* name = string_table_access(context->string_table, name_index);
                 print_file_pos(&t->pos);
                 printf("Declared global variable '%s' without specifying type or initial value. Hence can't infer type\n", name);
-                return null;
+                valid = false;
+                break;
             }
 
-            if (!expect_single_token(context, t, token_semicolon, "after global variable declaration")) return null;
+            if (!expect_single_token(context, t, token_semicolon, "after global variable declaration")) {
+                valid = false;
+                break;
+            }
             t += 1;
 
+            bool duplicate_definition = false;
+            buf_foreach (Global_Var, old_global, context->global_vars) {
+                if (old_global->var.name == name_index) {
+                    u8* name_string = string_table_access(context->string_table, name_index);
+                    u32 initial_decl_line = old_global->var.declaration_pos.line;
+                    print_file_pos(&start_pos);
+                    printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name_string, (u64) initial_decl_line);
+                    duplicate_definition = true;
+                    break;
+                }
+            }
 
-            Global_Var global = {0};
-            global.var.name = name_index;
-            global.var.declaration_pos = start_pos;
-            global.var.type = type;
-            global.initial_expr = expr;
-            buf_push(context->global_vars, global);
+            if (duplicate_definition) {
+                valid = false;
+                break;
+            } else {
+                Global_Var global = {0};
+                global.var.name = name_index;
+                global.var.declaration_pos = start_pos;
+                global.var.type = type;
+                global.initial_expr = expr;
+                buf_push(context->global_vars, global);
 
-            assert(buf_length(context->global_vars) < MAX_LOCAL_VARS);
+                assert(buf_length(context->global_vars) < MAX_LOCAL_VARS);
+            }
         } break;
 
         case token_keyword_struct: {
