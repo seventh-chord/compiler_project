@@ -3,7 +3,7 @@
 
 u8 *preload_code_text = QUOTE(
 
-enum Type_Kind {
+enum Type_Kind (u8) {
     // 0 is unused in valid programs
     VOID = 1,
     BOOL = 2,

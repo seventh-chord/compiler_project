@@ -2793,12 +2793,50 @@ Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
         printf("Expected enum name, but got ");
         print_token(context->string_table, t);
         printf("\n");
+        *length = t - t_start;
         return null;
     }
     type->enumeration.name = t->identifier_string_table_index;
     t += 1;
 
-    if (!expect_single_token(context, t, token_bracket_curly_open, "after enum name")) return null;
+    if (t->kind == token_bracket_round_open) {
+        t += 1;
+        File_Pos type_start_pos = t->pos;
+
+        if (t->kind != token_identifier) {
+            print_file_pos(&type_start_pos);
+            printf("Expected primitive name, but got ");
+            print_token(context->string_table, t);
+            printf("\n");
+            *length = t - t_start;
+            return null;
+        }
+        u32 type_name_index = t->identifier_string_table_index;
+        t += 1;
+
+        if (!expect_single_token(context, t, token_bracket_round_close, "after enum primitive")) {
+            *length = t - t_start;
+            return null;
+        }
+        t += 1;
+
+        Type* primitive = parse_primitive_name(context, type_name_index);
+        if (primitive == null || !(primitive_is_integer(primitive->kind) && !primitive_is_signed(primitive->kind))) {
+            print_file_pos(&type_start_pos);
+            printf("Expected unsigned integer type, but got %s\n", string_table_access(context->string_table, type_name_index));
+            *length = t - t_start;
+            return null;
+        }
+
+        type->enumeration.value_primitive = primitive->kind;
+    } else {
+        type->enumeration.value_primitive = type_u32;
+    }
+
+    if (!expect_single_token(context, t, token_bracket_curly_open, "after enum name/type")) {
+        *length = t - t_start;
+        return null;
+    }
     t += 1;
 
 
@@ -2886,8 +2924,6 @@ Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
         type->enumeration.members[i].value = m->value;
         type->enumeration.members[i].declaration_pos = m->pos;
     }
-
-    type->enumeration.value_primitive = type_u8;
 
     arena_stack_pop(&context->stack);
 
@@ -6583,13 +6619,11 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case expr_type_info: {
-            unimplemented();
-            return eval_bad;
+            return eval_do_at_runtime;
         } break;
 
         case expr_name_of_enum_member: {
-            unimplemented();
-            return eval_bad;
+            return eval_do_at_runtime;
         } break;
 
         default: assert(false); return eval_bad;

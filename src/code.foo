@@ -216,12 +216,15 @@ fn test_fancy_casts() {
 }
 
 
-let my_name_a = "my name is \n\0 this won't show up due to the \0 earlier";
-let my_name_b = "__seventh-chord\n" + 2;
+enum Name_Enum { ITS_seventh_chord }
+
+let my_name_a = "my name is \0 this won't show up due to the \0 earlier";
+let my_name_b = name_of_enum_member(Name_Enum::ITS_seventh_chord) + 4;
 
 fn say_my_name() {
     print(my_name_a);
     print(my_name_b);
+    print("\n");
 }
 
 fn test_is_prime() {
