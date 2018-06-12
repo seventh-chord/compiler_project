@@ -897,7 +897,8 @@ typedef enum Builtin_Func {
     builtin_invalid = 0,
 
     builtin_type_info_of,
-    builtin_name_of_enum_member,
+    builtin_enum_member_name,
+    builtin_enum_length,
     builtin_cast,
 
     BUILTIN_COUNT,
@@ -988,7 +989,7 @@ struct Type {
             u32 member_count;
             struct {
                 u32 name;
-                u32 value;
+                u64 value;
                 File_Pos declaration_pos;
             } *members;
 
@@ -1143,7 +1144,8 @@ typedef enum Expr_Kind {
     expr_static_member_access, // a::b
 
     expr_type_info,
-    expr_name_of_enum_member,
+    expr_enum_length,
+    expr_enum_member_name,
 } Expr_Kind;
 
 struct Expr { // 'typedef'd earlier!
@@ -1197,6 +1199,7 @@ struct Expr { // 'typedef'd earlier!
 
         Expr* cast_from;
         Type* type_info_of;
+        Type* enum_length_of;
         Expr* enum_member;
 
         struct {
@@ -1716,9 +1719,10 @@ void init_primitive_types(Context* context) {
 }
 
 void init_builtin_func_names(Context* context) {
-    context->builtin_names[builtin_type_info_of]         = string_table_intern_cstr(&context->string_table, "type_info_of");
-    context->builtin_names[builtin_name_of_enum_member]  = string_table_intern_cstr(&context->string_table, "name_of_enum_member");
-    context->builtin_names[builtin_cast]                 = string_table_intern_cstr(&context->string_table, "cast");
+    context->builtin_names[builtin_type_info_of]     = string_table_intern_cstr(&context->string_table, "type_info_of");
+    context->builtin_names[builtin_enum_member_name] = string_table_intern_cstr(&context->string_table, "enum_member_name");
+    context->builtin_names[builtin_enum_length]      = string_table_intern_cstr(&context->string_table, "enum_length");
+    context->builtin_names[builtin_cast]             = string_table_intern_cstr(&context->string_table, "cast");
 }
 
 void init_keyword_names(Context* context) {
@@ -2301,8 +2305,14 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             printf(")");
         } break;
 
-        case expr_name_of_enum_member: {
-            printf("name_of_enum_member(");
+        case expr_enum_length: {
+            printf("enum_length(");
+            print_type(context, expr->type_info_of);
+            printf(")");
+        } break;
+
+        case expr_enum_member_name: {
+            printf("enum_member_name(");
             print_expr(context, func, expr->enum_member);
             printf(")");
         } break;
@@ -3694,7 +3704,33 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
             return expr;
         } break;
 
-        case builtin_name_of_enum_member: {
+        case builtin_enum_length: {
+            u32 type_length = 0;
+            Type* type = parse_type(context, t, &type_length);
+            t += type_length;
+
+            if (type == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'enum_length'")) {
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            Expr* expr = arena_new(&context->arena, Expr);
+            expr->pos = start_pos;
+            expr->kind = expr_enum_length;
+            expr->enum_length_of = type;
+            expr->type = &context->primitive_types[type_u64];
+
+            *length = t - t_start;
+            return expr;
+        } break;
+
+        case builtin_enum_member_name: {
             u32 inner_expr_length = 0;
             Expr* inner = parse_expr(context, t, &inner_expr_length);
             t += inner_expr_length;
@@ -3712,7 +3748,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
 
             Expr* expr = arena_new(&context->arena, Expr);
             expr->pos = start_pos;
-            expr->kind = expr_name_of_enum_member;
+            expr->kind = expr_enum_member_name;
             expr->enum_member = inner;
             expr->type = context->string_type;
 
@@ -5852,6 +5888,14 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         } break;
 
         case expr_cast: {
+            if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
+                if (resolve_type(info->context, &expr->type, &expr->pos)) {
+                    expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
+                } else {
+                    return false;
+                }
+            }
+
             Type_Kind primitive = expr->type->kind;
 
             u32 invalid = 0;
@@ -6119,6 +6163,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             expr->type = expr->static_member_access.parent_type;
         } break;
 
+
         case expr_type_info: {
             if (resolve_type(info->context, &expr->type_info_of, &expr->pos)) {
                 expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
@@ -6127,7 +6172,23 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             }
         } break;
 
-        case expr_name_of_enum_member: {
+        case expr_enum_length: {
+            if (resolve_type(info->context, &expr->enum_length_of, &expr->pos)) {
+                expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
+            } else {
+                return false;
+            }
+
+            if (expr->enum_length_of->kind != type_enum) {
+                print_file_pos(&expr->pos);
+                printf("Can't call 'enum_length' on ");
+                print_type(info->context, expr->enum_length_of);
+                printf(", it's not an enum");
+                return false;
+            }
+        } break;
+
+        case expr_enum_member_name: {
             if (!typecheck_expr(info, expr->enum_member, &info->context->primitive_types[type_invalid])) {
                 return false;
             }
@@ -6135,7 +6196,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             Type* enum_type = expr->enum_member->type;
             if (enum_type->kind != type_enum) {
                 print_file_pos(&expr->enum_member->pos);
-                printf("Can't call 'name_of_enum_member' on a ");
+                printf("Can't call 'enum_member_name' on a ");
                 print_type(info->context, enum_type);
                 printf("\n");
                 return false;
@@ -6674,7 +6735,26 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             return eval_do_at_runtime;
         } break;
 
-        case expr_name_of_enum_member: {
+        case expr_enum_length: {
+            if (expr->enum_length_of->kind == type_unresolved_name) {
+                return eval_do_at_runtime;
+            } else {
+                assert(expr->enum_length_of->kind == type_enum);
+
+                u64 length = 0;
+                for (u32 m = 0; m < expr->enum_length_of->enumeration.member_count; m += 1) {
+                    u64 value = expr->enum_length_of->enumeration.members[m].value;
+                    length = max(value + 1, length);
+                }
+
+                assert(expr->type->kind == type_u64);
+                mem_copy((u8*) &length, result_into, type_size);
+
+                return eval_ok;
+            }
+        } break;
+
+        case expr_enum_member_name: {
             return eval_do_at_runtime;
         } break;
 
@@ -7899,7 +7979,24 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             buf_push(context->tmp_ops, op);
         } break;
 
-        case expr_name_of_enum_member: {
+        case expr_enum_length: {
+            assert(expr->enum_length_of->kind == type_enum);
+
+            u64 length = 0;
+            for (u32 m = 0; m < expr->enum_length_of->enumeration.member_count; m += 1) {
+                u64 value = expr->enum_length_of->enumeration.members[m].value;
+                length = max(value + 1, length);
+            }
+
+            Op op = {0};
+            op.kind = op_set;
+            op.primitive = primitive_of(expr->type);
+            op.binary.source = (Local) { local_literal, false, length };
+            op.binary.target = assign_to;
+            buf_push(context->tmp_ops, op);
+        } break;
+
+        case expr_enum_member_name: {
             assert(!get_address);
             assert(!assign_to.as_reference);
 

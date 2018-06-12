@@ -219,7 +219,7 @@ fn test_fancy_casts() {
 enum Name_Enum { ITS_seventh_chord }
 
 let my_name_a = "my name is \0 this won't show up due to the \0 earlier";
-let my_name_b = name_of_enum_member(Name_Enum::ITS_seventh_chord) + 4;
+let my_name_b = enum_member_name(Name_Enum::ITS_seventh_chord) + 4;
 
 fn say_my_name() {
     print(my_name_a);
@@ -381,6 +381,7 @@ struct Vector { x, y, z: u8; }
 
 
 let DEFAULT_TYPE_KIND = cast(Type_Kind, u64(Type_Kind::U8) + 7);
+let HOW_LONG_BRO = enum_length(Direction);
 
 fn enum_test() {
     let kind = cast(Type_Kind, u64(DEFAULT_TYPE_KIND) + 1); // Hmm, this is a bit gnarly...
@@ -395,13 +396,13 @@ fn enum_test() {
     print("\n");
 
     print("This thing has type ");
-    print(name_of_enum_member(type_info_of(Type_Kind)));
+    print(enum_member_name(type_info_of(Type_Kind)));
     print("!\n");
 
     let a = 0;
     for (a < 20) {
         let invalid = cast(Type_Kind, a);
-        print(name_of_enum_member(invalid));
+        print(enum_member_name(invalid));
         print(", ");
 
         a += 1;
@@ -409,9 +410,16 @@ fn enum_test() {
     print("\n");
 
     let our_map = Map { Direction::SOUTH, Direction::NORTH };
-    print(name_of_enum_member(our_map.looking));
+    print(enum_member_name(our_map.looking));
     print(", ");
-    print(name_of_enum_member(our_map.target));
+    print(enum_member_name(our_map.target));
+    print("\n");
+
+    print_u64(HOW_LONG_BRO, 10);
+    print("\n");
+
+    print(enum_member_name(cast(Empty_Enum, 0)));
+    print_u64(enum_length(Empty_Enum), 10);
     print("\n");
 }
 
@@ -419,6 +427,8 @@ enum Direction (u8) { NORTH, SOUTH, EAST, WEST }
 struct Map {
     looking, target: Direction;
 }
+
+enum Empty_Enum {}
 
 /*
 complete type_info_of
