@@ -4,10 +4,10 @@
 u8 *preload_code_text = QUOTE(
 
 enum Type_Kind {
-    INVALID = 0,
+    // 0 is unused in valid programs
     VOID = 1,
     BOOL = 2,
-    UNSOLIDIFIED_INT = 3,
+    // 3 is unused in valid programs
     U8  = 4,
     U16 = 5,
     U32 = 6,
@@ -18,7 +18,7 @@ enum Type_Kind {
     I64 = 11,
     POINTER = 12,
     ARRAY = 13,
-    UNRESOLVED_NAME = 14,
+    // 14 is unused in valid programs
     STRUCT = 15,
     ENUM = 16,
 }

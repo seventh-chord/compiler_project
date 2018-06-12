@@ -116,6 +116,24 @@ void mem_clear(u8* ptr, u64 count) {
     }
 }
 
+void mem_fill(u8* ptr, u8 value, u64 count) {
+    u64 big_value = ((u64) value) | (((u64) value) << 8);
+    big_value = big_value | (big_value << 16);
+    big_value = big_value | (big_value << 32);
+
+    while (count >= 8) {
+        *((u64*) ptr) = big_value;
+        ptr += 8;
+        count -= 8;
+    }
+
+    while (count >= 1) {
+        *ptr = value;
+        ptr += 1;
+        count -= 1;
+    }
+}
+
 bool mem_cmp(u8* a, u8* b, u64 count) {
     while (count >= 8) {
         if (*((u64*) a) != *((u64*) b)) {
@@ -976,7 +994,9 @@ struct Type {
 
             Type_Kind value_primitive;
 
-            u64 member_name_table_data_offset; // U64_MAX if we haven't generated the table!
+            u64 name_table_data_offset; // U64_MAX if we haven't generated the table!
+            u64 name_table_invalid_offset;
+            u64 name_table_entries;
         } enumeration;
         
         struct {
@@ -2766,7 +2786,7 @@ Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
 
     Type* type = arena_new(&context->arena, Type);
     type->kind = type_enum;
-    type->enumeration.member_name_table_data_offset = U64_MAX;
+    type->enumeration.name_table_data_offset = U64_MAX;
 
     if (t->kind != token_identifier) {
         print_file_pos(&t->pos);
@@ -6971,7 +6991,7 @@ bool typecheck(Context* context) {
 
 void build_enum_member_name_table(Context* context, Type* type) {
     assert(type->kind == type_enum);
-    assert(type->enumeration.member_name_table_data_offset);
+    assert(type->enumeration.name_table_data_offset == U64_MAX);
 
     u64 max_value = 0;
     for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
@@ -6979,13 +6999,17 @@ void build_enum_member_name_table(Context* context, Type* type) {
         max_value = max(value, max_value);
     }
 
-    if (max_value == 0) {
-        type->enumeration.member_name_table_data_offset = 0;
-        return;
-    }
+    u64 table_size = max_value + 1;
+    u64 table_offset = add_exe_data(context, null, table_size * sizeof(u16), sizeof(u16));
+    type->enumeration.name_table_data_offset = table_offset;
 
-    u64 table_offset = add_exe_data(context, null, max_value * sizeof(u16), sizeof(u16));
-    type->enumeration.member_name_table_data_offset = table_offset;
+    mem_fill(context->seg_data + table_offset, 0xff, table_size * sizeof(u16));
+
+    u32 type_name_length;
+    u8* type_name = string_table_access_and_get_length(context->string_table, type->enumeration.name, &type_name_length);
+    u64 invalid_string_offset = add_exe_data(context, "<unknown ", 9, 1);
+    add_exe_data(context, type_name, type_name_length, 1);
+    add_exe_data(context, ">\0", 2, 1);
 
     for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
         u64 value = type->enumeration.members[m].value;
@@ -6994,11 +7018,24 @@ void build_enum_member_name_table(Context* context, Type* type) {
 
         u64 string_offset = add_exe_data(context, name, name_length + 1, 1);
 
+        u16 relative_offset = string_offset - table_offset - value*sizeof(u16);
+        assert(relative_offset < U16_MAX);
+
         u16* table_value = ((u16*) (context->seg_data + table_offset)) + value;
-        *table_value = string_offset - table_offset - value*sizeof(u16);
+        *table_value = relative_offset;
     }
 
-    printf("Stuck it at %x\n", table_offset);
+    u16* table = (u16*) (context->seg_data + table_offset);
+    for (u32 i = 0; i < table_size; i += 1) {
+        if (table[i] == 0xffff) {
+            u16 a = invalid_string_offset - table_offset;
+            u16 relative_offset = a - i*sizeof(u16);
+            table[i] = relative_offset;
+        }
+    }
+
+    type->enumeration.name_table_entries = table_size;
+    type->enumeration.name_table_invalid_offset = invalid_string_offset;
 }
 
 Local intermediate_allocate_temporary(Context* context, u64 size) {
@@ -7771,64 +7808,105 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             Type* enum_type = expr->enum_member->type;
             assert(enum_type->kind == type_enum);
-            if (enum_type->enumeration.member_name_table_data_offset == U64_MAX) {
+            if (enum_type->enumeration.name_table_data_offset == U64_MAX) {
                 build_enum_member_name_table(context, enum_type);
             }
-            u64 base_data_offset = enum_type->enumeration.member_name_table_data_offset;
+
+            u64 base_data_offset = enum_type->enumeration.name_table_data_offset;
+            u64 invalid_data_offset = enum_type->enumeration.name_table_invalid_offset;
             assert(base_data_offset < U32_MAX);
+            assert(invalid_data_offset < U32_MAX);
 
             Local enum_local = intermediate_allocate_temporary(context, POINTER_SIZE);
             linearize_expr(context, expr->enum_member, enum_local, false);
 
             if (primitive_size_of(enum_type->enumeration.value_primitive) < POINTER_SIZE) {
-                Op op = {0};
-                op.kind = op_cast;
-                op.primitive = type_u64;
-                op.cast.local = enum_local;
-                op.cast.old_primitive = enum_type->enumeration.value_primitive;
-                buf_push(context->tmp_ops, op);
+                buf_push(context->tmp_ops, ((Op) {
+                    .kind = op_cast,
+                    .primitive = type_u64,
+                    .cast.local = enum_local,
+                    .cast.old_primitive = enum_type->enumeration.value_primitive,
+                }));
             }
 
-            Op op = {0};
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_eq,
+                .primitive = type_u64,
+                .binary.ignore_result = true,
+                .binary.source = (Local) { local_literal, false, enum_type->enumeration.name_table_entries },
+                .binary.target = enum_local,
+            }));
 
-            op.kind = op_mul;
-            op.primitive = type_u64;
-            op.binary.source = (Local) { local_literal, false, sizeof(u16) };
-            op.binary.target = enum_local;
-            buf_push(context->tmp_ops, op);
+            u64 if_jump_op_index = buf_length(context->tmp_ops);
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_jump,
+                .primitive = type_u64,
+                .jump.conditional = true,
+                .jump.negate = false,
+                .jump.check_flags = true,
+                .jump.flag_condition = op_gteq,
+            }));
 
-            op.kind = op_load_data;
-            op.load_data.local = assign_to;
-            op.load_data.data_offset = (u32) base_data_offset;
-            buf_push(context->tmp_ops, op);
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_mul,
+                .primitive = type_u64,
+                .binary.source = (Local) { local_literal, false, sizeof(u16) },
+                .binary.target = enum_local,
+            }));
 
-            op.kind = op_add;
-            op.primitive = type_u64;
-            op.binary.source = enum_local;
-            op.binary.target = assign_to;
-            buf_push(context->tmp_ops, op);
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_load_data,
+                .load_data.local = assign_to,
+                .load_data.data_offset = (u32) base_data_offset,
+            }));
+
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_add,
+                .primitive = type_u64,
+                .binary.source = enum_local,
+                .binary.target = assign_to,
+            }));
 
             assign_to.as_reference = true;
 
-            op.kind = op_set;
-            op.primitive = type_u16;
-            op.binary.source = assign_to;
-            op.binary.target = enum_local;
-            buf_push(context->tmp_ops, op);
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_set,
+                .primitive = type_u16,
+                .binary.source = assign_to,
+                .binary.target = enum_local,
+            }));
 
             assign_to.as_reference = false;
 
-            op.kind = op_cast;
-            op.primitive = type_u64;
-            op.cast.local = enum_local;
-            op.cast.old_primitive = type_u16;
-            buf_push(context->tmp_ops, op);
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_cast,
+                .primitive = type_u64,
+                .cast.local = enum_local,
+                .cast.old_primitive = type_u16,
+            }));
 
-            op.kind = op_add;
-            op.primitive = type_u64;
-            op.binary.source = enum_local;
-            op.binary.target = assign_to;
-            buf_push(context->tmp_ops, op);
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_add,
+                .primitive = type_u64,
+                .binary.source = enum_local,
+                .binary.target = assign_to,
+            }));
+
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_jump,
+                .jump.conditional = false,
+                .jump.to_op = buf_length(context->tmp_ops) + 2,
+            }));
+
+            buf_push(context->tmp_ops, ((Op) {
+                .kind = op_load_data,
+                .load_data.local = assign_to,
+                .load_data.data_offset = (u32) invalid_data_offset,
+            }));
+
+            Op* first_jump_op = &context->tmp_ops[if_jump_op_index];
+            assert(first_jump_op->kind == op_jump);
+            first_jump_op->jump.to_op = buf_length(context->tmp_ops) - 1;
 
             if (enum_local.kind == local_temporary) {
                 intermediate_deallocate_temporary(context, enum_local);

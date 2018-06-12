@@ -394,6 +394,16 @@ fn enum_test() {
     print("This thing has type ");
     print(name_of_enum_member(type_info_of(Type_Kind)));
     print("!\n");
+
+    let a = 0;
+    for (a < 20) {
+        let invalid = cast(Type_Kind, a);
+        print(name_of_enum_member(invalid));
+        print(", ");
+
+        a += 1;
+    }
+    print("\n");
 }
 
 /*
