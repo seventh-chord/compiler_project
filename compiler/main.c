@@ -1290,16 +1290,75 @@ bool local_cmp(Local* a, Local* b) {
 }
 
 
+typedef enum Condition {
+    condition_e, condition_ne,
+
+    // Signed
+    condition_g, condition_ge,
+    condition_l, condition_le,
+
+    // Unsigned
+    condition_a, condition_ae,
+    condition_b, condition_be,
+
+    CONDITION_COUNT,
+} Condition;
+
+u8* CONDITION_NAMES[CONDITION_COUNT] = {
+    [condition_e]   = "==",
+    [condition_ne]  = "!=",
+    [condition_g]   = "> (signed)",
+    [condition_ge]  = ">= (signed)",
+    [condition_l]   = "< (signed)",
+    [condition_le]  = "<= (signed)",
+    [condition_a]   = "> (unsigned)",
+    [condition_ae]  = ">= (unsigned)",
+    [condition_b]   = "< (unsigned)",
+    [condition_be]  = "<= (unsigned)",
+};
+
+u8* CONDITION_POSTFIXES[CONDITION_COUNT] = {
+    [condition_e]   = "e",
+    [condition_ne]  = "ne",
+    [condition_g]   = "g",
+    [condition_ge]  = "ge",
+    [condition_l]   = "l",
+    [condition_le]  = "le",
+    [condition_a]   = "a",
+    [condition_ae]  = "ae",
+    [condition_b]   = "b",
+    [condition_le]  = "be",
+};
+
+Condition condition_not(Condition c) {
+    switch (c) {
+        case condition_e:  return condition_ne;
+        case condition_ne: return condition_e;
+        case condition_g:  return condition_le;
+        case condition_ge: return condition_l;
+        case condition_l:  return condition_ge;
+        case condition_le: return condition_g;
+        case condition_a:  return condition_be;
+        case condition_ae: return condition_b;
+        case condition_b:  return condition_ae;
+        case condition_be: return condition_a;
+        default: assert(false); return 0;
+    }
+}
+
 typedef enum Op_Kind {
     op_end_of_function = 0,
 
     op_call,
     op_cast,
-    op_jump,
     op_load_data,
 
     op_builtin_mem_clear,
     op_builtin_mem_copy,
+
+    op_cmp,
+    op_jump, // depends on result of previous op_cmp
+    op_set_bool, // depends on result of previous op_cmp
 
     // 'unary'
     op_neg,
@@ -1313,12 +1372,6 @@ typedef enum Op_Kind {
     op_div,
     op_mod,
     op_address_of,
-    op_neq,
-    op_eq,
-    op_gt,
-    op_gteq,
-    op_lt,
-    op_lteq,
 
     OP_COUNT,
 } Op_Kind;
@@ -1327,10 +1380,13 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_end_of_function] = "end_of_function",
     [op_call] = "call",
     [op_cast] = "cast",
-    [op_jump] = "jump",
     [op_load_data] = "load_data",
     [op_builtin_mem_clear] = "builtin_mem_clear",
     [op_builtin_mem_copy] = "builtin_mem_copy",
+
+    [op_cmp]  = "cmp",
+    [op_jump] = "jump",
+    [op_set_bool] = "set_bool",
 
     [op_neg] = "neg",
     [op_not] = "not",
@@ -1341,12 +1397,6 @@ u8* OP_NAMES[OP_COUNT] = {
     [op_div] = "div",
     [op_mod] = "mod",
     [op_address_of] = "address_of",
-    [op_neq] = "neq",
-    [op_eq] = "eq",
-    [op_gt] = "gt",
-    [op_gteq] = "gteq",
-    [op_lt] = "lt",
-    [op_lteq] = "lteq",
 };
 
 typedef struct Op_Call_Param {
@@ -1369,7 +1419,6 @@ typedef struct Op {
         struct {
             Local source;
             Local target;
-            bool ignore_result; // i.e. we just want to set flags
         } binary;
 
         struct {
@@ -1383,14 +1432,22 @@ typedef struct Op {
             u8 old_primitive;
         } cast;
 
+
         struct {
-            bool conditional, negate, check_flags;
-            union {
-                Local local_condition;
-                Op_Kind flag_condition; // Using Op_Kind here is a bit wierd, should really be X64_Condition...
-            };
+            Local left;
+            Local right;
+        } cmp;
+
+        struct {
+            bool conditional;
+            Condition condition;
             u32 to_op;
         } jump;
+
+        struct {
+            Condition condition;
+            Local local;
+        } set_bool;
 
         struct {
             Local other;
@@ -1563,35 +1620,6 @@ u8* reg_names[REG_COUNT] = {
     "r12", "r13", "r14", "r15"
 };
 
-// These match the the 'cc' part in 'jmpcc', 'setcc' and 'movcc'
-typedef enum X64_Condition {
-    x64_condition_eq,
-    x64_condition_neq,
-    x64_condition_gt,
-    x64_condition_gteq,
-    x64_condition_lt,
-    x64_condition_lteq,
-    X64_CONDITION_COUNT,
-} X64_Condition;
-
-u8* X64_CONDITION_SIGNED_POSTFIXES[X64_CONDITION_COUNT] = {
-    [x64_condition_eq]   = "e",
-    [x64_condition_neq]  = "ne",
-    [x64_condition_gt]   = "g",
-    [x64_condition_gteq] = "ge",
-    [x64_condition_lt]   = "l",
-    [x64_condition_lteq] = "le",
-};
-u8* X64_CONDITION_UNSIGNED_POSTFIXES[X64_CONDITION_COUNT] = {
-    [x64_condition_eq]   = "e",
-    [x64_condition_neq]  = "ne",
-    [x64_condition_gt]   = "a",
-    [x64_condition_gteq] = "ae",
-    [x64_condition_lt]   = "b",
-    [x64_condition_lteq] = "be",
-};
-
-
 //#define PRINT_GENERATED_INSTRUCTIONS
 
 
@@ -1718,6 +1746,31 @@ void init_keyword_names(Context* context) {
     add_keyword(token_keyword_false,    "false");
 
     #undef add_keyword
+}
+
+Condition find_condition_for_op_and_type(Binary_Op op, Type_Kind type) {
+    if (primitive_is_signed(type)) {
+        switch (op) {
+            case binary_eq:   return condition_e;
+            case binary_neq:  return condition_ne;
+            case binary_gt:   return condition_g;
+            case binary_gteq: return condition_ge;
+            case binary_lt:   return condition_l;
+            case binary_lteq: return condition_le;
+            default: assert(false);
+        }
+    } else {
+        switch (op) {
+            case binary_eq:   return condition_e;
+            case binary_neq:  return condition_ne;
+            case binary_gt:   return condition_a;
+            case binary_gteq: return condition_ae;
+            case binary_lt:   return condition_l;
+            case binary_lteq: return condition_le;
+            default: assert(false);
+        }
+    }
+    return 0;
 }
 
 // Says '*[3]foo' is equal to '*foo'
@@ -2401,16 +2454,11 @@ void print_op(Context* context, Func* func, Op* op) {
         } break;
 
         case op_set: case op_add: case op_sub: case op_mul: case op_div: case op_mod:
-        case op_neq: case op_eq: case op_gt: case op_gteq: case op_lt: case op_lteq:
         {
             printf("(%s) %s ", PRIMITIVE_NAMES[op->primitive], OP_NAMES[op->kind]);
             print_local(context, func, op->binary.target);
             printf(", ");
             print_local(context, func, op->binary.source);
-
-            if (op->binary.ignore_result) {
-                printf(" (only set flags)");
-            }
         } break;
 
         case op_address_of: {
@@ -2448,21 +2496,25 @@ void print_op(Context* context, Func* func, Op* op) {
             printf(" (from %s to %s)", PRIMITIVE_NAMES[op->cast.old_primitive], PRIMITIVE_NAMES[op->primitive]);
         } break;
 
-        case op_jump: {
-            printf("jump");
-            if (op->jump.conditional) {
-                printf("if ");
-                if (op->jump.negate) {
-                    printf("not ");
-                }
+        case op_cmp: {
+            printf("(%s) cmp ", PRIMITIVE_NAMES[op->primitive]);
+            print_local(context, func, op->cmp.left);
+            printf(", ");
+            print_local(context, func, op->cmp.right);
+        } break;
 
-                if (op->jump.check_flags) {
-                    printf(OP_NAMES[op->jump.flag_condition]);
-                } else {
-                    print_local(context, func, op->jump.local_condition);
-                }
+        case op_jump: {
+            printf("jump ");
+            if (op->jump.conditional) {
+                printf("if %s ", CONDITION_NAMES[op->jump.condition]);
             }
-            printf(" to %u", (u64) op->jump.to_op);
+            printf("to %u", (u64) op->jump.to_op);
+        } break;
+
+        case op_set_bool: {
+            printf("set ");
+            print_local(context, func, op->set_bool.local);
+            printf(" if %s", CONDITION_NAMES[op->set_bool.condition]);
         } break;
 
         case op_load_data: {
@@ -7494,25 +7546,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
 
 
-            Op op = {0};
 
-            switch (expr->binary.op) {
-                case binary_add:  op.kind = op_add;  break;
-                case binary_sub:  op.kind = op_sub;  break;
-                case binary_mul:  op.kind = op_mul;  break;
-                case binary_div:  op.kind = op_div;  break;
-                case binary_mod:  op.kind = op_mod;  break;
-                case binary_neq:  op.kind = op_neq;  break;
-                case binary_eq:   op.kind = op_eq;   break;
-                case binary_gt:   op.kind = op_gt;   break;
-                case binary_gteq: op.kind = op_gteq; break;
-                case binary_lt:   op.kind = op_lt;   break;
-                case binary_lteq: op.kind = op_lteq; break;
-                default: assert(false);
-            }
-
-            op.binary.target = assign_to;
-            op.binary.source = right_local;
 
             switch (expr->binary.op) {
                 case binary_add:
@@ -7521,7 +7555,21 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 case binary_div:
                 case binary_mod:
                 {
+                    Op op = {0};
+
+                    switch (expr->binary.op) {
+                        case binary_add: op.kind = op_add; break;
+                        case binary_sub: op.kind = op_sub; break;
+                        case binary_mul: op.kind = op_mul; break;
+                        case binary_div: op.kind = op_div; break;
+                        case binary_mod: op.kind = op_mod; break;
+                        default: assert(false);
+                    }
+
+                    op.binary.source = right_local;
+                    op.binary.target = assign_to;
                     op.primitive = target_primitive;
+                    buf_push(context->tmp_ops, op);
                 } break;
 
                 case binary_eq:
@@ -7531,18 +7579,33 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 case binary_lt:
                 case binary_lteq:
                 {
-                    // NB for comparative operations, 'op.primitive' should be the type we are comparing, not the
-                    // type we are producing (which always is bool)
                     Type_Kind left_primitive  = primitive_of(expr->binary.left->type);
                     Type_Kind right_primitive = primitive_of(expr->binary.right->type);
                     assert(left_primitive == right_primitive);
-                    op.primitive = left_primitive;
+                    Type_Kind primitive = left_primitive;
+
+                    buf_push(context->tmp_ops, ((Op) {
+                        .kind = op_cmp,
+                        .primitive = primitive,
+                        .cmp = { assign_to, right_local },
+                    }));
+
+                    Condition condition = find_condition_for_op_and_type(expr->binary.op, primitive);
+                    if (primitive_is_signed(primitive)) {
+                    } else {
+                    }
+
+                    buf_push(context->tmp_ops, ((Op) {
+                        .kind = op_set_bool,
+                        .set_bool = {
+                            .condition = condition,
+                            .local = assign_to,
+                        }
+                    }));
                 } break;
 
                 default: assert(false);
             }
-
-            buf_push(context->tmp_ops, op);
 
             if (right_local.kind == local_temporary) {
                 intermediate_deallocate_temporary(context, right_local);
@@ -7864,21 +7927,17 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
 
             buf_push(context->tmp_ops, ((Op) {
-                .kind = op_eq,
+                .kind = op_cmp,
                 .primitive = type_u64,
-                .binary.ignore_result = true,
-                .binary.source = (Local) { local_literal, false, enum_type->enumeration.name_table_entries },
-                .binary.target = enum_local,
+                .cmp.left = enum_local,
+                .cmp.right = (Local) { local_literal, false, enum_type->enumeration.name_table_entries },
             }));
 
             u64 if_jump_op_index = buf_length(context->tmp_ops);
             buf_push(context->tmp_ops, ((Op) {
                 .kind = op_jump,
-                .primitive = type_u64,
                 .jump.conditional = true,
-                .jump.negate = false,
-                .jump.check_flags = true,
-                .jump.flag_condition = op_gteq,
+                .jump.condition = condition_ae,
             }));
 
             buf_push(context->tmp_ops, ((Op) {
@@ -8133,52 +8192,40 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
     }
 }
 
-u64 linearize_conditional_jump(Context* context, Expr* condition) {
+u64 linearize_conditional_jump(Context* context, Expr* condition_expr) {
     u64 if_jump_op_index;
 
-    if (condition->kind == expr_binary) {
-        Op_Kind cmp_op_kind = -1;
-        switch (condition->binary.op) {
-            case binary_eq:   cmp_op_kind = op_eq;   break;
-            case binary_neq:  cmp_op_kind = op_neq;  break;
-            case binary_gt:   cmp_op_kind = op_gt;   break;
-            case binary_gteq: cmp_op_kind = op_gteq; break;
-            case binary_lt:   cmp_op_kind = op_lt;   break;
-            case binary_lteq: cmp_op_kind = op_lteq; break;
-            default: assert(false);
-        }
-
+    if (condition_expr->kind == expr_binary) {
         Local left_local = {0};
-        if (!linearize_expr_to_local(condition->binary.left, &left_local)) {
-            u64 left_size = type_size_of(condition->binary.left->type);
+        if (!linearize_expr_to_local(condition_expr->binary.left, &left_local)) {
+            u64 left_size = type_size_of(condition_expr->binary.left->type);
             left_local = intermediate_allocate_temporary(context, left_size);
-            linearize_expr(context, condition->binary.left, left_local, false);
+            linearize_expr(context, condition_expr->binary.left, left_local, false);
         }
 
         Local right_local = {0};
-        if (!linearize_expr_to_local(condition->binary.right, &right_local)) {
-            u64 right_size = type_size_of(condition->binary.right->type);
+        if (!linearize_expr_to_local(condition_expr->binary.right, &right_local)) {
+            u64 right_size = type_size_of(condition_expr->binary.right->type);
             right_local = intermediate_allocate_temporary(context, right_size);
-            linearize_expr(context, condition->binary.right, right_local, false);
+            linearize_expr(context, condition_expr->binary.right, right_local, false);
         }
 
-        Op cmp_op = {0};
-        cmp_op.kind = cmp_op_kind;
-        cmp_op.primitive = primitive_of(condition->binary.left->type);
-        cmp_op.binary.ignore_result = true; // we just set flags, and move on
-        cmp_op.binary.source = right_local;
-        cmp_op.binary.target = left_local;
-        buf_push(context->tmp_ops, cmp_op);
+        Type_Kind primitive = primitive_of(condition_expr->binary.left->type);
+        Condition condition = find_condition_for_op_and_type(condition_expr->binary.op, primitive);
 
-        Op if_jump_op = {0};
-        if_jump_op.kind = op_jump;
-        if_jump_op.primitive = cmp_op.primitive;
-        if_jump_op.jump.conditional = true;
-        if_jump_op.jump.negate = true;
-        if_jump_op.jump.check_flags = true;
-        if_jump_op.jump.flag_condition = cmp_op_kind;
-        if_jump_op_index = buf_length(context->tmp_ops);
-        buf_push(context->tmp_ops, if_jump_op);
+        buf_push(context->tmp_ops, ((Op) {
+            .kind = op_cmp,
+            .primitive = primitive,
+            .cmp.left = left_local,
+            .cmp.right = right_local,
+        }));
+
+        buf_push(context->tmp_ops, ((Op) {
+            .kind = op_jump,
+            .jump.conditional = true,
+            .jump.condition = condition_not(condition),
+        }));
+        if_jump_op_index = buf_length(context->tmp_ops) - 1;
 
         if (left_local.kind == local_temporary) {
             intermediate_deallocate_temporary(context, left_local);
@@ -8188,15 +8235,21 @@ u64 linearize_conditional_jump(Context* context, Expr* condition) {
         }
     } else {
         Local bool_local = intermediate_allocate_temporary(context, 1);
-        linearize_expr(context, condition, bool_local, false);
+        linearize_expr(context, condition_expr, bool_local, false);
 
-        Op if_jump_op = {0};
-        if_jump_op.kind = op_jump;
-        if_jump_op.jump.conditional = true;
-        if_jump_op.jump.negate = true;
-        if_jump_op.jump.local_condition = bool_local;
-        if_jump_op_index = buf_length(context->tmp_ops);
-        buf_push(context->tmp_ops, if_jump_op);
+        buf_push(context->tmp_ops, ((Op) {
+            .kind = op_cmp,
+            .primitive = type_bool,
+            .cmp.left = bool_local,
+            .cmp.right = (Local) { local_literal, false, 0 },
+        }));
+
+        buf_push(context->tmp_ops, ((Op) {
+            .kind = op_jump,
+            .jump.conditional = true,
+            .jump.condition = condition_e,
+        }));
+        if_jump_op_index = buf_length(context->tmp_ops) - 1;
 
         intermediate_deallocate_temporary(context, bool_local);
     }
@@ -8736,28 +8789,20 @@ void instruction_zero_extend_2_bytes(u8** b, X64_Reg reg, u8 target_bytes) {
     #endif
 }
 
-void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) {
+void instruction_setcc(u8** b, Condition condition, X64_Reg reg) {
     u8 opcode;
-    if (sign) {
-        switch (condition) {
-            case x64_condition_eq:   opcode = 0x94; break;
-            case x64_condition_neq:  opcode = 0x95; break;
-            case x64_condition_gt:   opcode = 0x9f; break;
-            case x64_condition_gteq: opcode = 0x9d; break;
-            case x64_condition_lt:   opcode = 0x9c; break;
-            case x64_condition_lteq: opcode = 0x9e; break;
-            default: assert(false);
-        }
-    } else {
-        switch (condition) {
-            case x64_condition_eq:   opcode = 0x94; break;
-            case x64_condition_neq:  opcode = 0x95; break;
-            case x64_condition_gt:   opcode = 0x97; break;
-            case x64_condition_gteq: opcode = 0x93; break;
-            case x64_condition_lt:   opcode = 0x92; break;
-            case x64_condition_lteq: opcode = 0x96; break;
-            default: assert(false);
-        }
+    switch (condition) {
+        case condition_e:  opcode = 0x94; break;
+        case condition_ne: opcode = 0x95; break;
+        case condition_g:  opcode = 0x9f; break;
+        case condition_ge: opcode = 0x9d; break;
+        case condition_l:  opcode = 0x9c; break;
+        case condition_le: opcode = 0x9e; break;
+        case condition_a:  opcode = 0x97; break;
+        case condition_ae: opcode = 0x93; break;
+        case condition_b:  opcode = 0x92; break;
+        case condition_be: opcode = 0x96; break;
+        default: assert(false);
     }
 
     u8 rex = REX_BASE;
@@ -8775,39 +8820,25 @@ void instruction_setcc(u8** b, X64_Condition condition, bool sign, X64_Reg reg) 
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8* condition_name;
-    if (sign) {
-        condition_name = X64_CONDITION_SIGNED_POSTFIXES[condition];
-    } else {
-        condition_name = X64_CONDITION_UNSIGNED_POSTFIXES[condition];
-    }
-    printf("set%s %s\n", condition_name, reg_names[reg]);
+    printf("set%s %s\n", CONDITION_POSTFIXES[condition], reg_names[reg]);
     #endif
 }
 
 // Returns offset into *b where an i32 should be written
-u64 instruction_jmpcc(u8** b, X64_Condition condition, bool sign) {
+u64 instruction_jmpcc(u8** b, Condition condition) {
     u8 opcode;
-    if (sign) {
-        switch (condition) {
-            case x64_condition_eq:   opcode = 0x84; break;
-            case x64_condition_neq:  opcode = 0x85; break;
-            case x64_condition_gt:   opcode = 0x8f; break;
-            case x64_condition_gteq: opcode = 0x8d; break;
-            case x64_condition_lt:   opcode = 0x8c; break;
-            case x64_condition_lteq: opcode = 0x8e; break;
-            default: assert(false);
-        }
-    } else {
-        switch (condition) {
-            case x64_condition_eq:   opcode = 0x84; break;
-            case x64_condition_neq:  opcode = 0x85; break;
-            case x64_condition_gt:   opcode = 0x87; break;
-            case x64_condition_gteq: opcode = 0x83; break;
-            case x64_condition_lt:   opcode = 0x82; break;
-            case x64_condition_lteq: opcode = 0x86; break;
-            default: assert(false);
-        }
+    switch (condition) {
+        case condition_e:  opcode = 0x84; break;
+        case condition_ne: opcode = 0x85; break;
+        case condition_g:  opcode = 0x8f; break;
+        case condition_ge: opcode = 0x8d; break;
+        case condition_l:  opcode = 0x8c; break;
+        case condition_le: opcode = 0x8e; break;
+        case condition_a:  opcode = 0x87; break;
+        case condition_ae: opcode = 0x83; break;
+        case condition_b:  opcode = 0x82; break;
+        case condition_be: opcode = 0x86; break;
+        default: assert(false);
     }
 
     buf_push(*b, 0x0f);
@@ -8818,13 +8849,7 @@ u64 instruction_jmpcc(u8** b, X64_Condition condition, bool sign) {
     buf_push(*b, 0xde);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8* condition_name;
-    if (sign) {
-        condition_name = X64_CONDITION_SIGNED_POSTFIXES[condition];
-    } else {
-        condition_name = X64_CONDITION_UNSIGNED_POSTFIXES[condition];
-    }
-    printf("jmp%s ??\n", condition_name);
+    printf("j%s ??\n", CONDITION_POSTFIXES[condition]);
     #endif
 
     return buf_length(*b) - sizeof(i32);
@@ -9267,8 +9292,6 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         } break;
 
         case op_set: {
-            assert(!op->binary.ignore_result);
-
             u8 primitive_size = primitive_size_of(op->primitive);
 
             instruction_load_local(context, func, op->binary.source, reg_rax, primitive_size);
@@ -9282,8 +9305,6 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         } break;
 
         case op_address_of: {
-            assert(!op->binary.ignore_result);
-
             // TODO neither of these cases currently ever happens, due to how we generate the intermediate bytecode. Once we start
             // optimizing, this might change though...
             if (op->binary.source.as_reference) unimplemented(); // TODO
@@ -9296,8 +9317,6 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         case op_add:
         case op_sub:
         {
-            assert(!op->binary.ignore_result);
-
             u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) {
@@ -9328,8 +9347,6 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         case op_div:
         case op_mod:
         {
-            assert(!op->binary.ignore_result);
-
             u8 primitive_size = primitive_size_of(op->primitive);
 
             if (op->binary.target.as_reference) unimplemented(); // TODO
@@ -9366,51 +9383,11 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             instruction_mov_mem(context, func, mov_to, op->binary.target, result_reg, primitive_size);
         } break;
 
-        case op_neq:
-        case op_eq:
-        case op_gt:
-        case op_gteq:
-        case op_lt:
-        case op_lteq:
-        {
+        case op_cmp: {
             u8 primitive_size = primitive_size_of(op->primitive);
-
-            if (op->binary.target.kind == local_literal) {
-                assert(!op->binary.target.as_reference);
-                instruction_mov_imm_to_reg(&context->seg_text, op->binary.target.value, reg_rax, primitive_size);
-            } else if (op->binary.target.as_reference) {
-                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rcx, POINTER_SIZE);
-                instruction_mov_pointer(&context->seg_text, mov_from, reg_rcx, reg_rax, primitive_size);
-            } else {
-                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
-            }
-
-            instruction_load_local(context, func, op->binary.source, reg_rdx, primitive_size);
-
+            instruction_load_local(context, func, op->cmp.left,  reg_rax, primitive_size);
+            instruction_load_local(context, func, op->cmp.right, reg_rdx, primitive_size);
             instruction_general_reg_reg(&context->seg_text, instruction_cmp, reg_rax, reg_rdx, primitive_size);
-
-            if (!op->binary.ignore_result) {
-                bool sign = primitive_is_signed(op->primitive); 
-                X64_Condition condition;
-                switch (op->kind) {
-                    case op_eq:   condition = x64_condition_eq;     break;
-                    case op_neq:  condition = x64_condition_neq;    break;
-                    case op_gt:   condition = x64_condition_gt;     break;
-                    case op_gteq: condition = x64_condition_gteq;   break;
-                    case op_lt:   condition = x64_condition_lt;     break;
-                    case op_lteq: condition = x64_condition_lteq;   break;
-                    default: assert(false);
-                }
-
-                instruction_setcc(&context->seg_text, condition, sign, reg_rax);
-
-                if (op->binary.target.as_reference) {
-                    instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
-                } else {
-                    instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, primitive_size);
-                }
-            }
-
         } break;
 
         case op_call: {
@@ -9503,52 +9480,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
         case op_jump: {
             u64 big_jump_text_location;
-
             if (op->jump.conditional) {
-                if (op->jump.check_flags) {
-                    X64_Condition condition;
-                    if (!op->jump.negate) {
-                        switch (op->jump.flag_condition) {
-                            case op_eq:   condition = x64_condition_eq;     break;
-                            case op_neq:  condition = x64_condition_neq;    break;
-                            case op_gt:   condition = x64_condition_gt;     break;
-                            case op_gteq: condition = x64_condition_gteq;   break;
-                            case op_lt:   condition = x64_condition_lt;     break;
-                            case op_lteq: condition = x64_condition_lteq;   break;
-                            default: assert(false);
-                        }
-                    } else {
-                        switch (op->jump.flag_condition) {
-                            case op_eq:   condition = x64_condition_neq;    break;
-                            case op_neq:  condition = x64_condition_eq;     break;
-                            case op_gt:   condition = x64_condition_lteq;   break;
-                            case op_gteq: condition = x64_condition_lt;     break;
-                            case op_lt:   condition = x64_condition_gteq;   break;
-                            case op_lteq: condition = x64_condition_gt;     break;
-                            default: assert(false);
-                        }
-                    }
-
-                    bool is_signed = primitive_is_signed(op->primitive);
-                    big_jump_text_location = instruction_jmpcc(&context->seg_text, condition, is_signed);
-
-                } else {
-                    instruction_load_local(context, func, op->jump.local_condition, reg_rcx, 1);
-                    if (op->jump.negate) {
-                        instruction_xor_reg_imm(&context->seg_text, reg_rcx, 1, 1);
-                    }
-                    instruction_zero_extend_byte(&context->seg_text, reg_rcx, 8);
-
-                    u64 small_jump_text_location = instruction_jmp_rcx_zero(&context->seg_text);
-
-                    u64 small_jump_from = buf_length(context->seg_text);
-                    big_jump_text_location = instruction_jmp_i32(&context->seg_text);
-                    u64 small_jump_to = buf_length(context->seg_text);
-
-                    u8 small_jump_size = small_jump_to - small_jump_from;
-                    assert(small_jump_size < I8_MAX);
-                    context->seg_text[small_jump_text_location] = small_jump_size;
-                }
+                big_jump_text_location = instruction_jmpcc(&context->seg_text, op->jump.condition);
             } else {
                 big_jump_text_location = instruction_jmp_i32(&context->seg_text);
             }
@@ -9556,12 +9489,26 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             // NB The way we currently do 'Jump_Fixup's depends on the jmp being the last instruction
             // generated for the given op (so rip is at the start of the next op afterwards). This could
             // be changed trivially though.
-
             Jump_Fixup fixup = {0};
             fixup.from_op = op_index;
             fixup.to_op = op->jump.to_op;
             fixup.text_location = big_jump_text_location;
             buf_push(context->jump_fixups, fixup);
+        } break;
+
+        case op_set_bool: {
+            u8 primitive_size = primitive_size_of(type_bool);
+
+            instruction_load_local(context, func, op->set_bool.local, reg_rax, primitive_size);
+
+            instruction_setcc(&context->seg_text, op->set_bool.condition, reg_rax);
+
+            if (op->set_bool.local.as_reference) {
+                instruction_mov_mem(context, func, mov_from, op->set_bool.local, reg_rcx, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
+            } else {
+                instruction_mov_mem(context, func, mov_to, op->set_bool.local, reg_rax, primitive_size);
+            }
         } break;
 
         case op_load_data: {
