@@ -6816,7 +6816,7 @@ bool typecheck(Context* context) {
                                     member_size = member_type->structure.size;
                                     member_align = member_type->structure.align;
                                 } else {
-                                    member_size = primitive_size_of(member_type->kind);
+                                    member_size = primitive_size_of(primitive_of(member_type));
                                     member_align = member_size;
                                 }
 

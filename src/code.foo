@@ -407,11 +407,23 @@ fn enum_test() {
         a += 1;
     }
     print("\n");
+
+    let our_map = Map { Direction::SOUTH, Direction::NORTH };
+    print(name_of_enum_member(our_map.looking));
+    print(", ");
+    print(name_of_enum_member(our_map.target));
+    print("\n");
+}
+
+enum Direction (u8) { NORTH, SOUTH, EAST, WEST }
+struct Map {
+    looking, target: Direction;
 }
 
 /*
-specify what primitive to treat enum as internally (fixed to u8 atm)
-size_of, align_of, type_of
+complete type_info_of
+make type_info_of work on values
+size_of, align_of
 slices, make strings slices
 a 'any' type
 uninitialized (zeroed) global variables in .bss
@@ -427,8 +439,7 @@ dont generate jump after return if return is the last stmt
 .pdata and unwind info
 debug info
 growing the stack? __chkstk
-constant evaluation / elimination
+constant folding
 register allocation
-peephole optimizer
-some form of compile-time execution
+peephole optimizer (?)
 */
