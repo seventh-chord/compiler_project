@@ -1785,6 +1785,16 @@ u64 type_size_of(Type* type) {
     return 0;
 }
 
+u32 user_type_name(Type* type) {
+    u32 name;
+    switch (type->kind) {
+        case type_struct: name = type->structure.name; break;
+        case type_enum:   name = type->enumeration.name; break;
+        default: assert(false);
+    }
+    return name;
+}
+ 
 Type_Kind primitive_of(Type* type) {
     if (type->kind == type_enum) {
         return type->enumeration.value_primitive;
@@ -5075,19 +5085,19 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
             }
             t += 1;
 
-            bool duplicate_definition = false;
+            bool redeclaration = false;
             buf_foreach (Global_Var, old_global, context->global_vars) {
                 if (old_global->var.name == name_index) {
                     u8* name_string = string_table_access(context->string_table, name_index);
                     u32 initial_decl_line = old_global->var.declaration_pos.line;
                     print_file_pos(&start_pos);
                     printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name_string, (u64) initial_decl_line);
-                    duplicate_definition = true;
+                    redeclaration = true;
                     break;
                 }
             }
 
-            if (duplicate_definition) {
+            if (redeclaration) {
                 valid = false;
                 break;
             } else {
@@ -5102,24 +5112,40 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
             }
         } break;
 
-        case token_keyword_struct: {
+        case token_keyword_enum:
+        case token_keyword_struct:
+        {
+            File_Pos start_pos = t->pos;
+
             u32 length = 0;
-            Type* type = parse_struct_declaration(context, t, &length);
+            Type* type;
+            switch (t->kind) {
+                case token_keyword_enum:   type = parse_enum_declaration(context, t, &length); break;
+                case token_keyword_struct: type = parse_struct_declaration(context, t, &length); break;
+                default: assert(false);
+            }
             t += length;
 
             if (type == null) {
                 valid = false;
-            } else {
-                buf_push(context->user_types, type);
+                break;
             }
-        } break;
 
-        case token_keyword_enum: {
-            u32 length = 0;
-            Type* type = parse_enum_declaration(context, t, &length);
-            t += length;
+            u32 our_name = user_type_name(type);
 
-            if (type == null) {
+            bool redeclaration = false;
+            buf_foreach(Type*, old_type_pointer, context->user_types) {
+                u32 old_name = user_type_name(*old_type_pointer);
+                if (old_name == our_name) {
+                    redeclaration = true;
+                    break;
+                }
+            }
+
+            if (redeclaration) {
+                u8* our_name_string = string_table_access(context->string_table, our_name);
+                print_file_pos(&start_pos);
+                printf("Duplicate definition of type '%s'\n", our_name_string);
                 valid = false;
             } else {
                 buf_push(context->user_types, type);
