@@ -7152,6 +7152,53 @@ void intermediate_zero_out_var(Context* context, Func* func, u32 var_index) {
     }
 }
 
+bool linearize_expr_to_local(Expr* expr, Local* local) {
+    switch (expr->kind) {
+        case expr_literal: {
+            local->kind = local_literal;
+            local->as_reference = false;
+            local->value = expr->literal.value;
+            return true;
+        } break;
+
+        case expr_variable: {
+            u32 var_index = expr->variable.index;
+
+            if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                local->kind = local_global;
+                local->as_reference = false;
+                local->value = global_index;
+            } else {
+                local->kind = local_variable;
+                local->as_reference = false;
+                local->value = var_index;
+            }
+
+            return true;
+        } break;
+
+        case expr_static_member_access: {
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+
+            Type* type = expr->static_member_access.parent_type;
+            u32 member_index = expr->static_member_access.member_index;
+            assert(type->kind == type_enum);
+
+            u64 member_value = type->enumeration.members[member_index].value;
+
+            local->kind = local_literal;
+            local->as_reference = false;
+            local->value = member_value;
+
+            return true;
+        } break;
+
+        default: {
+            return false;
+        } break;
+    }
+}
 
 void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_address) {
     assert(assign_to.kind != local_literal);
@@ -7789,38 +7836,6 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         default: assert(false);
-    }
-}
-
-bool linearize_expr_to_local(Expr* expr, Local* local) {
-    switch (expr->kind) {
-        case expr_literal: {
-            local->kind = local_literal;
-            local->as_reference = false;
-            local->value = expr->literal.value;
-            return true;
-        } break;
-
-        case expr_variable: {
-            u32 var_index = expr->variable.index;
-
-            if (var_index & VAR_INDEX_GLOBAL_FLAG) {
-                u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
-                local->kind = local_global;
-                local->as_reference = false;
-                local->value = global_index;
-            } else {
-                local->kind = local_variable;
-                local->as_reference = false;
-                local->value = var_index;
-            }
-
-            return true;
-        } break;
-
-        default: {
-            return false;
-        } break;
     }
 }
 
