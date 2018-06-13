@@ -644,6 +644,41 @@ void printf_integer(u64 value, u8 base) {
 
 // IO stuff
 
+u8 *path_get_folder(Arena *arena, u8 *path) {
+    u32 last_separator = 0;
+
+    u8 *p = path;
+    while (*p != 0) {
+        if (*p == '/' || *p == '\\') {
+            last_separator = p - path;
+        }
+        p += 1;
+    }
+
+    u8* new_path = arena_alloc(arena, last_separator + 2);
+    mem_copy(path, new_path, last_separator + 1);
+    new_path[last_separator + 1] = '\0';
+
+    return new_path;
+}
+
+u8 *path_join(Arena *arena, u8 *a, u8 *b) {
+    u64 a_length = str_length(a);
+    u64 b_length = str_length(b);
+    u8 *new_path = arena_alloc(arena, a_length + b_length + 1);
+
+    u64 b_start = a_length;
+    if (a[a_length - 1] != '/' && a[a_length - 1] != '\\') {
+        new_path[b_start] = '/';
+        b_start += 1;
+    }
+
+    mem_copy(a, new_path, a_length);
+    mem_copy(b, new_path + b_start, b_length + 1);
+
+    return new_path;
+}
+
 typedef enum IO_Result {
     io_ok = 0,
 
@@ -683,7 +718,8 @@ IO_Result read_entire_file(u8* file_name, u8** contents, u32* length) {
     if (file == INVALID_HANDLE_VALUE) {
         u32 error_code = GetLastError();
         switch (error_code) {
-            case 2:  return io_not_found;
+            case 2:  return io_not_found; // File not found
+            case 3:  return io_not_found; // Path not found
             default: return io_error;
         }
     }
@@ -1505,12 +1541,13 @@ typedef struct Import_Index {
 } Import_Index;
 
 typedef struct Library_Import {
-    // names are string table indices
-    u32 lib_name; // c-str
-    // TODO make this a hashtable (?)
-    u32* function_names; // stretchy-buffer
+    // most names are string table indices
 
-    // We find these in 'parse_library'
+    u8* importing_source_file;
+    u32 lib_name;
+    u32* function_names; // stretchy-buffer TODO make this a hashtable (?)
+
+    // Set in  'parse_library'
     u8* dll_name;
     u32* function_hints;
 } Library_Import;
@@ -2019,7 +2056,7 @@ void add_on_scope_exit(Context* context, On_Scope_Exit* new) {
 
 // NB This currently just assumes we are trying to import a function. In the future we might want to support importing
 // other items, though we probably want to find an example of that first, so we know what we are doing!
-Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
+Import_Index add_import(Context* context, u8* source_path, u32 library_name, u32 function_name) {
     Import_Index index = {0};
 
     Library_Import* import = null;
@@ -2035,6 +2072,7 @@ Import_Index add_import(Context* context, u32 library_name, u32 function_name) {
 
         Library_Import new = {0};
         new.lib_name = library_name;
+        new.importing_source_file = source_path;
         buf_push(context->imports, new);
 
         import = buf_end(context->imports) - 1;
@@ -4521,7 +4559,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     }
 }
 
-bool parse_extern(Context* context, Token* t, u32* length) {
+bool parse_extern(Context* context, u8* source_path, Token* t, u32* length) {
     assert(t->kind == token_keyword_extern);
 
     Token* start = t;
@@ -4577,7 +4615,7 @@ bool parse_extern(Context* context, Token* t, u32* length) {
                     printf("Function '%s' has a body, but functions inside 'extern' blocks can't have bodies\n", name);
                     valid = false;
                 } else {
-                    Import_Index import_index = add_import(context, library_name_index, func->name);
+                    Import_Index import_index = add_import(context, source_path, library_name_index, func->name);
                     func->import_info.index = import_index;
                 }
 
@@ -5170,7 +5208,7 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
 
         case token_keyword_extern: {
             u32 length = 0;
-            valid &= parse_extern(context, t, &length);
+            valid &= parse_extern(context, file_name, t, &length);
             t += length;
         } break;
 
@@ -5926,9 +5964,9 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
             if (invalid == 2) {
                 print_file_pos(&expr->pos);
-                printf("Invalid cast. Can't cast from a ");
+                printf("Invalid cast. Can't cast from ");
                 print_type(info->context, expr->cast_from->type);
-                printf(" to a ");
+                printf(" to ");
                 print_type(info->context, expr->type);
                 printf("\n");
                 return false;
@@ -8558,7 +8596,7 @@ void build_intermediate(Context* context) {
         buf_clear(context->tmp_ops);
         buf_clear(context->tmp_tmps);
 
-        #if 0
+        #if 1
         u8* name = string_table_access(context->string_table, func->name);
         printf("%s has %u operations:\n", name, (u64) func->body.op_count);
         for (u32 i = 0; i < func->body.op_count; i += 1) {
@@ -10105,24 +10143,36 @@ bool read_archive_member_header(
 }
 
 bool parse_library(Context* context, Library_Import* import) {
-    // TODO how do we actually find libraries? Windows has some paths where it stuffs these. Otherwise we should look in
-    // the working directory, I guess.
     u8* raw_lib_name = string_table_access(context->string_table, import->lib_name);
-    u8* path;
-    if (str_cmp(raw_lib_name, "kernel32.lib")) {
-        path = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64/kernel32.lib";
-    } else {
-        unimplemented();
-    }
+    u8* source_path = import->importing_source_file;
+    u8* source_folder = path_get_folder(&context->arena, source_path);
+    u8* path = path_join(&context->arena, source_folder, raw_lib_name);
 
     u8* file;
     u32 file_length;
 
-    IO_Result read_result = read_entire_file(path, &file, &file_length);
+    IO_Result read_result;
+
+    read_result = read_entire_file(path, &file, &file_length);
+    if (read_result == io_not_found) {
+        // We can't find the library on the current path. Try looking for it in system library paths
+        // We currently special case kernel32.lib, and ignore other system libraries
+        // TODO TODO TODO This is a really big hack
+        // TODO TODO TODO This is a really big hack
+        // TODO TODO TODO This is a really big hack
+        // TODO TODO TODO This is a really big hack
+
+        if (str_cmp(raw_lib_name, "kernel32.lib")) {
+            path = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64/kernel32.lib";
+            read_result = read_entire_file(path, &file, &file_length);
+        }
+    }
+
     if (read_result != io_ok) {
         printf("Couldn't open \"%s\": %s\n", path, io_result_message(read_result));
         return false;
     }
+
 
     if (file_length < 8 || !mem_cmp(file, "!<arch>\n", 8)) goto invalid;
 
@@ -10132,11 +10182,9 @@ bool parse_library(Context* context, Library_Import* import) {
     u8* symbol_data;
     u32 symbol_data_length;
 
-    if (
-        !read_archive_member_header(&cursor, &cursor_length, null, null) ||
-        !read_archive_member_header(&cursor, &cursor_length, &symbol_data, &symbol_data_length) ||
-        !read_archive_member_header(&cursor, &cursor_length, null, null)
-    ) goto invalid;
+    if (!read_archive_member_header(&cursor, &cursor_length, null, null)) goto invalid;
+    if (!read_archive_member_header(&cursor, &cursor_length, &symbol_data, &symbol_data_length)) goto invalid;
+    if (!read_archive_member_header(&cursor, &cursor_length, null, null)) goto invalid;
 
     if (symbol_data_length < 4) goto invalid;
     u32 archive_member_count = *((u32*) symbol_data);
@@ -10172,10 +10220,10 @@ bool parse_library(Context* context, Library_Import* import) {
         u32 symbol_name_length = i - start_i;
         i += 1;
 
-        u16 index = symbol_indices[s];
+        u16 index = symbol_indices[s] - 1;
         s += 1;
 
-        if (index > archive_member_count) goto invalid;
+        if (index >= archive_member_count) goto invalid;
         u32 archive_member_offset = archive_member_offsets[index];
 
         if (file_length - sizeof(Archive_Member_Header) - sizeof(Import_Header) < archive_member_offset) goto invalid;
@@ -10674,7 +10722,8 @@ void compile_and_run(u8* source_path, u8* exe_path) {
 void main() {
     i64 start_time = perf_time();
 
-    compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
+    //compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
+    compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe");
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);

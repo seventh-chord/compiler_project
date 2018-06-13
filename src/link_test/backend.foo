@@ -1,0 +1,48 @@
+
+extern "build/frontend.lib" {
+    fn my_add(a, b: u32) -> u32;
+}
+
+extern "kernel32.lib" {
+    fn ExitProcess(exit_code: u32);
+    fn GetStdHandle(key: u32) -> u64;
+    fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+}
+
+fn c_string_length(string: *u8) -> u64 {
+    let length: u64 = 0;
+    for (*string != 0) {
+        length += 1;
+        string = 1 + string;
+    }
+    return length;
+}
+
+let stdout_handle = GetStdHandle(u32(-11));
+fn print(string: *u8) {
+    let length: u64 = c_string_length(string);
+    let written: u32;
+    WriteFile(stdout_handle, string, u32(length), &written, null);
+}
+
+fn print_int(int: u32) {
+    let buffer: [20]u8;
+    let i: u64 = 18;
+
+    for (int > 0) {
+        buffer[i] = u8(0x30 + (int % 10));
+        int = int / 10;
+        i -= 1;
+    }
+
+    print(&buffer[i + 1]);
+}
+
+fn main() {
+    let sum = my_add(9, 3);
+
+    print_int(sum);
+    print(" <-- Hello world!\n");
+
+    ExitProcess(0);
+}
