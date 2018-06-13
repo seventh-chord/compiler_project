@@ -8590,7 +8590,7 @@ void build_intermediate(Context* context) {
         buf_clear(context->tmp_ops);
         buf_clear(context->tmp_tmps);
 
-        #if 1
+        #if 0
         u8* name = string_table_access(context->string_table, func->name);
         printf("%s has %u operations:\n", name, (u64) func->body.op_count);
         for (u32 i = 0; i < func->body.op_count; i += 1) {
@@ -10149,17 +10149,14 @@ bool parse_library(Context* context, Library_Import* import) {
 
     read_result = read_entire_file(path, &file, &file_length);
     if (read_result == io_not_found) {
-        // We can't find the library on the current path. Try looking for it in system library paths
-        // We currently special case kernel32.lib, and ignore other system libraries
-        // TODO TODO TODO This is a really big hack
-        // TODO TODO TODO This is a really big hack
-        // TODO TODO TODO This is a really big hack
-        // TODO TODO TODO This is a really big hack
+        // TODO TODO TODO This is a really big hack. We should check %LIB%
+        // TODO TODO TODO This is a really big hack. We should check %LIB%
+        // TODO TODO TODO This is a really big hack. We should check %LIB%
+        // TODO TODO TODO This is a really big hack. We should check %LIB%
 
-        if (str_cmp(raw_lib_name, "kernel32.lib")) {
-            path = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64/kernel32.lib";
-            read_result = read_entire_file(path, &file, &file_length);
-        }
+        u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64";
+        path = path_join(&context->arena, system_lib_folder, raw_lib_name);
+        read_result = read_entire_file(path, &file, &file_length);
     }
 
     if (read_result != io_ok) {
@@ -10717,7 +10714,8 @@ void main() {
     i64 start_time = perf_time();
 
     //compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
-    compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe");
+    //compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe");
+    compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe");
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);

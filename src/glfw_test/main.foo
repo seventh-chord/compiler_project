@@ -1,0 +1,80 @@
+
+// These are typedefs in C, their content is hidden from us...
+struct GLFW_Monitor {}
+struct GLFW_Share {}
+struct GLFW_Window {}
+
+extern "glfw3dll.lib" {
+    fn glfwInit() -> i32;
+    fn glfwCreateWindow(width, height: i32, title: *u8, monitor: *GLFW_Monitor, share: *GLFW_Share) -> *GLFW_Window;
+    fn glfwTerminate();
+    fn glfwMakeContextCurrent(window: *GLFW_Window);
+    fn glfwWindowShouldClose(window: *GLFW_Window) -> i32;
+    fn glfwSwapBuffers(window: *GLFW_Window);
+    fn glfwPollEvents();
+}
+
+let GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
+
+extern "opengl32.lib" {
+    fn glClear(mask: u32);
+    //fn glClearColor(r, g, b, a: f32);
+}
+
+extern "kernel32.lib" {
+    fn ExitProcess(exit_code: u32);
+    fn GetStdHandle(key: u32) -> u64;
+    fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+}
+
+fn c_string_length(string: *u8) -> u64 {
+    let length: u64 = 0;
+    for (*string != 0) {
+        length += 1;
+        string = 1 + string;
+    }
+    return length;
+}
+
+let stdout_handle = GetStdHandle(u32(-11));
+fn print(string: *u8) {
+    let length: u64 = c_string_length(string);
+    let written: u32;
+    WriteFile(stdout_handle, string, u32(length), &written, null);
+}
+
+fn print_int(int: u32) {
+    let buffer: [20]u8;
+    let i: u64 = 19;
+
+    for (int > 0) {
+        i -= 1;
+        buffer[i] = u8(0x30 + (int % 10));
+        int = int / 10;
+    }
+
+    print(&buffer[i]);
+}
+
+fn main() {
+    glfwInit();
+
+    let window = glfwCreateWindow(640, 480, "My window", null, null);
+    if (window == null) {
+        glfwTerminate();
+        ExitProcess(0);
+    }
+
+    glfwMakeContextCurrent(window);
+
+    for (glfwWindowShouldClose(window) == 0) {
+        //glClearColor(1.0, 0.0, 1.0, 1.0);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+    }
+
+    glfwTerminate();
+    ExitProcess(0);
+}
