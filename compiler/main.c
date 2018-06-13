@@ -11,6 +11,8 @@
 #define u32 unsigned __int32
 #define i64 __int64
 #define u64 unsigned __int64
+#define f32 float
+#define f64 double
 
 #define U8_MAX 0xff
 #define U16_MAX 0xffff
@@ -26,6 +28,8 @@
 
 #define max(a, b)  ((a) > (b)? (a) : (b))
 #define min(a, b)  ((a) > (b)? (b) : (a))
+
+int _fltused; // To make floating point work without the c runtime
 
 #include <stdarg.h>
 #include "winapi.h" // our substitute for windows.h
@@ -496,6 +500,7 @@ void printf_flush() {
     #ifdef DEBUG
     buf_push(printf_buf, '\0');
     OutputDebugStringA(printf_buf);
+    buf_pop(printf_buf);
     #endif
 
     print(printf_buf, buf_length(printf_buf));
@@ -574,6 +579,15 @@ void printf(u8* string, ...) {
                         }
                     }
 
+                } break;
+
+                case 'f': {
+                    f64 value = va_arg(args, f64);
+                    u64 bits = *((u64*) &value);
+
+                    buf_push(printf_buf, '0');
+                    buf_push(printf_buf, 'x');
+                    printf_integer(bits, 16);
                 } break;
 
                 case 'x': {
@@ -832,7 +846,8 @@ typedef struct Token {
         token_sub_assign, // "-="
 
         token_identifier,
-        token_literal,
+        token_literal_int,
+        token_literal_float,
         token_string,
 
         token_keyword_fn,
@@ -857,7 +872,8 @@ typedef struct Token {
     union {
         u32 identifier_string_table_index;
 
-        u64 literal_value;
+        u64 literal_int;
+        f64 literal_float;
 
         struct {
             u8* bytes; // null-terminated
@@ -872,7 +888,8 @@ typedef struct Token {
 
 u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [token_identifier] = null,
-    [token_literal] = null,
+    [token_literal_int] = null,
+    [token_literal_float] = null,
     [token_string] = null,
 
     [token_end_of_stream]        = "end of file",
@@ -957,34 +974,46 @@ typedef enum Type_Kind {
     type_i32 = 10,
     type_i64 = 11,
 
-    type_pointer = 12,
-    type_array = 13,
-    type_unresolved_name = 14,
-    type_struct = 15,
-    type_enum = 16,
+    type_unsolidified_float = 12,
+    type_f32 = 13,
+    type_f64 = 14,
 
-    TYPE_KIND_COUNT = 17,
+    type_pointer = 15,
+    type_array = 16,
+    type_unresolved_name = 17,
+    type_struct = 18,
+    type_enum = 19,
+
+    TYPE_KIND_COUNT = 20,
 } Type_Kind;
 
 enum { POINTER_SIZE = 8 };
-Type_Kind DEFAULT_INTEGER_TYPE = type_u64; // TODO make this type_i64
+Type_Kind DEFAULT_INT_TYPE = type_u64; // TODO make this type_i64
+Type_Kind DEFAULT_FLOAT_TYPE   = type_f32;
 
 u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
-    [type_void]             = "void",
-    [type_bool]             = "bool",
-    [type_u8]               = "u8",
-    [type_u16]              = "u16",
-    [type_u32]              = "u32",
-    [type_u64]              = "u64",
-    [type_i8]               = "i8",
-    [type_i16]              = "i16",
-    [type_i32]              = "i32",
-    [type_i64]              = "i64",
+    [type_void] = "void",
+    [type_bool] = "bool",
+
+    [type_u8]  = "u8",
+    [type_u16] = "u16",
+    [type_u32] = "u32",
+    [type_u64] = "u64",
+    [type_i8]  = "i8",
+    [type_i16] = "i16",
+    [type_i32] = "i32",
+    [type_i64] = "i64",
+
+    [type_f32] = "f32",
+    [type_f64] = "f64",
+
+    [type_unsolidified_float] = "<float>",
+    [type_unsolidified_int]   = "<int>",
 
     [type_invalid]          = "<invalid>",
-    [type_unsolidified_int] = "<int>",
     [type_pointer]          = "<pointer>",
     [type_array]            = "<array>",
+
     [type_unresolved_name]  = "<unresolved>",
     [type_struct]           = "<struct>",
     [type_enum]             = "<enum>",
@@ -1197,6 +1226,7 @@ struct Expr { // 'typedef'd earlier!
                 expr_literal_integer,
                 expr_literal_pointer,
                 expr_literal_bool,
+                expr_literal_float, // 'value' is the bitpattern of a 'f64'
             } kind;
         } literal;
 
@@ -1748,6 +1778,9 @@ void init_primitive_types(Context* context) {
     init_primitive(type_i16);
     init_primitive(type_i32);
     init_primitive(type_i64);
+    init_primitive(type_unsolidified_float);
+    init_primitive(type_f32);
+    init_primitive(type_f64);
 
     #undef init_primitives
 
@@ -1856,6 +1889,7 @@ u8 primitive_size_of(Type_Kind primitive) {
         case type_bool: return 1;
         case type_void: return 0;
         case type_unsolidified_int: assert(false); return 0;
+        case type_unsolidified_float: assert(false); return 0;
         case type_u8:  return 1;
         case type_u16: return 2;
         case type_u32: return 4;
@@ -1864,6 +1898,8 @@ u8 primitive_size_of(Type_Kind primitive) {
         case type_i16: return 2;
         case type_i32: return 4;
         case type_i64: return 8;
+        case type_f32: return 4;
+        case type_f64: return 8;
         case type_pointer: return POINTER_SIZE;
         case type_invalid: assert(false); return 0;
         case type_array: assert(false); return 0;
@@ -1949,12 +1985,15 @@ bool primitive_is_compound(Type_Kind primitive) {
         case type_i16: return false;
         case type_i32: return false;
         case type_i64: return false;
+        case type_f32: return false;
+        case type_f64: return false;
         case type_bool: return false;
         case type_void: return false;
         case type_enum: return false;
         case type_pointer: return false;
         case type_invalid: assert(false); return false;
         case type_unsolidified_int: return false;
+        case type_unsolidified_float: return false;
         case type_unresolved_name: assert(false); return false;
 
         default: assert(false); return false;
@@ -1963,73 +2002,31 @@ bool primitive_is_compound(Type_Kind primitive) {
 
 bool primitive_is_integer(Type_Kind primitive) {
     switch (primitive) {
-        case type_void:
-        case type_pointer:
-        case type_array:
-        case type_struct:
-        case type_enum:
-        case type_bool:
-        case type_unsolidified_int:
-        case type_unresolved_name:
-        case type_invalid:
-        {
-            return false;
-        } break;
-
-        case type_u8:
-        case type_u16:
-        case type_u32:
-        case type_u64:
-        case type_i8:
-        case type_i16:
-        case type_i32:
-        case type_i64:
-        {
+        case type_u8: case type_u16: case type_u32: case type_u64:
+        case type_i8: case type_i16: case type_i32: case type_i64:
             return true;
-        } break;
+        default: return false;
+    }
+}
 
-        default: {
-            assert(false);
-            return false;
-        } break;
+bool primitive_is_float(Type_Kind primitive) {
+    switch (primitive) {
+        case type_f32: case type_f64: return true;
+        default: return false;
     }
 }
 
 bool primitive_is_signed(Type_Kind primitive) {
     switch (primitive) {
-        case type_void:
-        case type_pointer:
-        case type_array:
-        case type_struct:
-        case type_enum:
-        case type_unsolidified_int:
-        case type_bool:
-        {
-            return false;
-        } break;
+        case type_i8: case type_i16: case type_i32: case type_i64: return true;
+        default: return false;
+    }
+}
 
-        case type_u8:
-        case type_u16:
-        case type_u32:
-        case type_u64:
-        {
-            return false;
-        } break;
-
-        case type_i8:
-        case type_i16:
-        case type_i32:
-        case type_i64:
-        {
-            return true;
-        } break;
-
-        case type_invalid:
-        default:
-        {
-            assert(false);
-            return false;
-        } break;
+bool primitive_is_unsolidified(Type_Kind primitive) {
+    switch (primitive) {
+        case type_unsolidified_int: case type_unsolidified_float: return true;
+        default: return false;
     }
 }
 
@@ -2161,13 +2158,12 @@ void print_token(u8* string_table, Token* t) {
             u32 index = t->identifier_string_table_index;
             printf("'%s'", string_table_access(string_table, index));
         } break;
-
-        case token_literal: {
-            printf("%u", t->literal_value);
-        } break;
         case token_string: {
             printf("\"%z\"", t->string.length, t->string.bytes);
         } break;
+
+        case token_literal_int:   printf("%u", t->literal_int); break;
+        case token_literal_float: printf("%f", t->literal_float); break;
 
         default: {
             printf(TOKEN_NAMES[t->kind]);
@@ -2630,6 +2626,37 @@ bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
     }
 }
 
+f64 parse_f64(u8* string, u64 length) {
+    if (length == 0) return 0.0;
+
+    f64 value = 0.0;
+    u64 i = 0;
+
+    for (; i < length; i += 1) {
+        u8 digit = string[i] - '0';
+        if (!(digit >= 0 && digit <= 9)) break;
+
+        value *= 10.0;
+        value += (f64) digit;
+    }
+
+    if (i < length && string[i] == '.') {
+        i += 1;
+
+        f64 power = 10.0;
+        for (; i < length; i += 1) {
+            u8 digit = string[i] - '0';
+            if (!(digit >= 0 && digit <= 9)) break;
+            value += ((f64) digit) / power;
+            power *= 10.0;
+        }
+    }
+
+    assert(i == length);
+
+    return value;
+}
+
 Type* parse_primitive_name(Context* context, u32 name_index) {
     for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
         Type* type = &context->primitive_types[i];
@@ -2708,7 +2735,7 @@ Type* parse_type(Context* context, Token* t, u32* length) {
             case token_bracket_square_open: {
                 t += 1;
 
-                if (t->kind != token_literal) {
+                if (t->kind != token_literal_int) {
                     print_file_pos(&t->pos);
                     printf("Expected array size, but got ");
                     print_token(context->string_table, t);
@@ -2716,7 +2743,7 @@ Type* parse_type(Context* context, Token* t, u32* length) {
                     *length = t - t_start;
                     return null;
                 }
-                u64 array_length = t->literal_value;
+                u64 array_length = t->literal_int;
                 t += 1;
 
                 if (!expect_single_token(context, t, token_bracket_square_close, "after array size")) {
@@ -2974,7 +3001,7 @@ Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
         if (t->kind == token_assign) {
             t += 1;
 
-            if (t->kind != token_literal) {
+            if (t->kind != token_literal_int) {
                 print_file_pos(&t->pos);
                 printf("Expected literal value, but got ");
                 print_token(context->string_table, t);
@@ -2983,7 +3010,7 @@ Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
                 return null;
             }
 
-            next->value = t->literal_value;
+            next->value = t->literal_int;
             t += 1;
         } else {
             next->value = next_value;
@@ -3283,7 +3310,8 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expect_value = false;
                 } break;
 
-                case token_literal:
+                case token_literal_int:
+                case token_literal_float:
                 case token_keyword_null:
                 case token_keyword_true:
                 case token_keyword_false:
@@ -3295,22 +3323,31 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                     expr->pos = t->pos;
 
                     switch (t->kind) {
-                        case token_literal: {
-                            expr->literal.value = t->literal_value;
+                        case token_literal_int: {
+                            expr->literal.value = t->literal_int;
                             expr->literal.kind = expr_literal_integer;
                         } break;
+
+                        case token_literal_float: {
+                            expr->literal.value = *((u64*) &t->literal_float);
+                            expr->literal.kind = expr_literal_float;
+                        } break;
+
                         case token_keyword_null: {
                             expr->literal.value = 0;
                             expr->literal.kind = expr_literal_pointer;
                         } break;
+
                         case token_keyword_false: {
                             expr->literal.value = 0;
                             expr->literal.kind = expr_literal_bool;
                         } break;
+
                         case token_keyword_true: {
                             expr->literal.value = 1;
                             expr->literal.kind = expr_literal_bool;
                         } break;
+
                         default: assert(false);
                     }
 
@@ -4748,6 +4785,7 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
             u32 first = i;
             u32 last = i;
             bool overflow = false;
+            bool floating_point = false;
             
             u64 value = 0;
 
@@ -4797,8 +4835,12 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                             if (value < previous_value) {
                                 overflow = true;
                             }
-
                         } break;
+
+                        case '.': {
+                            floating_point = true;
+                        } break;
+
                         default: goto done_with_literal;
                     }
                 }
@@ -4809,12 +4851,26 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
             if (overflow) {
                 print_file_pos(&file_pos);
                 printf(
-                    "Integer literal %z is to large. Wrapped around to %u\n",
+                    "Literal %z is to large. Wrapped around to %u\n",
                     (u64) (last - first + 1), &file[first], value
                 );
             }
 
-            buf_push(tokens, ((Token) { token_literal, .literal_value = value, .pos = file_pos }));
+            if (floating_point) {
+                f64 float_value = parse_f64(&file[first], last - first + 1);
+
+                buf_push(tokens, ((Token) {
+                    .kind = token_literal_float,
+                    .literal_float = float_value,
+                    .pos = file_pos
+                }));
+            } else {
+                buf_push(tokens, ((Token) {
+                    .kind = token_literal_int,
+                    .literal_int = value,
+                    .pos = file_pos
+                }));
+            }
         } break;
 
         case '+': case '-': case '*': case '/': case '%':
@@ -5470,27 +5526,29 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
 bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
     switch (expr->kind) {
         case expr_literal: {
-            Type_Kind solidify_to_primitive = primitive_of(solidify_to);
-
             switch (expr->literal.kind) {
                 case expr_literal_integer: {
-                    if (solidify_to_primitive == type_pointer) {
-                        // This case handles pointer-integer addition/subtraction
-                        solidify_to_primitive = type_u64;
-                        solidify_to = &info->context->primitive_types[solidify_to_primitive];
+                    if (solidify_to == null) {
+                        expr->type = &info->context->primitive_types[type_unsolidified_int];
+                        return true;
                     }
 
-                    if (primitive_is_integer(solidify_to_primitive)) {
+                    if (solidify_to->kind == type_pointer) {
+                        // This case handles pointer-integer addition/subtraction
+                        solidify_to = &info->context->primitive_types[type_u64];
+                    }
+
+                    if (primitive_is_integer(solidify_to->kind)) {
                         expr->type = solidify_to;
 
-                        u64 mask = size_mask(primitive_size_of(solidify_to_primitive));
+                        u64 mask = size_mask(primitive_size_of(solidify_to->kind));
                         u64 value = expr->literal.value;
 
                         if (value != (value & mask)) {
                             print_file_pos(&expr->pos);
                             printf(
                                 "Warning: Literal %u won't fit fully into a %s and will be masked!\n",
-                                (u64) value, PRIMITIVE_NAMES[solidify_to_primitive]
+                                (u64) value, PRIMITIVE_NAMES[solidify_to->kind]
                             );
                         }
 
@@ -5500,8 +5558,25 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     }
                 } break;
 
+                case expr_literal_float: {
+                    if (solidify_to == null) {
+                        expr->type = &info->context->primitive_types[type_unsolidified_float];
+                        return true;
+                    }
+
+                    if (primitive_is_float(solidify_to->kind)) {
+                        expr->type = solidify_to;
+
+                        u64 mask = size_mask(primitive_size_of(solidify_to->kind));
+                        u64 value = expr->literal.value;
+                        expr->literal.value &= mask;
+                    } else {
+                        expr->type = &info->context->primitive_types[type_unsolidified_float];
+                    }
+                } break;
+
                 case expr_literal_pointer: {
-                    if (solidify_to_primitive == type_pointer) {
+                    if (solidify_to != null && solidify_to->kind == type_pointer) {
                         expr->type = solidify_to;
                     } else {
                         expr->type = info->context->void_pointer_type;
@@ -5524,7 +5599,13 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
         case expr_compound: {
             if (expr->type == null) {
-                expr->type = solidify_to;
+                if (solidify_to == null) {
+                    print_file_pos(&expr->pos);
+                    printf("No type given for compound literal\n");
+                    return false;
+                } else {
+                    expr->type = solidify_to;
+                }
             }
             
             if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
@@ -5773,27 +5854,39 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 case binary_lteq:
                 {
                     is_comparasion = true;
-                    solidify_to = &info->context->primitive_types[DEFAULT_INTEGER_TYPE];
                 } break;
             }
 
             if (!typecheck_expr(info, expr->binary.left, solidify_to))  return false;
             if (!typecheck_expr(info, expr->binary.right, solidify_to)) return false;
 
-            assert(expr->binary.left->type->kind  != type_unsolidified_int);
-            assert(expr->binary.right->type->kind != type_unsolidified_int);
+            bool left_weak  = primitive_is_unsolidified(expr->binary.left->type->kind);
+            bool right_weak = primitive_is_unsolidified(expr->binary.right->type->kind);
+            if (!left_weak && right_weak) {
+                assert(typecheck_expr(info, expr->binary.right, expr->binary.left->type));
+            }
+            if (!right_weak && left_weak) {
+                assert(typecheck_expr(info, expr->binary.left, expr->binary.right->type));
+            }
 
-            // We take one shot at matching the types to each other by changing what we try solidifying to
-            if (expr->binary.left->type != expr->binary.right->type) {
+            if (expr->binary.left->type != expr->binary.right->type && solidify_to != null) {
                 bool left_strong  = expr->binary.left->type  != solidify_to;
                 bool right_strong = expr->binary.right->type != solidify_to;
-
+ 
                 if (left_strong) {
                     assert(typecheck_expr(info, expr->binary.right, expr->binary.left->type));
                 } else if (right_strong) {
                     assert(typecheck_expr(info, expr->binary.left, expr->binary.right->type));
                 }
             }
+
+            left_weak  = primitive_is_unsolidified(expr->binary.left->type->kind);
+            right_weak = primitive_is_unsolidified(expr->binary.right->type->kind);
+            if (left_weak && right_weak) {
+                expr->type = expr->binary.left->type;
+                return true;
+            }
+
 
             expr->type = null;
 
@@ -5941,6 +6034,16 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
             if (primitive == type_pointer || primitive == type_enum || primitive_is_integer(primitive)) {
                 if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
 
+                if (primitive_is_unsolidified(expr->cast_from->type->kind)) {
+                    Type* strong_type;
+                    switch (expr->cast_from->type->kind) {
+                        case type_unsolidified_int:   strong_type = &info->context->primitive_types[DEFAULT_INT_TYPE]; break;
+                        case type_unsolidified_float: strong_type = &info->context->primitive_types[DEFAULT_FLOAT_TYPE]; break;
+                        default: assert(false);
+                    }
+                    assert(typecheck_expr(info, expr->cast_from, strong_type));
+                }
+
                 Type_Kind from_primitive = expr->cast_from->type->kind;
 
                 bool to_int_or_enum = primitive == type_enum || primitive_is_integer(primitive);
@@ -5982,27 +6085,21 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
         } break;
 
         case expr_unary: {
-            Type* inner_solidify_to = &info->context->primitive_types[type_invalid];
+            if (solidify_to != null) {
+                switch (expr->unary.op) {
+                    case unary_dereference: {
+                        solidify_to = get_pointer_type(info->context, solidify_to);
+                    } break;
 
-            switch (expr->unary.op) {
-                case unary_not: case unary_neg: {
-                    inner_solidify_to = solidify_to;
-                } break;
-
-                case unary_dereference: {
-                    inner_solidify_to = get_pointer_type(info->context, inner_solidify_to);
-                } break;
-
-                case unary_address_of: {
-                    if (inner_solidify_to->kind == type_pointer) {
-                        inner_solidify_to = inner_solidify_to->pointer_to;
-                    }
-                } break;
-
-                default: assert(false);
+                    case unary_address_of: {
+                        if (solidify_to->kind == type_pointer) {
+                            solidify_to = solidify_to->pointer_to;
+                        }
+                    } break;
+                }
             }
 
-            if (!typecheck_expr(info, expr->unary.inner, inner_solidify_to)) {
+            if (!typecheck_expr(info, expr->unary.inner, solidify_to)) {
                 return false;
             }
 
@@ -6303,32 +6400,39 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             Var* var = &info->func->body.vars[var_index];
             Expr* right = stmt->declaration.right;
 
-            assert(var->type != null || stmt->declaration.right != null);
-
             bool bad_types = false;
 
             if (right != null) {
-                Type* solidify_to;
-                if (var->type == null) {
-                    solidify_to = &info->context->primitive_types[DEFAULT_INTEGER_TYPE];
-                } else {
-                    solidify_to = var->type;
-                }
+                bad_types = true;
 
-                if (!typecheck_expr(info, right, solidify_to)) {
-                    bad_types = true;
-                } else if (var->type != null && !type_can_assign(info->context, var->type, right->type)) {
-                    print_file_pos(&stmt->pos);
-                    printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                    print_type(info->context, var->type);
-                    printf(" but got ");
-                    print_type(info->context, right->type);
-                    printf("\n");
-                    bad_types = true;
-                }
+                if (typecheck_expr(info, right, var->type)) {
+                    if (primitive_is_unsolidified(right->type->kind)) {
+                        Type* strong_type;
+                        switch (right->type->kind) {
+                            case type_unsolidified_int:   strong_type = &info->context->primitive_types[DEFAULT_INT_TYPE]; break;
+                            case type_unsolidified_float: strong_type = &info->context->primitive_types[DEFAULT_FLOAT_TYPE]; break;
+                            default: assert(false);
+                        }
+                        assert(typecheck_expr(info, right, strong_type));
+                    }
 
-                if (var->type == null) {
-                    var->type = right->type;
+                    assert(!primitive_is_unsolidified(right->type->kind));
+
+                    if (var->type == null) {
+                        var->type = right->type;
+                        bad_types = false;
+                    } else {
+                        if (!type_can_assign(info->context, var->type, right->type)) {
+                            print_file_pos(&stmt->pos);
+                            printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                            print_type(info->context, var->type);
+                            printf(" but got ");
+                            print_type(info->context, right->type);
+                            printf("\n");
+                        } else {
+                            bad_types = false;
+                        }
+                    }
                 }
             } else {
                 assert(var->type != null);
@@ -7078,14 +7182,21 @@ bool typecheck(Context* context) {
         }
 
         if (global->initial_expr != null) {
-            Type* solidify_to;
-            if (global->var.type == null) {
-                solidify_to = &context->primitive_types[DEFAULT_INTEGER_TYPE];
-            } else {
-                solidify_to = global->var.type;
-            }
+            resolved_type = false;
 
-            if (typecheck_expr(&info, global->initial_expr, solidify_to)) {
+            if (typecheck_expr(&info, global->initial_expr, global->var.type)) {
+                if (primitive_is_unsolidified(global->initial_expr->type->kind)) {
+                    Type* strong_type;
+                    switch (global->initial_expr->type->kind) {
+                        case type_unsolidified_int:   strong_type = &context->primitive_types[DEFAULT_INT_TYPE]; break;
+                        case type_unsolidified_float: strong_type = &context->primitive_types[DEFAULT_FLOAT_TYPE]; break;
+                        default: assert(false);
+                    }
+                    assert(typecheck_expr(&info, global->initial_expr, strong_type));
+                }
+
+                assert(!primitive_is_unsolidified(global->initial_expr->type->kind));
+
                 if (global->var.type == null) {
                     global->var.type = global->initial_expr->type;
                     resolved_type = true;
@@ -7099,8 +7210,6 @@ bool typecheck(Context* context) {
                 } else {
                     resolved_type = true;
                 }
-            } else {
-                resolved_type = false;
             }
         }
 
@@ -10713,9 +10822,9 @@ void compile_and_run(u8* source_path, u8* exe_path) {
 void main() {
     i64 start_time = perf_time();
 
-    //compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
+    compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
     //compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe");
-    compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe");
+    //compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe");
 
     i64 end_time = perf_time();
     printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);

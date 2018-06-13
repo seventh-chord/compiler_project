@@ -128,6 +128,7 @@ fn main() {
     farwell(); // to kings
     vector_test();
     enum_test();
+    float_test();
 
     ExitProcess(0);
 }
@@ -430,7 +431,16 @@ struct Map {
 
 enum Empty_Enum {}
 
+
+fn float_test() {
+    //let a_nice_number = 1.0;
+    //let bad = {};
+}
+
+
 /*
+real constants
+function pointers
 complete type_info_of
 make type_info_of work on values
 size_of, align_of
@@ -447,6 +457,7 @@ figure out how to do no parentheses in loops/conditionals
 dont generate jump after return if return is the last stmt
 
 .pdata and unwind info
+enabling subsystem windows (over subsystem console)
 debug info
 growing the stack? __chkstk
 constant folding
