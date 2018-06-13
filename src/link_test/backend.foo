@@ -27,15 +27,15 @@ fn print(string: *u8) {
 
 fn print_int(int: u32) {
     let buffer: [20]u8;
-    let i: u64 = 18;
+    let i: u64 = 19;
 
     for (int > 0) {
+        i -= 1;
         buffer[i] = u8(0x30 + (int % 10));
         int = int / 10;
-        i -= 1;
     }
 
-    print(&buffer[i + 1]);
+    print(&buffer[i]);
 }
 
 fn main() {
