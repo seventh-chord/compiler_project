@@ -5823,7 +5823,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             }
 
             assert(left_result != typecheck_expr_bad && right_result != typecheck_expr_bad);
-            if (left_result == typecheck_expr_weak || right_result == typecheck_expr_weak) {
+            if (left_result == typecheck_expr_weak && right_result == typecheck_expr_weak) {
                 strong = false;
             }
 
