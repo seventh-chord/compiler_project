@@ -964,7 +964,6 @@ typedef enum Type_Kind {
     type_void = 1,
     type_bool = 2,
 
-    type_unsolidified_int = 3,
     type_u8  = 4,
     type_u16 = 5,
     type_u32 = 6,
@@ -974,7 +973,6 @@ typedef enum Type_Kind {
     type_i32 = 10,
     type_i64 = 11,
 
-    type_unsolidified_float = 12,
     type_f32 = 13,
     type_f64 = 14,
 
@@ -1006,9 +1004,6 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
 
     [type_f32] = "f32",
     [type_f64] = "f64",
-
-    [type_unsolidified_float] = "<float>",
-    [type_unsolidified_int]   = "<int>",
 
     [type_invalid]          = "<invalid>",
     [type_pointer]          = "<pointer>",
@@ -1163,17 +1158,14 @@ u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
 };
 
 bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
-    [binary_sub] = true,
-    [binary_div] = true,
-    [binary_mod] = true,
-    [binary_mul] = false,
-    [binary_add] = false,
-    [binary_neq] = false,
-    [binary_eq] = false,
-    [binary_gt] = false,
-    [binary_gteq] = false,
-    [binary_lt] = false,
-    [binary_lteq] = false,
+    [binary_sub] = true, [binary_div] = true, [binary_mod] = true,
+    [binary_mul] = false, [binary_add] = false,
+    [binary_neq] = false, [binary_eq] = false, [binary_gt] = false, [binary_gteq] = false, [binary_lt] = false, [binary_lteq] = false,
+};
+
+bool BINARY_OP_COMPARATIVE[BINARY_OP_COUNT] = {
+    [binary_sub] = false, [binary_div] = false, [binary_mod] = false, [binary_mul] = false, [binary_add] = false,
+    [binary_neq] = true, [binary_eq] = true, [binary_gt] = true, [binary_gteq] = true, [binary_lt] = true, [binary_lteq] = true,
 };
 
 u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
@@ -1182,7 +1174,6 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [binary_mul] = "*",
     [binary_div] = "/",
     [binary_mod] = "%",
-
     [binary_neq]  = "!=",
     [binary_eq]   = "==",
     [binary_gt]   = ">",
@@ -1191,6 +1182,21 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [binary_lteq] = "<=",
 };
 
+
+typedef struct Compound_Member {
+    Expr* expr;
+
+    enum {
+        expr_compound_no_name,
+        expr_compound_unresolved_name,
+        expr_compound_name
+    } name_mode;
+
+    union {
+        u32 unresolved_name;
+        u32 member_index;
+    };
+} Compound_Member;
 
 #define EXPR_FLAG_UNRESOLVED 0x01
 #define EXPR_FLAG_ASSIGNABLE 0x02
@@ -1236,12 +1242,7 @@ struct Expr { // 'typedef'd earlier!
         } string;
 
         struct {
-            struct {
-                Expr* expr;
-                enum { expr_compound_no_name, expr_compound_unresolved_name, expr_compound_name } name_mode;
-                union { u32 unresolved_name; u32 member_index; };
-            } *content;
-
+            Compound_Member *content;
             u32 count;
         } compound;
 
@@ -1769,7 +1770,6 @@ void init_primitive_types(Context* context) {
     init_primitive(type_invalid);
     init_primitive(type_void);
     init_primitive(type_bool);
-    init_primitive(type_unsolidified_int);
     init_primitive(type_u8);
     init_primitive(type_u16);
     init_primitive(type_u32);
@@ -1778,7 +1778,6 @@ void init_primitive_types(Context* context) {
     init_primitive(type_i16);
     init_primitive(type_i32);
     init_primitive(type_i64);
-    init_primitive(type_unsolidified_float);
     init_primitive(type_f32);
     init_primitive(type_f64);
 
@@ -1847,8 +1846,8 @@ Condition find_condition_for_op_and_type(Binary_Op op, Type_Kind type) {
     return 0;
 }
 
-// Says '*[3]foo' is equal to '*foo'
-bool type_can_assign(Context* context, Type* a, Type* b) {
+// Says '*[3]Foo' is equal to '*Foo'
+bool type_can_assign(Type* a, Type* b) {
     if (a == b) return true;
 
     while (true) {
@@ -1873,9 +1872,6 @@ bool type_can_assign(Context* context, Type* a, Type* b) {
                 b = b->array.of;
             } break;
 
-            case type_unresolved_name: assert(false); return false;
-            case type_unsolidified_int: assert(false); return false;
-
             default: return true;
         }
     }
@@ -1888,8 +1884,6 @@ u8 primitive_size_of(Type_Kind primitive) {
     switch (primitive) {
         case type_bool: return 1;
         case type_void: return 0;
-        case type_unsolidified_int: assert(false); return 0;
-        case type_unsolidified_float: assert(false); return 0;
         case type_u8:  return 1;
         case type_u16: return 2;
         case type_u32: return 4;
@@ -1907,6 +1901,28 @@ u8 primitive_size_of(Type_Kind primitive) {
         case type_enum: assert(false); return 0;
         default: assert(false); return 0;
     }
+}
+
+u8* compound_member_name(Context* context, Expr* expr, Compound_Member* member) {
+    u32 name_index;
+    switch (member->name_mode) {
+        case expr_compound_name: {
+            assert(expr->type->kind == type_struct);
+            u32 member_index = member->member_index;
+            name_index = expr->type->structure.members[member_index].name;
+        } break;
+
+        case expr_compound_unresolved_name: {
+            name_index = member->unresolved_name;
+        } break;
+
+        case expr_compound_no_name: {
+            return null;
+        } break;
+
+        default: assert(false);
+    }
+    return string_table_access(context->string_table, name_index);
 }
 
 u64 type_size_of(Type* type) {
@@ -1992,8 +2008,6 @@ bool primitive_is_compound(Type_Kind primitive) {
         case type_enum: return false;
         case type_pointer: return false;
         case type_invalid: assert(false); return false;
-        case type_unsolidified_int: return false;
-        case type_unsolidified_float: return false;
         case type_unresolved_name: assert(false); return false;
 
         default: assert(false); return false;
@@ -2019,13 +2033,6 @@ bool primitive_is_float(Type_Kind primitive) {
 bool primitive_is_signed(Type_Kind primitive) {
     switch (primitive) {
         case type_i8: case type_i16: case type_i32: case type_i64: return true;
-        default: return false;
-    }
-}
-
-bool primitive_is_unsolidified(Type_Kind primitive) {
-    switch (primitive) {
-        case type_unsolidified_int: case type_unsolidified_float: return true;
         default: return false;
     }
 }
@@ -2220,24 +2227,8 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             for (u32 i = 0; i < expr->compound.count; i += 1) {
                 if (i > 0) printf(", ");
 
-                switch (expr->compound.content[i].name_mode) {
-                    case expr_compound_no_name: break;
-
-                    case expr_compound_name: {
-                        assert(expr->type->kind == type_struct);
-
-                        u32 member_index = expr->compound.content[i].member_index;
-                        u32 name_index = expr->type->structure.members[member_index].name;
-                        u8* name = string_table_access(context->string_table, name_index);
-                        printf("%s: ", name);
-                    } break;
-
-                    case expr_compound_unresolved_name: {
-                        u32 name_index = expr->compound.content[i].unresolved_name;
-                        u8* name = string_table_access(context->string_table, name_index);
-                        printf("%s: ", name);
-                    } break;
-                }
+                u8* member_name = compound_member_name(context, expr, &expr->compound.content[i]);
+                if (member_name != null) printf("%s: ", member_name);
 
                 Expr* child = expr->compound.content[i].expr;
                 print_expr(context, func, child);
@@ -3655,17 +3646,18 @@ Expr* parse_compound(Context* context, Token* t, u32* length) {
     expr->pos = t_start->pos;
 
     expr->compound.count = member_count;
-    expr->compound.content = (void*) arena_alloc(&context->arena, member_count * sizeof(*expr->compound.content));
+    expr->compound.content = (void*) arena_alloc(&context->arena, member_count * sizeof(Compound_Member));
 
     Member_Expr* p = first_member;
     for (u32 i = 0; i < member_count; i += 1, p = p->next) {
-        expr->compound.content[i].expr = p->expr;
+        Compound_Member* member = &expr->compound.content[i];
+        member->expr = p->expr;
 
         if (p->name_index == U32_MAX) {
-            expr->compound.content[i].name_mode = expr_compound_no_name;
+            member->name_mode = expr_compound_no_name;
         } else {
-            expr->compound.content[i].unresolved_name = p->name_index;
-            expr->compound.content[i].name_mode = expr_compound_unresolved_name;
+            member->unresolved_name = p->name_index;
+            member->name_mode = expr_compound_unresolved_name;
         }
     }
 
@@ -5523,60 +5515,89 @@ bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
     return true;
 }
 
-bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
+typedef enum Typecheck_Expr_Result {
+    typecheck_expr_strong, // Found types, can't change types (i.e. a variable of known type)
+    typecheck_expr_weak, // Found types, but can change types (i.e. an integer literal)
+    typecheck_expr_bad, // Couldn't fix types
+} Typecheck_Expr_Result;
+
+Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
+    bool strong = true;
+
     switch (expr->kind) {
-        case expr_literal: {
-            switch (expr->literal.kind) {
-                case expr_literal_integer: {
-                    if (solidify_to == null) {
-                        expr->type = &info->context->primitive_types[type_unsolidified_int];
-                        return true;
+        case expr_variable: {
+            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
+                u32 var_index = find_var(info->context, info->func, expr->variable.unresolved_name);
+
+                if (var_index == U32_MAX) {
+                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
+                    print_file_pos(&expr->pos);
+                    printf("Can't find variable '%s' ", var_name);
+                    if (info->func != null) {
+                        u8* func_name = string_table_access(info->context->string_table, info->func->name);
+                        printf("in function '%s' or ", func_name);
                     }
+                    printf("in global scope\n");
+                    return typecheck_expr_bad;
+                }
 
-                    if (solidify_to->kind == type_pointer) {
-                        // This case handles pointer-integer addition/subtraction
-                        solidify_to = &info->context->primitive_types[type_u64];
-                    }
+                if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                    u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                    Global_Var* global = &info->context->global_vars[global_index];
 
-                    if (primitive_is_integer(solidify_to->kind)) {
-                        expr->type = solidify_to;
-
-                        u64 mask = size_mask(primitive_size_of(solidify_to->kind));
-                        u64 value = expr->literal.value;
-
-                        if (value != (value & mask)) {
+                    if (!global->valid) {
+                        if (!global->checked) {
+                            u8* name = string_table_access(info->context->string_table, global->var.name);
                             print_file_pos(&expr->pos);
                             printf(
-                                "Warning: Literal %u won't fit fully into a %s and will be masked!\n",
-                                (u64) value, PRIMITIVE_NAMES[solidify_to->kind]
+                                "Can't use global variable '%s' before its declaration on line %u\n",
+                                name, (u64) global->var.declaration_pos.line
                             );
                         }
 
-                        expr->literal.value &= mask;
+                        return typecheck_expr_bad;
+                    }
+                } else if (info->scope->map[var_index] == false) {
+                    Var* var = &info->func->body.vars[var_index];
+                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
+
+                    u64 use_line = expr->pos.line;
+                    u64 decl_line = var->declaration_pos.line;
+
+                    if (use_line <= decl_line) {
+                        printf(
+                            "Can't use variable '%s' on line %u before its declaration on line %u\n",
+                            var_name, use_line, decl_line
+                        );
                     } else {
-                        expr->type = &info->context->primitive_types[type_unsolidified_int];
-                    }
-                } break;
-
-                case expr_literal_float: {
-                    if (solidify_to == null) {
-                        expr->type = &info->context->primitive_types[type_unsolidified_float];
-                        return true;
+                        printf(
+                            "Can't use variable '%s' on line %u, as it isn't in scope\n",
+                            var_name, use_line
+                        );
                     }
 
-                    if (primitive_is_float(solidify_to->kind)) {
-                        expr->type = solidify_to;
+                    return typecheck_expr_bad;
+                }
 
-                        u64 mask = size_mask(primitive_size_of(solidify_to->kind));
-                        u64 value = expr->literal.value;
-                        expr->literal.value &= mask;
-                    } else {
-                        expr->type = &info->context->primitive_types[type_unsolidified_float];
-                    }
-                } break;
+                expr->variable.index = var_index;
+                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            }
 
+            if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
+                expr->type = info->context->global_vars[global_index].var.type;
+            } else {
+                expr->type = info->func->body.vars[expr->variable.index].type;
+            }
+        } break;
+
+        case expr_literal: {
+            Type_Kind to_primitive = solidify_to->kind;
+
+            switch (expr->literal.kind) {
                 case expr_literal_pointer: {
-                    if (solidify_to != null && solidify_to->kind == type_pointer) {
+                    if (to_primitive == type_pointer) {
                         expr->type = solidify_to;
                     } else {
                         expr->type = info->context->void_pointer_type;
@@ -5588,9 +5609,37 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     expr->type = &info->context->primitive_types[type_bool];
                 } break;
 
+                case expr_literal_integer: {
+                    strong = false;
+
+                    if (primitive_is_integer(to_primitive)) {
+                        expr->type = solidify_to;
+                    } else if (to_primitive == type_pointer) {
+                        // Handles 'pointer + integer' and similar cases
+                        expr->type = &info->context->primitive_types[type_u64];
+                    } else {
+                        expr->type = &info->context->primitive_types[DEFAULT_INT_TYPE];
+                    }
+
+                    u64 mask = size_mask(primitive_size_of(expr->type->kind));
+                    u64 old_value = expr->literal.value;
+                    expr->literal.value &= mask;
+                    if (expr->literal.value != old_value) {
+                        print_file_pos(&expr->pos);
+                        printf(
+                            "Warning: Literal %u won't fit fully into a %s and will be masked!\n",
+                            (u64) old_value, PRIMITIVE_NAMES[solidify_to->kind]
+                        );
+                    }
+                } break;
+
+                case expr_literal_float: {
+                    strong = false;
+                    unimplemented();
+                } break;
+
                 default: assert(false);
             }
-
         } break;
 
         case expr_string_literal: {
@@ -5599,22 +5648,15 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
         case expr_compound: {
             if (expr->type == null) {
-                if (solidify_to == null) {
+                if (solidify_to->kind == type_void) {
                     print_file_pos(&expr->pos);
                     printf("No type given for compound literal\n");
-                    return false;
-                } else {
-                    expr->type = solidify_to;
+                    return typecheck_expr_bad;
                 }
+                expr->type = solidify_to;
             }
-            
-            if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
-                if (resolve_type(info->context, &expr->type, &expr->pos)) {
-                    expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
-                } else {
-                    return false;
-                }
-            }
+
+            if (!resolve_type(info->context, &expr->type, &expr->pos)) return typecheck_expr_bad;
 
             switch (expr->type->kind) {
                 case type_array: {
@@ -5629,46 +5671,28 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                             (u64) expected_child_count,
                             (u64) expr->compound.count
                         );
-                        return false;
+                        return typecheck_expr_bad;
                     }
 
-                    for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        if (expr->compound.content[i].name_mode != expr_compound_no_name) {
-                            u32 name_index;
-                            switch (expr->compound.content[i].name_mode) {
-                                case expr_compound_name: {
-                                    assert(expr->type->kind == type_struct);
-                                    u32 member_index = expr->compound.content[i].member_index;
-                                    name_index = expr->type->structure.members[member_index].name;
-                                } break;
+                    for (u32 m = 0; m < expr->compound.count; m += 1) {
+                        Compound_Member* member = &expr->compound.content[m];
 
-                                case expr_compound_unresolved_name: {
-                                    name_index = expr->compound.content[i].unresolved_name;
-                                } break;
-
-                                default: assert(false);
-                            }
-                            u8* member_name = string_table_access(info->context->string_table, name_index);
-
+                        if (member->name_mode != expr_compound_no_name) {
                             print_file_pos(&expr->pos);
-                            printf("Unexpected member name '%s' given inside array literal\n", member_name);
-                            return false;
+                            printf("Unexpected member name '%s' given inside array literal\n", compound_member_name(info->context, expr, member));
+                            return typecheck_expr_bad;
                         }
 
-                        Expr* child = expr->compound.content[i].expr;
+                        if (typecheck_expr(info, member->expr, expected_child_type) == typecheck_expr_bad) return typecheck_expr_bad;
 
-                        if (!typecheck_expr(info, child, expected_child_type)) {
-                            return false;
-                        }
-
-                        if (expected_child_type != child->type) {
+                        if (expected_child_type != member->expr->type) {
                             print_file_pos(&expr->pos);
                             printf("Invalid type inside compound literal: Expected ");
                             print_type(info->context, expected_child_type);
                             printf(" but got ");
-                            print_type(info->context, child->type);
+                            print_type(info->context, member->expr->type);
                             printf("\n");
-                            return false;
+                            return typecheck_expr_bad;
                         }
                     }
                 } break;
@@ -5679,7 +5703,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                         u64 given = expr->compound.count;
                         print_file_pos(&expr->pos);
                         printf("Expected at most %u %s, but got %u for struct literal\n", expected, expected == 1? "member" : "members", given);
-                        return false;
+                        return typecheck_expr_bad;
                     }
 
                     bool any_named = false;
@@ -5707,7 +5731,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                                 u8* struct_name = string_table_access(info->context->string_table, expr->type->structure.name);
                                 print_file_pos(&expr->pos);
                                 printf("Struct '%s' has no member '%s'\n", struct_name, member_name);
-                                return false;
+                                return typecheck_expr_bad;
                             } else {
                                 expr->compound.content[i].name_mode = expr_compound_name;
                                 expr->compound.content[i].member_index = member_index;
@@ -5725,8 +5749,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                         u32 m = expr->compound.content[i].member_index;
                         Type* member_type = expr->type->structure.members[m].type;
                         
-                        if (!typecheck_expr(info, child, member_type)) {
-                            return false;
+                        if (typecheck_expr(info, child, member_type) == typecheck_expr_bad) {
+                            return typecheck_expr_bad;
                         }
 
                         if (member_type != child->type) {
@@ -5739,7 +5763,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                             printf(" but got ");
                             print_type(info->context, child->type);
                             printf(" for member '%s' of struct '%s'\n", member_name, struct_name);
-                            return false;
+                            return typecheck_expr_bad;
                         }
 
                         if (set_map[i]) {
@@ -5748,7 +5772,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
                             print_file_pos(&child->pos);
                             printf("'%s' is set more than once in struct literal\n", member_name);
-                            return false;
+                            return typecheck_expr_bad;
                         }
                         set_map[i] = true;
                     }
@@ -5756,13 +5780,13 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     if (any_named && any_unnamed) {
                         print_file_pos(&expr->pos);
                         printf("Struct literal can't have both named and unnamed members\n");
-                        return false;
+                        return typecheck_expr_bad;
                     }
 
                     if (any_unnamed && expr->compound.count != expr->type->structure.member_count) {
                         print_file_pos(&expr->pos);
                         printf("Expected %u members, but got %u for struct literal\n", expr->type->structure.member_count, expr->compound.count);
-                        return false;
+                        return typecheck_expr_bad;
                     }
                 } break;
 
@@ -5771,166 +5795,74 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     printf("Invalid type for compound literal: ");
                     print_type(info->context, expr->type);
                     printf("\n");
-                    return false;
+                    return typecheck_expr_bad;
                 } break;
-            }
-        } break;
-
-        case expr_variable: {
-            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 var_index = find_var(info->context, info->func, expr->variable.unresolved_name);
-
-                if (var_index == U32_MAX) {
-                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
-                    print_file_pos(&expr->pos);
-                    printf("Can't find variable '%s' ", var_name);
-                    if (info->func != null) {
-                        u8* func_name = string_table_access(info->context->string_table, info->func->name);
-                        printf("in function '%s' or ", func_name);
-                    }
-                    printf("in global scope\n");
-                    return false;
-                }
-
-                if (var_index & VAR_INDEX_GLOBAL_FLAG) {
-                    u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
-                    Global_Var* global = &info->context->global_vars[global_index];
-
-                    if (!global->valid) {
-                        if (!global->checked) {
-                            u8* name = string_table_access(info->context->string_table, global->var.name);
-                            print_file_pos(&expr->pos);
-                            printf(
-                                "Can't use global variable '%s' before its declaration on line %u\n",
-                                name, (u64) global->var.declaration_pos.line
-                            );
-                        }
-
-                        return false;
-                    }
-                } else if (info->scope->map[var_index] == false) {
-                    Var* var = &info->func->body.vars[var_index];
-                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
-
-                    u64 use_line = expr->pos.line;
-                    u64 decl_line = var->declaration_pos.line;
-
-                    if (use_line <= decl_line) {
-                        printf(
-                            "Can't use variable '%s' on line %u before its declaration on line %u\n",
-                            var_name, use_line, decl_line
-                        );
-                    } else {
-                        printf(
-                            "Can't use variable '%s' on line %u, as it isn't in scope\n",
-                            var_name, use_line
-                        );
-                    }
-
-                    return false;
-                }
-
-                expr->variable.index = var_index;
-                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
-            }
-
-            if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
-                u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
-                expr->type = info->context->global_vars[global_index].var.type;
-            } else {
-                expr->type = info->func->body.vars[expr->variable.index].type;
             }
         } break;
 
         case expr_binary: {
-            bool is_comparasion = false;
-            switch (expr->binary.op) {
-                case binary_eq:
-                case binary_neq:
-                case binary_gt:
-                case binary_gteq:
-                case binary_lt:
-                case binary_lteq:
-                {
-                    is_comparasion = true;
-                } break;
+            if (BINARY_OP_COMPARATIVE[expr->binary.op]) {
+                solidify_to = &info->context->primitive_types[type_void];
             }
 
-            if (!typecheck_expr(info, expr->binary.left, solidify_to))  return false;
-            if (!typecheck_expr(info, expr->binary.right, solidify_to)) return false;
+            Typecheck_Expr_Result left_result, right_result;
 
-            bool left_weak  = primitive_is_unsolidified(expr->binary.left->type->kind);
-            bool right_weak = primitive_is_unsolidified(expr->binary.right->type->kind);
-            if (!left_weak && right_weak) {
-                assert(typecheck_expr(info, expr->binary.right, expr->binary.left->type));
-            }
-            if (!right_weak && left_weak) {
-                assert(typecheck_expr(info, expr->binary.left, expr->binary.right->type));
+            left_result = typecheck_expr(info, expr->binary.left, solidify_to);
+            right_result = typecheck_expr(info, expr->binary.right, solidify_to);
+
+            if (left_result == typecheck_expr_bad || right_result == typecheck_expr_bad) {
+                return typecheck_expr_bad;
             }
 
-            if (expr->binary.left->type != expr->binary.right->type && solidify_to != null) {
-                bool left_strong  = expr->binary.left->type  != solidify_to;
-                bool right_strong = expr->binary.right->type != solidify_to;
- 
-                if (left_strong) {
-                    assert(typecheck_expr(info, expr->binary.right, expr->binary.left->type));
-                } else if (right_strong) {
-                    assert(typecheck_expr(info, expr->binary.left, expr->binary.right->type));
-                }
+            if (left_result == typecheck_expr_weak && right_result == typecheck_expr_weak) {
+                right_result = typecheck_expr(info, expr->binary.right, expr->binary.left->type);
+            } else if (left_result == typecheck_expr_weak && right_result == typecheck_expr_strong) {
+                left_result = typecheck_expr(info, expr->binary.left, expr->binary.right->type);
+            } else if (left_result == typecheck_expr_strong && right_result == typecheck_expr_weak) {
+                right_result = typecheck_expr(info, expr->binary.right, expr->binary.left->type);
             }
 
-            left_weak  = primitive_is_unsolidified(expr->binary.left->type->kind);
-            right_weak = primitive_is_unsolidified(expr->binary.right->type->kind);
-            if (left_weak && right_weak) {
-                expr->type = expr->binary.left->type;
-                return true;
+            assert(left_result != typecheck_expr_bad && right_result != typecheck_expr_bad);
+            if (left_result == typecheck_expr_weak || right_result == typecheck_expr_weak) {
+                strong = false;
             }
 
+            bool valid_types = false;
 
-            expr->type = null;
-
-            if (is_comparasion) {
-                Type_Kind left_primitive = primitive_of(expr->binary.left->type);
-                Type_Kind right_primitive = primitive_of(expr->binary.right->type);
-
+            if (BINARY_OP_COMPARATIVE[expr->binary.op]) {
                 expr->type = &info->context->primitive_types[type_bool];
 
-                bool valid;
-                if (expr->binary.op == binary_eq) {
-                    valid = left_primitive == right_primitive && !primitive_is_compound(left_primitive);
-                } else {
-                    valid = left_primitive == right_primitive && primitive_is_integer(left_primitive);
+                if (expr->binary.left->type == expr->binary.right->type && !primitive_is_compound(expr->binary.left->type->kind)) {
+                    valid_types = true;
                 }
-
-                if (!valid) {
-                    print_file_pos(&expr->pos);
-                    printf("Can't compare ");
-                    print_type(info->context, expr->binary.left->type);
-                    printf(" with ");
-                    print_type(info->context, expr->binary.right->type);
-                    printf(" using operator %s\n", BINARY_OP_SYMBOL[expr->binary.op]);
-                    return false;
+                if (expr->binary.left->type->kind == type_pointer && expr->binary.left->type->kind == type_pointer) {
+                    valid_types = true;
+                }
+                if (expr->binary.op != binary_eq && !primitive_is_integer(expr->binary.left->type->kind)) {
+                    valid_types = false;
                 }
             } else {
-                if (expr->binary.left->type == expr->binary.right->type && primitive_is_integer(expr->binary.left->type->kind)) {
+                if (expr->binary.left->type == expr->binary.right->type && (primitive_is_integer(expr->binary.left->type->kind) || primitive_is_float(expr->binary.left->type->kind))) {
                     expr->type = expr->binary.left->type;
+                    valid_types = true;
 
-                // Handle special cases for pointer arithmetic
+                // Special-case pointer-pointer arithmetic
                 } else switch (expr->binary.op) {
                     case binary_add: {
                         if (expr->binary.left->type->kind == type_pointer && expr->binary.right->type->kind == type_u64) {
                             expr->type = expr->binary.left->type;
+                            valid_types = true;
                         }
-
                         if (expr->binary.left->type->kind == type_u64 && expr->binary.right->type->kind == type_pointer) {
                             expr->type = expr->binary.right->type;
+                            valid_types = true;
                         }
                     } break;
 
                     case binary_sub: {
                         if (expr->binary.left->type->kind == type_pointer && expr->binary.right->type->kind == type_u64) {
                             expr->type = expr->binary.left->type;
+                            valid_types = true;
                         }
                     } break;
 
@@ -5942,7 +5874,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 }
             }
 
-            if (expr->type == null) {
+            if (!valid_types) {
                 if (expr->binary.left->type != expr->binary.right->type) {
                     print_file_pos(&expr->pos);
                     printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
@@ -5950,14 +5882,91 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     printf(" vs ");
                     print_type(info->context, expr->binary.right->type);
                     printf("\n");
-                    return false;
+                    return typecheck_expr_bad;
                 } else {
                     print_file_pos(&expr->pos);
                     printf("Can't use operator %s on ", BINARY_OP_SYMBOL[expr->binary.op]);
                     print_type(info->context, expr->binary.left->type);
                     printf("\n");
-                    return false;
+                    return typecheck_expr_bad;
                 }
+            }
+        } break;
+
+        case expr_unary: {
+            switch (expr->unary.op) {
+                case unary_dereference: {
+                    solidify_to = get_pointer_type(info->context, solidify_to);
+                } break;
+
+                case unary_address_of: {
+                    if (solidify_to->kind == type_pointer) {
+                        solidify_to = solidify_to->pointer_to;
+                    }
+                } break;
+            }
+
+            if (typecheck_expr(info, expr->unary.inner, solidify_to) == typecheck_expr_bad) return typecheck_expr_bad;
+
+            switch (expr->unary.op) {
+                case unary_not: {
+                    // TODO allow using unary_not to do a bitwise not on integers
+                    expr->type = expr->unary.inner->type;
+                    if (expr->type->kind != type_bool) {
+                        print_file_pos(&expr->unary.inner->pos);
+                        printf("Can only apply unary not (!) to ");
+                        print_type(info->context, expr->type);
+                        printf(", its not a bool\n");
+                        return typecheck_expr_bad;
+                    }
+                } break;
+
+                case unary_neg: {
+                    expr->type = expr->unary.inner->type;
+                    if (!primitive_is_integer(expr->type->kind)) {
+                        print_file_pos(&expr->unary.inner->pos);
+                        printf("Can only apply unary negative (-) to ");
+                        print_type(info->context, expr->type);
+                        printf(", its not a bool\n");
+                        return typecheck_expr_bad;
+                    }
+                } break;
+
+                case unary_dereference: {
+                    expr->type = expr->unary.inner->type->pointer_to;
+                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
+
+                    Type_Kind child_primitive = expr->unary.inner->type->kind;
+                    if (child_primitive != type_pointer) {
+                        print_file_pos(&expr->pos);
+                        printf("Can't dereference non-pointer ");
+                        print_expr(info->context, info->func, expr->unary.inner);
+                        printf("\n");
+                        return typecheck_expr_bad;
+                    }
+
+                    Type_Kind pointer_to = expr->unary.inner->type->pointer_to->kind;
+                    if (pointer_to == type_void) {
+                        print_file_pos(&expr->pos);
+                        printf("Can't dereference a void pointer ");
+                        print_expr(info->context, info->func, expr->unary.inner);
+                        printf("\n");
+                        return typecheck_expr_bad;
+                    }
+                } break;
+
+                case unary_address_of: {
+                    expr->type = get_pointer_type(info->context, expr->unary.inner->type);
+                    if (!(expr->unary.inner->flags & EXPR_FLAG_ASSIGNABLE)) {
+                        print_file_pos(&expr->pos);
+                        printf("Can't take address of ");
+                        print_expr(info->context, info->func, expr->unary.inner);
+                        printf("\n");
+                        return typecheck_expr_bad;
+                    }
+                } break;
+
+                default: assert(false);
             }
         } break;
 
@@ -5968,7 +5977,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     u8* name = string_table_access(info->context->string_table, expr->call.unresolved_name);
                     print_file_pos(&expr->pos);
                     printf("Can't find function '%s'\n", name);
-                    return false;
+                    return typecheck_expr_bad;
                 }
 
                 expr->call.func_index = func_index;
@@ -5985,7 +5994,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     "Function '%s' takes %u parameters, but %u were given\n",
                     name, (u64) callee->signature.param_count, (u64) expr->call.param_count
                 );
-                return false;
+                return typecheck_expr_bad;
             }
 
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
@@ -5999,12 +6008,10 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     expected_type = expected_type->pointer_to;
                 }
 
-                if (!typecheck_expr(info, param_expr, expected_type)) {
-                    return false;
-                }
+                if (typecheck_expr(info, param_expr, expected_type) == typecheck_expr_bad) return typecheck_expr_bad;
 
                 Type* actual_type = param_expr->type;
-                if (!type_can_assign(info->context, expected_type, actual_type)) {
+                if (!type_can_assign(expected_type, actual_type)) {
                     u8* func_name = string_table_access(info->context->string_table, callee->name);
                     print_file_pos(&expr->pos);
                     printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), func_name);
@@ -6013,173 +6020,64 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     print_type(info->context, actual_type);
                     printf("\n");
 
-                    return false;
+                    return typecheck_expr_bad;
                 }
             }
         } break;
 
         case expr_cast: {
-            if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
-                if (resolve_type(info->context, &expr->type, &expr->pos)) {
-                    expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
-                } else {
-                    return false;
-                }
-            }
+            if (!resolve_type(info->context, &expr->type, &expr->pos)) return typecheck_expr_bad;
+            if (typecheck_expr(info, expr->cast_from, expr->type) == typecheck_expr_bad) return typecheck_expr_bad;
 
-            Type_Kind primitive = expr->type->kind;
+            Type_Kind from = expr->cast_from->type->kind;
+            Type_Kind to   = expr->type->kind;
 
-            u32 invalid = 0;
+            bool valid =
+                (from == type_pointer && to == type_pointer) ||
+                (from == type_pointer && to == type_u64) ||
+                (from == type_u64 && to == type_pointer) ||
+                (primitive_is_integer(from) && primitive_is_integer(to)) ||
+                (primitive_is_integer(from) && to == type_enum) ||
+                (primitive_is_integer(to) && from == type_enum);
 
-            if (primitive == type_pointer || primitive == type_enum || primitive_is_integer(primitive)) {
-                if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
-
-                if (primitive_is_unsolidified(expr->cast_from->type->kind)) {
-                    Type* strong_type;
-                    switch (expr->cast_from->type->kind) {
-                        case type_unsolidified_int:   strong_type = &info->context->primitive_types[DEFAULT_INT_TYPE]; break;
-                        case type_unsolidified_float: strong_type = &info->context->primitive_types[DEFAULT_FLOAT_TYPE]; break;
-                        default: assert(false);
-                    }
-                    assert(typecheck_expr(info, expr->cast_from, strong_type));
-                }
-
-                Type_Kind from_primitive = expr->cast_from->type->kind;
-
-                bool to_int_or_enum = primitive == type_enum || primitive_is_integer(primitive);
-                bool to_pointer = primitive == type_pointer;
-                bool from_int_or_enum = from_primitive == type_enum || primitive_is_integer(from_primitive);
-                bool from_pointer = from_primitive == type_pointer;
-
-                if (!((to_int_or_enum && from_int_or_enum) || (to_pointer && from_pointer))) {
-                    invalid = 2;
-                }
-            } else if (primitive_is_integer(primitive)) {
-                if (!typecheck_expr(info, expr->cast_from, expr->type)) return false;
-
-                Type_Kind from_primitive = expr->cast_from->type->kind;
-                if (!primitive_is_integer(from_primitive)) {
-                    invalid = 2;
-                }
+            u32 result = -1;
+            if (valid) {
+                result = 0;
+            } else if (to == type_pointer || to == type_enum || primitive_is_integer(to) || primitive_is_float(to)) {
+                result = 2;
             } else {
-                invalid = 1;
+                result = 1;
             }
 
-            if (invalid == 2) {
-                print_file_pos(&expr->pos);
-                printf("Invalid cast. Can't cast from ");
-                print_type(info->context, expr->cast_from->type);
-                printf(" to ");
-                print_type(info->context, expr->type);
-                printf("\n");
-                return false;
-            }
-
-            if (invalid == 1) {
-                print_file_pos(&expr->pos);
-                printf("Invalid cast. Can't cast to a ");
-                print_type(info->context, expr->type);
-                printf("\n");
-                return false;
-            }
-        } break;
-
-        case expr_unary: {
-            if (solidify_to != null) {
-                switch (expr->unary.op) {
-                    case unary_dereference: {
-                        solidify_to = get_pointer_type(info->context, solidify_to);
-                    } break;
-
-                    case unary_address_of: {
-                        if (solidify_to->kind == type_pointer) {
-                            solidify_to = solidify_to->pointer_to;
-                        }
-                    } break;
-                }
-            }
-
-            if (!typecheck_expr(info, expr->unary.inner, solidify_to)) {
-                return false;
-            }
-
-            switch (expr->unary.op) {
-                case unary_not: {
-                    // TODO allow using unary_not to do a bitwise not on integers
-                    Type_Kind child_primitive = expr->unary.inner->type->kind;
-                    if (child_primitive != type_bool) {
-                        print_file_pos(&expr->unary.inner->pos);
-                        printf("Can only apply unary not (!) to ");
-                        print_type(info->context, expr->unary.inner->type);
-                        printf(", its not a bool\n");
-                        return false;
-                    }
-
-                    expr->type = expr->unary.inner->type;
+            switch (result) {
+                case 0: {} break;
+                case 1: {
+                    print_file_pos(&expr->pos);
+                    printf("Invalid cast. Can't cast to ");
+                    print_type(info->context, expr->type);
+                    printf("\n");
+                    return typecheck_expr_bad;
                 } break;
-
-                case unary_neg: {
-                    Type_Kind child_primitive = expr->unary.inner->type->kind;
-                    if (!primitive_is_integer(child_primitive)) {
-                        print_file_pos(&expr->unary.inner->pos);
-                        printf("Can not apply unary negative (-) to ");
-                        print_type(info->context, expr->unary.inner->type);
-                        printf(", its not an integer\n");
-                        return false;
-                    }
-
-                    expr->type = expr->unary.inner->type;
+                case 2: {
+                    print_file_pos(&expr->pos);
+                    printf("Invalid cast. Can't cast from ");
+                    print_type(info->context, expr->cast_from->type);
+                    printf(" to ");
+                    print_type(info->context, expr->type);
+                    printf("\n");
+                    return typecheck_expr_bad;
                 } break;
-
-                case unary_dereference: {
-                    Type_Kind child_primitive = expr->unary.inner->type->kind;
-                    if (child_primitive != type_pointer) {
-                        print_file_pos(&expr->pos);
-                        printf("Can't dereference non-pointer ");
-                        print_expr(info->context, info->func, expr->unary.inner);
-                        printf("\n");
-                        return false;
-                    }
-
-                    Type_Kind pointer_to = expr->unary.inner->type->pointer_to->kind;
-                    if (pointer_to == type_void) {
-                        print_file_pos(&expr->pos);
-                        printf("Can't dereference the void pointer ");
-                        print_expr(info->context, info->func, expr->unary.inner);
-                        printf("\n");
-                        return false;
-                    }
-
-                    expr->type = expr->unary.inner->type->pointer_to;
-                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
-                } break;
-
-                case unary_address_of: {
-                    if (!(expr->unary.inner->flags & EXPR_FLAG_ASSIGNABLE)) {
-                        print_file_pos(&expr->pos);
-                        printf("Can't take address of ");
-                        print_expr(info->context, info->func, expr->unary.inner);
-                        printf("\n");
-                        return false;
-                    }
-
-                    expr->type = get_pointer_type(info->context, expr->unary.inner->type);
-                } break;
-
                 default: assert(false);
             }
         } break;
 
         case expr_subscript: {
-            if (!typecheck_expr(info, expr->subscript.array, &info->context->primitive_types[type_invalid])) {
-                return false;
-            }
+            if (typecheck_expr(info, expr->subscript.array, &info->context->primitive_types[type_void]) == typecheck_expr_bad) return typecheck_expr_bad;
+            if (typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[DEFAULT_INT_TYPE]) == typecheck_expr_bad) return typecheck_expr_bad;
 
-            if (!typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[type_u64])) {
-                return false;
+            if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE) {
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             }
-
-            bool bad = false;
 
             Type* array_type = expr->subscript.array->type;
             if (array_type->kind == type_array) {
@@ -6191,31 +6089,25 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                 printf("Can't index a ");
                 print_type(info->context, array_type);
                 printf("\n");
-                bad = true;
+                return typecheck_expr_bad;
             }
 
-            if (!bad && (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE)) {
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
-            }
-
-            Type* index_type = expr->subscript.index->type;
-            if (index_type->kind != type_u64) {
+            if (expr->subscript.index->type->kind != type_u64) {
                 // TODO should we allow other integer types and insert automatic promotions as neccesary here??
                 print_file_pos(&expr->subscript.index->pos);
                 printf("Can only use u64 as an array index, not ");
-                print_type(info->context, index_type);
+                print_type(info->context, expr->subscript.index->type);
                 printf("\n");
-                bad = true;
+                return typecheck_expr_bad;
             }
-
-            if (bad) return false;
         } break;
 
         case expr_member_access: {
             Expr* parent = expr->member_access.parent;
+            if (typecheck_expr(info, parent, &info->context->primitive_types[type_void]) == typecheck_expr_bad) return typecheck_expr_bad;
 
-            if (!typecheck_expr(info, parent, &info->context->primitive_types[type_invalid])) {
-                return false;
+            if (parent->flags & EXPR_FLAG_ASSIGNABLE) {
+                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             }
 
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
@@ -6245,12 +6137,8 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     print_file_pos(&expr->pos);
                     print_type(info->context, parent->type);
                     printf(" has no member '%s'\n", name_string);
-                    return false;
+                    return typecheck_expr_bad;
                 }
-            }
-
-            if (parent->flags & EXPR_FLAG_ASSIGNABLE) {
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
             }
         } break;
 
@@ -6262,7 +6150,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     u8* name_string = string_table_access(info->context->string_table, expr->static_member_access.parent_name);
                     print_file_pos(&expr->pos);
                     printf("No such type: '%s'\n", name_string);
-                    return false;
+                    return typecheck_expr_bad;
                 }
 
                 if (parent->kind != type_enum) {
@@ -6270,7 +6158,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     printf("Can't use operator :: on non-enum type ");
                     print_type(info->context, parent);
                     printf("\n");
-                    return false;
+                    return typecheck_expr_bad;
                 }
 
                 u32 member_index = U32_MAX;
@@ -6286,7 +6174,7 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
                     print_file_pos(&expr->pos);
                     print_type(info->context, parent);
                     printf(" has no member '%s'\n", member_name);
-                    return false;
+                    return typecheck_expr_bad;
                 }
 
                 expr->static_member_access.parent_type = parent;
@@ -6300,77 +6188,61 @@ bool typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
 
 
         case expr_type_info: {
-            if (resolve_type(info->context, &expr->type_info_of, &expr->pos)) {
-                expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
-            } else {
-                return false;
-            }
+            if (!resolve_type(info->context, &expr->type_info_of, &expr->pos)) return typecheck_expr_bad;
         } break;
 
         case expr_enum_length: {
-            if (resolve_type(info->context, &expr->enum_length_of, &expr->pos)) {
-                expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
-            } else {
-                return false;
-            }
+            if (!resolve_type(info->context, &expr->enum_length_of, &expr->pos)) return typecheck_expr_bad;
 
             if (expr->enum_length_of->kind != type_enum) {
                 print_file_pos(&expr->pos);
                 printf("Can't call 'enum_length' on ");
                 print_type(info->context, expr->enum_length_of);
                 printf(", it's not an enum");
-                return false;
+                return typecheck_expr_bad;
             }
         } break;
 
         case expr_enum_member_name: {
-            if (!typecheck_expr(info, expr->enum_member, &info->context->primitive_types[type_invalid])) {
-                return false;
-            }
+            if (typecheck_expr(info, expr->enum_member, &info->context->primitive_types[type_invalid]) == typecheck_expr_bad) return typecheck_expr_bad;
 
-            Type* enum_type = expr->enum_member->type;
-            if (enum_type->kind != type_enum) {
+            if (expr->enum_member->type->kind != type_enum) {
                 print_file_pos(&expr->enum_member->pos);
                 printf("Can't call 'enum_member_name' on a ");
-                print_type(info->context, enum_type);
+                print_type(info->context, expr->enum_member->type);
                 printf("\n");
-                return false;
+                return typecheck_expr_bad;
             }
         } break;
 
         default: assert(false);
     }
 
-    if (expr->type->flags & TYPE_FLAG_UNRESOLVED) {
-        if (resolve_type(info->context, &expr->type, &expr->pos)) {
-            expr->type->flags &= ~EXPR_FLAG_UNRESOLVED;
-        } else {
-            return false;
-        }
-    }
+    if (!resolve_type(info->context, &expr->type, &expr->pos)) return typecheck_expr_bad;
 
     // Autocast from '*void' to any other pointer kind
     if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && solidify_to->kind == type_pointer) {
         expr->type = solidify_to;
     }
 
-    return true;
+    if (strong) {
+        return typecheck_expr_strong;
+    } else {
+        return typecheck_expr_weak;
+    }
 }
 
 bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
+    Type* void_type = &info->context->primitive_types[type_void];
+
     switch (stmt->kind) {
         case stmt_assignment: {
-            if (!typecheck_expr(info, stmt->assignment.left, &info->context->primitive_types[type_invalid])) {
-                return false;
-            }
+            if (typecheck_expr(info, stmt->assignment.left, void_type) == typecheck_expr_bad) return false;
             Type* left_type = stmt->assignment.left->type;
-
-            if (!typecheck_expr(info, stmt->assignment.right, left_type)) {
-                return false;
-            }
+            if (typecheck_expr(info, stmt->assignment.right, left_type) == typecheck_expr_bad) return false;
             Type* right_type = stmt->assignment.right->type;
 
-            if (!type_can_assign(info->context, right_type, left_type)) {
+            if (!type_can_assign(right_type, left_type)) {
                 print_file_pos(&stmt->pos);
                 printf("Types on left and right side of assignment don't match: ");
                 print_type(info->context, left_type);
@@ -6390,9 +6262,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case stmt_expr: {
-            if (!typecheck_expr(info, stmt->expr, &info->context->primitive_types[type_invalid])) {
-                return false;
-            }
+            if (typecheck_expr(info, stmt->expr, void_type) == typecheck_expr_bad) return false;
         } break;
 
         case stmt_declaration: {
@@ -6400,29 +6270,20 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             Var* var = &info->func->body.vars[var_index];
             Expr* right = stmt->declaration.right;
 
-            bool bad_types = false;
+            bool good_types = true;
 
             if (right != null) {
-                bad_types = true;
+                good_types = false;
 
-                if (typecheck_expr(info, right, var->type)) {
-                    if (primitive_is_unsolidified(right->type->kind)) {
-                        Type* strong_type;
-                        switch (right->type->kind) {
-                            case type_unsolidified_int:   strong_type = &info->context->primitive_types[DEFAULT_INT_TYPE]; break;
-                            case type_unsolidified_float: strong_type = &info->context->primitive_types[DEFAULT_FLOAT_TYPE]; break;
-                            default: assert(false);
-                        }
-                        assert(typecheck_expr(info, right, strong_type));
-                    }
+                Type* resolve_to = var->type;
+                if (resolve_to == null) resolve_to = &info->context->primitive_types[type_void];
 
-                    assert(!primitive_is_unsolidified(right->type->kind));
-
+                if (typecheck_expr(info, right, resolve_to) != typecheck_expr_bad) {
                     if (var->type == null) {
                         var->type = right->type;
-                        bad_types = false;
+                        good_types = true;
                     } else {
-                        if (!type_can_assign(info->context, var->type, right->type)) {
+                        if (!type_can_assign(var->type, right->type)) {
                             print_file_pos(&stmt->pos);
                             printf("Right hand side of variable declaration doesn't have correct type. Expected ");
                             print_type(info->context, var->type);
@@ -6430,7 +6291,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                             print_type(info->context, right->type);
                             printf("\n");
                         } else {
-                            bad_types = false;
+                            good_types = true;
                         }
                     }
                 }
@@ -6438,7 +6299,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 assert(var->type != null);
                 if (var->type->flags & TYPE_FLAG_UNRESOLVED) {
                     if (!resolve_type(info->context, &var->type, &var->declaration_pos)) {
-                        bad_types = true;
+                        good_types = true;
                     } else {
                         var->type->flags &= ~TYPE_FLAG_UNRESOLVED;
                     }
@@ -6448,7 +6309,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             assert(!info->scope->map[stmt->declaration.var_index]);
             info->scope->map[stmt->declaration.var_index] = true;
 
-            if (bad_types) {
+            if (!good_types) {
                 if (var->type == null) {
                     // This only is here to prevent the compiler from crashing when typechecking further statements
                     var->type = &info->context->primitive_types[type_invalid];
@@ -6466,7 +6327,8 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case stmt_if: {
-            if (!typecheck_expr(info, stmt->conditional.condition, &info->context->primitive_types[type_bool])) return false;
+            Type* bool_type = &info->context->primitive_types[type_bool];
+            if (typecheck_expr(info, stmt->conditional.condition, bool_type) == typecheck_expr_bad) return false;
 
             Type_Kind condition_primitive = stmt->conditional.condition->type->kind;
             if (condition_primitive != type_bool) {
@@ -6494,7 +6356,8 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case stmt_loop: {
             if (stmt->loop.condition != null) {
-                if (!typecheck_expr(info, stmt->loop.condition, &info->context->primitive_types[type_bool])) return false;
+                Type* bool_type = &info->context->primitive_types[type_bool];
+                if (typecheck_expr(info, stmt->loop.condition, bool_type) == typecheck_expr_bad) return false;
 
                 Type_Kind condition_primitive = stmt->loop.condition->type->kind;
                 if (condition_primitive != type_bool) {
@@ -6534,11 +6397,9 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     return false;
                 }
 
-                if (!typecheck_expr(info, stmt->return_value, expected_type)) {
-                    return false;
-                }
+                if (typecheck_expr(info, stmt->return_value, expected_type) == typecheck_expr_bad) return false;
 
-                if (!type_can_assign(info->context, expected_type, stmt->return_value->type)) {
+                if (!type_can_assign(expected_type, stmt->return_value->type)) {
                     u8* name = string_table_access(info->context->string_table, info->func->name);
                     print_file_pos(&stmt->pos);
                     printf("Expected ");
@@ -7184,23 +7045,14 @@ bool typecheck(Context* context) {
         if (global->initial_expr != null) {
             resolved_type = false;
 
-            if (typecheck_expr(&info, global->initial_expr, global->var.type)) {
-                if (primitive_is_unsolidified(global->initial_expr->type->kind)) {
-                    Type* strong_type;
-                    switch (global->initial_expr->type->kind) {
-                        case type_unsolidified_int:   strong_type = &context->primitive_types[DEFAULT_INT_TYPE]; break;
-                        case type_unsolidified_float: strong_type = &context->primitive_types[DEFAULT_FLOAT_TYPE]; break;
-                        default: assert(false);
-                    }
-                    assert(typecheck_expr(&info, global->initial_expr, strong_type));
-                }
+            Type* resolve_to = global->var.type;
+            if (resolve_to == null) resolve_to = &context->primitive_types[type_void];
 
-                assert(!primitive_is_unsolidified(global->initial_expr->type->kind));
-
+            if (typecheck_expr(&info, global->initial_expr, resolve_to) != typecheck_expr_bad) {
                 if (global->var.type == null) {
                     global->var.type = global->initial_expr->type;
                     resolved_type = true;
-                } else if (!type_can_assign(context, global->var.type, global->initial_expr->type)) {
+                } else if (!type_can_assign(global->var.type, global->initial_expr->type)) {
                     print_file_pos(&global->var.declaration_pos);
                     printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
                     print_type(context, global->var.type);
@@ -7925,7 +7777,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             linearize_expr(context, expr->cast_from, assign_to, false);
 
-            if (!type_can_assign(context, expr->type, expr->cast_from->type)) {
+            if (!type_can_assign(expr->type, expr->cast_from->type)) {
                 Op op = {0};
                 op.kind = op_cast;
                 op.primitive = target_primitive;

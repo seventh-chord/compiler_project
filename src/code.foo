@@ -197,6 +197,7 @@ fn seventy_two() -> u8 {
     x = 2*(20 + 10) - x*2;
 
     let y = x - 2 + 3;
+    //let y = 2 + 3 - x; // TODO this doesn't work...
     let z = y + 2 + 3;
     let w = z;
     w = 1 + w;
