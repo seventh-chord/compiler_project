@@ -32,7 +32,155 @@
 int _fltused; // To make floating point work without the c runtime
 
 #include <stdarg.h>
-#include "winapi.h" // our substitute for windows.h
+
+// Our substitute for windows.h
+#if WINDOWS
+    // NB Im not sure if we need these, stuff works just fine without them it seems...
+    #define WINAPI_PRE  __declspec(dllimport)
+    #define WINAPI_POST //__stdcall // Is ignored on x64, but needed on x86
+
+    typedef void* Handle;
+
+    WINAPI_PRE void WINAPI_POST ExitProcess(u32 exit_code);
+    WINAPI_PRE u32 WINAPI_POST GetLastError();
+
+    // NB bytes must be u32 on win32
+    WINAPI_PRE void* WINAPI_POST HeapAlloc(Handle heap, u32 flags, u64 bytes);
+    WINAPI_PRE void* WINAPI_POST HeapReAlloc(Handle heap, u32 flags, void* memory, u64 bytes);
+    WINAPI_PRE bool  WINAPI_POST HeapFree(Handle heap, u32 flags, void* memory);
+    WINAPI_PRE Handle WINAPI_POST GetProcessHeap();
+
+
+    WINAPI_PRE Handle WINAPI_POST GetStdHandle(u32 key);
+    #define STD_INPUT_HANDLE  ((u32)-10)
+    #define STD_OUTPUT_HANDLE ((u32)-11)
+    #define STD_ERROR_HANDLE  ((u32)-12)
+
+    WINAPI_PRE u32 WINAPI_POST GetTempPathA(u32 buffer_length, u8* buffer);
+
+    WINAPI_PRE Handle WINAPI_POST CreateFileA(
+        u8* file_name,              // Zero-terminated string
+        u32 access,                 // GENERIC_READ/WRITE/EXECUTE
+        u32 share_mode,             // 0
+        void* security_attributes,  // We don't use this, so it can be null
+        u32 creation_disposition,   // OPEN_EXISTING, etc
+        u32 flags_and_attributes,   // FILE_ATTRIBUTE_NORMAL
+        Handle template_file        // null
+    );
+
+    WINAPI_PRE bool WINAPI_POST GetFileSizeEx(
+        Handle file,
+        i64* file_size // Unix timestamp
+    );
+
+    WINAPI_PRE bool WINAPI_POST ReadFile(
+        Handle file,
+        void* buffer,
+        u32 bytes_to_read,
+        u32* bytes_read,
+        void* overlapped // We don't use this, let it be null
+    );
+
+    WINAPI_PRE bool WINAPI_POST WriteFile(
+        Handle file,
+        void* buffer,
+        u32 bytes_to_write,
+        u32* bytes_written,
+        void* overlapped // We don't use this, let it be null
+    );
+
+    #define GENERIC_READ    0x80000000
+    #define GENERIC_WRITE   0x40000000
+    #define GENERIC_EXECUTE 0x20000000
+    #define GENERIC_ALL     0x10000000
+
+    #define FILE_SHARE_READ   0x1
+    #define FILE_SHARE_WRITE  0x2
+    #define FILE_SHARE_DELETE 0x4
+
+    #define CREATE_NEW 1
+    #define CREATE_ALWAYS 2
+    #define OPEN_EXISTING 3
+    #define OPEN_ALWAYS 4
+    #define TRUNCATE_EXISTING 5
+
+    #define INVALID_HANDLE_VALUE  ((Handle)-1)
+    #define FILE_ATTRIBUTE_NORMAL 0x80
+
+    typedef struct Startup_Info Startup_Info;
+    typedef struct Process_Info Process_Info;
+
+    WINAPI_PRE bool WINAPI_POST CreateProcessA(
+      u8* application_name,
+      u8* arguments,
+      void* process_attributes,
+      void* thread_attributes,
+      bool inherit_handles,
+      u32 creation_flags,
+      void* environment,
+      u8* current_directory,
+      Startup_Info* startup_info,
+      Process_Info* process_info
+    );
+
+    struct Startup_Info {
+        u32 size;
+        void* reserved_1;
+        u8* desktop;
+        u8* title;
+        u32 x, y;
+        u32 width, height;
+        u32 console_width, console_height;
+        u32 fill_attribute;
+        u32 flags;
+        u16 show_window;
+        u16 reserved_2;
+        void* reserved_3;
+        Handle stdin;
+        Handle stdout;
+        Handle stderr;
+    };
+
+    struct Process_Info {
+        Handle process;
+        Handle thread;
+        u32 process_id;
+        u32 thread_id;
+    };
+
+    WINAPI_PRE u32 WINAPI_POST WaitForSingleObject(Handle handle, u32 milliseconds);
+
+    // NB these functions in reality take a LARGE_INTEGER*, but LARGE_INTEGER is a union of a single
+    // 64 bit int and two 32 bit ints, to make the function work on windows. That means we can just use
+    // a single 64 bit int.
+    WINAPI_PRE bool WINAPI_POST QueryPerformanceCounter(i64* counter);
+    WINAPI_PRE bool WINAPI_POST QueryPerformanceFrequency(i64* frequency);
+
+    WINAPI_PRE void WINAPI_POST DebugBreak();
+    WINAPI_PRE void WINAPI_POST OutputDebugStringA(u8* string);
+
+
+    typedef struct System_Info {
+        union {
+            u32  oem_id;
+            struct {
+                u16 processor_architecture;
+                u16 reserved;
+            };
+        };
+        u32 page_size;
+        void* min_app_address;
+        void* max_app_address;
+        u32* active_processor_mask;
+        u32 processor_count;
+        u32 processor_type;
+        u32 alloc_granularity;
+        u16 processor_level;
+        u16 processor_revision;
+    } System_Info;
+
+    WINAPI_PRE void WINAPI_POST GetSystemInfo(System_Info* info);
+#endif
 
 Handle stdout;
 Handle process_heap;
@@ -53,7 +201,28 @@ void printf_flush();
 #define panic(x, ...)    (printf("(%s:%u) Panic: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
 #define unimplemented()  (printf("(%s:%u) Reached unimplemented code\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
 
-#include "preload.foo"
+#define PRELOAD_QUOTE(...) #__VA_ARGS__
+u8 *preload_code_text = PRELOAD_QUOTE(
+enum Type_Kind (u8) {
+    VOID    = 1,
+    BOOL    = 2,
+    U8      = 4,
+    U16     = 5,
+    U32     = 6,
+    U64     = 7,
+    I8      = 8,
+    I16     = 9,
+    I32     = 10,
+    I64     = 11,
+    F32     = 13,
+    F64     = 14,
+    POINTER = 15,
+    ARRAY   = 16,
+    STRUCT  = 18,
+    ENUM    = 19,
+}
+);
+#undef PRELOAD_QUOTE
 
 void main();
 void program_entry() {
@@ -10663,21 +10832,31 @@ bool run_executable(u8* exe_path) {
     return true;
 }
 
-void compile_and_run(u8* source_path, u8* exe_path) {
+void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_time) {
+    i64 start_time, middle_time, end_time;
+    start_time = perf_time();
+
     printf("    Compiling %s to %s\n", source_path, exe_path);
     if (build_file_to_executable(source_path, exe_path)) {
+        middle_time = perf_time();
         printf("    Running %s:\n", exe_path);
         run_executable(exe_path);
+        end_time = perf_time();
+    } else {
+        middle_time = end_time = perf_time();
     }
+
+    *compile_time = (middle_time - start_time) * 1000 / perf_frequency;
+    *run_time = (end_time - middle_time) * 1000 / perf_frequency;
 }
 
+
 void main() {
-    i64 start_time = perf_time();
+    i64 compile_time, run_time;
 
-    compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe");
-    //compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe");
-    //compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe");
+    compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe", &compile_time, &run_time);
 
-    i64 end_time = perf_time();
-    printf("Compile + run in %i ms\n", (end_time - start_time) * 1000 / perf_frequency);
+    printf("Compiled in %i ms, ran in %i ms\n", compile_time, run_time);
 }

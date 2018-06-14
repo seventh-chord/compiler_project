@@ -13,7 +13,8 @@ cl /nologo /c /WX^
     /Fo"build\main.obj"^
     /TC^
     /D%DEBUG_VAR%^
-    "compiler\main.c"^
+    /D"WINDOWS"^
+    "compiler.c"^
  &&^
 link /nologo^
     /nodefaultlib /subsystem:console^
