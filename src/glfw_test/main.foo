@@ -18,7 +18,7 @@ let GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
 
 extern "opengl32.lib" {
     fn glClear(mask: u32);
-    //fn glClearColor(r, g, b, a: f32);
+    fn glClearColor(r, g, b, a: f32);
 }
 
 extern "kernel32.lib" {
@@ -68,7 +68,7 @@ fn main() {
     glfwMakeContextCurrent(window);
 
     for (glfwWindowShouldClose(window) == 0) {
-        //glClearColor(1.0, 0.0, 1.0, 1.0);
+        glClearColor(0.77, 0.22, 0.66, 1.0);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glfwSwapBuffers(window);

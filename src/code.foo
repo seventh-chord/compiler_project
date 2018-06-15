@@ -83,7 +83,7 @@ let NINE = nine();
 fn nine() -> u16 { return 3 * 3; }
 
 fn main() {
-    float_test();
+    float_test(3.0, 0.1415);
 
     //let nasty = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
     //let nasty = [3]u8 { 1, 2, 3 }[2];
@@ -433,9 +433,9 @@ struct Map {
 enum Empty_Enum {}
 
 
-fn float_test() {
-    let a_nice_number = 3.0 + 0.14159265359;
-    let the_sum = 3.14159265359;
+fn float_test(a, b: f32) {
+    let a_nice_number = a + b;
+    let the_sum = 3.1415;
 
     let bits = *cast(*u32, &a_nice_number);
     let sum_bits = *cast(*u32, &the_sum);

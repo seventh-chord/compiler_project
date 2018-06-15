@@ -9934,9 +9934,15 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
                 Type_Kind operand_primitive = primitive_of(callee->signature.params[p].type);
 
                 if (primitive_is_float(operand_primitive)) {
-                    unimplemented();
+                    assert(operand_primitive == type_f32);
+
+                    if (p >= 4) {
+                        unimplemented();
+                    } else {
+                        instruction_load_sse(context, func, mov_from, local, XMM0 + p);
+                    }
                 } else {
-                    u8 reg;
+                    X64_Gpr reg;
                     switch (p) {
                         case 0: reg = RCX; break;
                         case 1: reg = RDX; break;
@@ -10281,10 +10287,11 @@ void build_machinecode(Context* context) {
             Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
             assert(operand_size <= 8);
 
-            if (primitive_is_float(operand_primitive)) {
-                unimplemented();
-            } else {
-                if (p < 4) {
+            if (p < 4) {
+                if (primitive_is_float(operand_primitive)) {
+                    assert(operand_primitive == type_f32);
+                    instruction_load_sse(context, func, mov_to, local, XMM0 + p);
+                } else {
                     u8 reg;
                     switch (p) {
                         case 0: reg = RCX; break;
@@ -11140,9 +11147,9 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
 void main() {
     i64 compile_time, run_time;
 
-    compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe", &compile_time, &run_time);
     //compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe", &compile_time, &run_time);
-    //compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe", &compile_time, &run_time);
+    compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe", &compile_time, &run_time);
 
     printf("Compiled in %i ms, ran in %i ms\n", compile_time, run_time);
 }
