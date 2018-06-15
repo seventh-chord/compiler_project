@@ -1118,7 +1118,8 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 typedef enum Builtin_Func {
     builtin_invalid = 0,
 
-    builtin_type_info_of,
+    builtin_type_info_of_type,
+    builtin_type_info_of_value,
     builtin_enum_member_name,
     builtin_enum_length,
     builtin_cast,
@@ -1383,7 +1384,8 @@ typedef enum Expr_Kind {
     expr_member_access, // a.b
     expr_static_member_access, // a::b
 
-    expr_type_info,
+    expr_type_info_of_type,
+    expr_type_info_of_value,
     expr_enum_length,
     expr_enum_member_name,
 } Expr_Kind;
@@ -1396,7 +1398,9 @@ struct Expr { // 'typedef'd earlier!
         union { u32 unresolved_name; u32 index; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
 
         struct {
-            u64 value;
+            u64 raw_value;
+            u64 masked_value;
+
             enum {
                 expr_literal_integer,
                 expr_literal_pointer,
@@ -1433,8 +1437,9 @@ struct Expr { // 'typedef'd earlier!
             u32 param_count;
         } call;
 
+        Type* type_info_of_type;
+        Expr* type_info_of_value;
         Expr* cast_from;
-        Type* type_info_of;
         Type* enum_length_of;
         Expr* enum_member;
 
@@ -1842,22 +1847,36 @@ struct On_Scope_Exit {
 };
 
 
-typedef enum X64_Reg {
-    reg_rax, reg_rcx, reg_rdx, reg_rbx,
-    reg_rsp, reg_rbp, reg_rsi, reg_rdi,
-    reg_r8,  reg_r9,  reg_r10, reg_r11,
-    reg_r12, reg_r13, reg_r14, reg_r15,
+// General purpose registers
+typedef enum X64_Gpr {
+    RAX = 0,  RCX = 1,  RDX = 2,  RBX = 3,
+    RSP = 4,  RBP = 5,  RSI = 6,  RDI = 7,
+    R8  = 8,  R9  = 9,  R10 = 10, R11 = 11,
+    R12 = 12, R13 = 13, R14 = 14, R15 = 15,
 
-    REG_COUNT,
+} X64_Gpr;
 
-    reg_invalid = U8_MAX,
-} X64_Reg;
+// SSE registers
+typedef enum X64_Xmm {
+    XMM0  = 0,  XMM1  = 1,  XMM2  = 2,  XMM3  = 3,
+    XMM4  = 4,  XMM5  = 5,  XMM6  = 6,  XMM7  = 7,
+    XMM8  = 8,  XMM9  = 9,  XMM10 = 10, XMM11 = 11,
+    XMM12 = 12, XMM13 = 13, XMM14 = 14, XMM15 = 15,
+} X64_Xmm;
 
-u8* reg_names[REG_COUNT] = {
+enum { REG_COUNT = 16 };
+
+u8* X64_GPR_NAMES[REG_COUNT] = {
     "rax", "rcx", "rdx", "rbx",
     "rsp", "rbp", "rsi", "rdi",
     "r8",  "r9",  "r10", "r11",
     "r12", "r13", "r14", "r15"
+};
+u8* X64_XMM_NAMES[REG_COUNT] = {
+    "xmm0",  "xmm1",  "xmm2",  "xmm3",
+    "xmm4",  "xmm5",  "xmm6",  "xmm7",
+    "xmm8",  "xmm9",  "xmm10", "xmm11",
+    "xmm12", "xmm13", "xmm14", "xmm15",
 };
 
 //#define PRINT_GENERATED_INSTRUCTIONS
@@ -1957,10 +1976,11 @@ void init_primitive_types(Context* context) {
 }
 
 void init_builtin_func_names(Context* context) {
-    context->builtin_names[builtin_type_info_of]     = string_table_intern_cstr(&context->string_table, "type_info_of");
-    context->builtin_names[builtin_enum_member_name] = string_table_intern_cstr(&context->string_table, "enum_member_name");
-    context->builtin_names[builtin_enum_length]      = string_table_intern_cstr(&context->string_table, "enum_length");
-    context->builtin_names[builtin_cast]             = string_table_intern_cstr(&context->string_table, "cast");
+    context->builtin_names[builtin_type_info_of_type]  = string_table_intern_cstr(&context->string_table, "type_info_of_type");
+    context->builtin_names[builtin_type_info_of_value] = string_table_intern_cstr(&context->string_table, "type_info_of_value");
+    context->builtin_names[builtin_enum_member_name]   = string_table_intern_cstr(&context->string_table, "enum_member_name");
+    context->builtin_names[builtin_enum_length]        = string_table_intern_cstr(&context->string_table, "enum_length");
+    context->builtin_names[builtin_cast]               = string_table_intern_cstr(&context->string_table, "cast");
 }
 
 void init_keyword_names(Context* context) {
@@ -2372,18 +2392,18 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         case expr_literal: {
             switch (expr->literal.kind) {
                 case expr_literal_integer: {
-                    printf("%u", expr->literal.value);
+                    printf("%u", expr->literal.masked_value);
                 } break;
                 case expr_literal_pointer: {
-                    if (expr->literal.value == 0) {
+                    if (expr->literal.masked_value == 0) {
                         printf("null");
                     } else {
-                        printf("%x", expr->literal.value);
+                        printf("%x", expr->literal.masked_value);
                     }
                 } break;
                 case expr_literal_bool: {
-                    assert(expr->literal.value == true || expr->literal.value == false);
-                    printf(expr->literal.value? "true" : "false");
+                    assert(expr->literal.masked_value == true || expr->literal.masked_value == false);
+                    printf(expr->literal.masked_value? "true" : "false");
                 } break;
                 default: assert(false);
             }
@@ -2493,15 +2513,21 @@ void print_expr(Context* context, Func* func, Expr* expr) {
 
         } break;
 
-        case expr_type_info: {
-            printf("type_info(");
-            print_type(context, expr->type_info_of);
+        case expr_type_info_of_type: {
+            printf("type_info_of_type(");
+            print_type(context, expr->type_info_of_type);
+            printf(")");
+        } break;
+
+        case expr_type_info_of_value: {
+            printf("type_info_of_value(");
+            print_expr(context, func, expr->type_info_of_value);
             printf(")");
         } break;
 
         case expr_enum_length: {
             printf("enum_length(");
-            print_type(context, expr->type_info_of);
+            print_type(context, expr->enum_length_of);
             printf(")");
         } break;
 
@@ -3478,38 +3504,39 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                 {
                     Expr* expr = arena_new(&context->arena, Expr);
                     expr->kind = expr_literal;
-                    expr->literal.value = 0;
                     expr->literal.kind = expr_literal_pointer;
                     expr->pos = t->pos;
 
                     switch (t->kind) {
                         case token_literal_int: {
-                            expr->literal.value = t->literal_int;
+                            expr->literal.raw_value = t->literal_int;
                             expr->literal.kind = expr_literal_integer;
                         } break;
 
                         case token_literal_float: {
-                            expr->literal.value = *((u64*) &t->literal_float);
+                            expr->literal.raw_value = *((u64*) &t->literal_float);
                             expr->literal.kind = expr_literal_float;
                         } break;
 
                         case token_keyword_null: {
-                            expr->literal.value = 0;
+                            expr->literal.raw_value = 0;
                             expr->literal.kind = expr_literal_pointer;
                         } break;
 
                         case token_keyword_false: {
-                            expr->literal.value = 0;
+                            expr->literal.raw_value = 0;
                             expr->literal.kind = expr_literal_bool;
                         } break;
 
                         case token_keyword_true: {
-                            expr->literal.value = 1;
+                            expr->literal.raw_value = 1;
                             expr->literal.kind = expr_literal_bool;
                         } break;
 
                         default: assert(false);
                     }
+
+                    expr->literal.masked_value = expr->literal.raw_value;
 
                     shunting_yard_push_expr(context, yard, expr);
 
@@ -3914,7 +3941,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
     t += 1;
 
     switch (parse_builtin_func_name(context, name_index)) {
-        case builtin_type_info_of: {
+        case builtin_type_info_of_type: {
             u32 type_length = 0;
             Type* type = parse_type(context, t, &type_length);
             t += type_length;
@@ -3924,7 +3951,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
                 return null;
             }
 
-            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'type_info_of'")) {
+            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'type_info_of_type'")) {
                 *length = t - t_start;
                 return null;
             }
@@ -3932,8 +3959,34 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
 
             Expr* expr = arena_new(&context->arena, Expr);
             expr->pos = start_pos;
-            expr->kind = expr_type_info;
-            expr->type_info_of = type;
+            expr->kind = expr_type_info_of_type;
+            expr->type_info_of_type = type;
+            expr->type = context->type_info_type;
+
+            *length = t - t_start;
+            return expr;
+        } break;
+
+        case builtin_type_info_of_value: {
+            u32 inner_length = 0;
+            Expr* inner = parse_expr(context, t, &inner_length);
+            t += inner_length;
+
+            if (inner == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'type_info_of_value'")) {
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            Expr* expr = arena_new(&context->arena, Expr);
+            expr->pos = start_pos;
+            expr->kind = expr_type_info_of_value;
+            expr->type_info_of_value = inner;
             expr->type = context->type_info_type;
 
             *length = t - t_start;
@@ -3976,7 +4029,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
                 return null;
             }
 
-            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'type_info_of'")) {
+            if (!expect_single_token(context, t, token_bracket_round_close, "after type in 'enum_member_name'")) {
                 *length = t - t_start;
                 return null;
             }
@@ -5764,6 +5817,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         case expr_literal: {
             Type_Kind to_primitive = solidify_to->kind;
 
+            expr->literal.masked_value = expr->literal.raw_value;
+
             switch (expr->literal.kind) {
                 case expr_literal_pointer: {
                     if (to_primitive == type_pointer) {
@@ -5774,7 +5829,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 } break;
 
                 case expr_literal_bool: {
-                    assert(expr->literal.value == true || expr->literal.value == false);
+                    assert(expr->literal.raw_value == true || expr->literal.raw_value == false);
                     expr->type = &info->context->primitive_types[type_bool];
                 } break;
 
@@ -5791,20 +5846,33 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     }
 
                     u64 mask = size_mask(primitive_size_of(expr->type->kind));
-                    u64 old_value = expr->literal.value;
-                    expr->literal.value &= mask;
-                    if (expr->literal.value != old_value) {
+                    expr->literal.masked_value = expr->literal.raw_value & mask;
+                    if (expr->literal.masked_value != expr->literal.raw_value) {
                         print_file_pos(&expr->pos);
                         printf(
                             "Warning: Literal %u won't fit fully into a %s and will be masked!\n",
-                            (u64) old_value, PRIMITIVE_NAMES[solidify_to->kind]
+                            (u64) expr->literal.raw_value, PRIMITIVE_NAMES[solidify_to->kind]
                         );
                     }
                 } break;
 
                 case expr_literal_float: {
                     strong = false;
-                    unimplemented();
+
+                    if (primitive_is_float(to_primitive)) {
+                        expr->type = solidify_to;
+                    } else {
+                        expr->type = &info->context->primitive_types[DEFAULT_FLOAT_TYPE];
+                    }
+
+                    switch (expr->type->kind) {
+                        case type_f64: expr->literal.masked_value = expr->literal.raw_value; break;
+                        case type_f32: {
+                            f64 big = *((f64*) &expr->literal.raw_value);
+                            f32 small = (f32) big;
+                            expr->literal.masked_value = (u64) *((u32*) &small);
+                        } break;
+                    }
                 } break;
 
                 default: assert(false);
@@ -6356,8 +6424,13 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
 
-        case expr_type_info: {
-            if (!resolve_type(info->context, &expr->type_info_of, &expr->pos)) return typecheck_expr_bad;
+        case expr_type_info_of_type: {
+            if (!resolve_type(info->context, &expr->type_info_of_type, &expr->pos)) return typecheck_expr_bad;
+        } break;
+
+        case expr_type_info_of_value: {
+            Type *void_type = &info->context->primitive_types[type_void];
+            if (typecheck_expr(info, expr->type_info_of_value, void_type) == typecheck_expr_bad) return typecheck_expr_bad;
         } break;
 
         case expr_enum_length: {
@@ -6402,7 +6475,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 }
 
 bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
-    Type* void_type = &info->context->primitive_types[type_void];
+    Type *void_type = &info->context->primitive_types[type_void];
 
     switch (stmt->kind) {
         case stmt_assignment: {
@@ -6605,7 +6678,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
     switch (expr->kind) {
         case expr_literal: {
             assert(type_size <= 8);
-            mem_copy((u8*) &expr->literal.value, result_into, type_size);
+            mem_copy((u8*) &expr->literal.masked_value, result_into, type_size);
             return eval_ok;
         } break;
 
@@ -6903,7 +6976,9 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             return eval_ok;
         } break;
 
-        case expr_type_info: {
+        case expr_type_info_of_type:
+        case expr_type_info_of_value:
+        {
             return eval_do_at_runtime;
         } break;
 
@@ -7528,7 +7603,7 @@ bool linearize_expr_to_local(Expr* expr, Local* local) {
         case expr_literal: {
             local->kind = local_literal;
             local->as_reference = false;
-            local->value = expr->literal.value;
+            local->value = expr->literal.masked_value;
             return true;
         } break;
 
@@ -7583,7 +7658,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             Local source;
             switch (expr->kind) {
                 case expr_literal: {
-                    source = (Local) { local_literal, false, expr->literal.value };
+                    source = (Local) { local_literal, false, expr->literal.masked_value };
                 } break;
 
                 case expr_variable: {
@@ -7786,9 +7861,6 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     }
                 }
             }
-
-
-
 
             switch (expr->binary.op) {
                 case binary_add:
@@ -8130,13 +8202,20 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             buf_push(context->tmp_ops, op);
         } break;
 
-        case expr_type_info: {
-            u64 type_info_value = expr->type_info_of->kind;
+        case expr_type_info_of_type:
+        case expr_type_info_of_value:
+        {
+            Type *type;
+            if (expr->kind == expr_type_info_of_type) {
+                type = expr->type_info_of_type;
+            } else {
+                type = expr->type_info_of_value->type;
+            }
 
             Op op = {0};
             op.kind = op_set;
             op.primitive = primitive_of(context->type_info_type);
-            op.binary.source = (Local) { local_literal, false, type_info_value };
+            op.binary.source = (Local) { local_literal, false, type->kind };
             op.binary.target = assign_to;
             buf_push(context->tmp_ops, op);
         } break;
@@ -8849,7 +8928,7 @@ u8 BINARY_INSTRUCTION_OPCODES_INT[BINARY_INSTRUCTION_COUNT] = {
     [instruction_sub] = 0x2b,
     [instruction_cmp] = 0x3b,
 };
-u8* BINARY_INSTRUCTION_OP_NAMES[BINARY_INSTRUCTION_COUNT] = {
+u8 *BINARY_INSTRUCTION_OP_NAMES[BINARY_INSTRUCTION_COUNT] = {
     [instruction_xor] = "xor",
     [instruction_add] = "add",
     [instruction_sub] = "sub",
@@ -8870,24 +8949,45 @@ u8 UNARY_INSTRUCTION_REG[UNARY_INSTRUCTION_COUNT] = {
     [instruction_not] = 2,
     [instruction_neg] = 3,
 };
-u8* UNARY_INSTRUCTION_OP_NAMES[UNARY_INSTRUCTION_COUNT] = {
+u8 *UNARY_INSTRUCTION_OP_NAMES[UNARY_INSTRUCTION_COUNT] = {
     [instruction_mul] = "mul",
     [instruction_div] = "div",
     [instruction_not] = "not",
     [instruction_neg] = "neg",
 };
 
-void instruction_general_reg_reg(u8** b, X64_Instruction_Binary instruction, X64_Reg a_reg, X64_Reg b_reg, u8 bytes) {
+typedef enum X64_Instruction_SSE {
+    instruction_addss,
+    instruction_subss,
+    instruction_mulss,
+    instruction_divss,
+    SSE_INSTRUCTION_COUNT,
+} X64_Instruction_SSE;
+
+u8 SSE_INSTRUCTION_OPCODES[SSE_INSTRUCTION_COUNT] = {
+    [instruction_addss] = 0x58,
+    [instruction_subss] = 0x5c,
+    [instruction_mulss] = 0x59,
+    [instruction_divss] = 0x5e,
+};
+u8 *SSE_INSTRUCTION_NAMES[SSE_INSTRUCTION_COUNT] = {
+    [instruction_addss] = "addss",
+    [instruction_subss] = "subss",
+    [instruction_mulss] = "mulss",
+    [instruction_divss] = "divss",
+};
+
+void instruction_general_reg_reg(u8** b, X64_Instruction_Binary instruction, X64_Gpr a_reg, X64_Gpr b_reg, u8 bytes) {
     bool use_small_op = false;
     u8 rex = REX_BASE;
     u8 modrm = 0xc0;
 
     modrm |= (a_reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (a_reg >= reg_r8) rex |= REX_R;
+    if (a_reg >= R8) rex |= REX_R;
     assert(a_reg < 16);
 
     modrm |= (b_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
-    if (b_reg >= reg_r8) rex |= REX_B;
+    if (b_reg >= R8) rex |= REX_B;
     assert(b_reg < 16);
 
     switch (bytes) {
@@ -8918,18 +9018,18 @@ void instruction_general_reg_reg(u8** b, X64_Instruction_Binary instruction, X64
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u %s %s\n", BINARY_INSTRUCTION_OP_NAMES[instruction], (u64) bytes*8, reg_names[a_reg], reg_names[b_reg]);
+    printf("%s%u %s %s\n", BINARY_INSTRUCTION_OP_NAMES[instruction], (u64) bytes*8, X64_GPR_NAMES[a_reg], reg_names[b_reg]);
     #endif
 }
 
-void instruction_general_reg(u8** b, X64_Instruction_Unary instruction, X64_Reg reg, u8 bytes) {
+void instruction_general_reg(u8** b, X64_Instruction_Unary instruction, X64_Gpr reg, u8 bytes) {
     u8 rex = REX_BASE;
     u8 modrm = 0xc0;
 
     modrm |= ((UNARY_INSTRUCTION_REG[instruction] << MODRM_REG_OFFSET) & MODRM_REG_MASK);
 
     modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
-    if (reg >= reg_r8) rex |= REX_B;
+    if (reg >= R8) rex |= REX_B;
     assert(reg < 16);
 
     u8 opcode = 0xf7;
@@ -8948,18 +9048,18 @@ void instruction_general_reg(u8** b, X64_Instruction_Unary instruction, X64_Reg 
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s%u rax, %s\n", UNARY_INSTRUCTION_OP_NAMES[instruction], (u64) bytes*8, reg_names[reg]);
+    printf("%s%u rax, %s\n", UNARY_INSTRUCTION_OP_NAMES[instruction], (u64) bytes*8, X64_GPR_NAMES[reg]);
     #endif
 }
 
-void instruction_xor_reg_imm(u8** b, X64_Reg reg, u32 immediate, u8 bytes) {
+void instruction_xor_reg_imm(u8** b, X64_Gpr reg, u32 immediate, u8 bytes) {
     immediate = immediate & size_mask(bytes);
 
     u8 rex = REX_BASE;
     u8 modrm = 0xf0;
 
     modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
-    if (reg >= reg_r8) rex |= REX_B;
+    if (reg >= R8) rex |= REX_B;
     assert(reg < 16);
 
     u8 opcode = 0x81;
@@ -8979,19 +9079,19 @@ void instruction_xor_reg_imm(u8** b, X64_Reg reg, u32 immediate, u8 bytes) {
     str_push_integer(b, min(bytes, sizeof(u32)), immediate);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("xor%u %s, %x\n", (u64) bytes*8, reg_names[reg], immediate);
+    printf("xor%u %s, %x\n", (u64) bytes*8, X64_GPR_NAMES[reg], immediate);
     #endif
 
 }
 
-void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
+void instruction_zero_extend_byte(u8** b, X64_Gpr reg, u8 target_bytes) {
     u8 modrm =
         0xc0 |
         ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
         ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
     u8 rex = REX_BASE;
 
-    if (reg >= reg_r8) {
+    if (reg >= R8) {
         rex |= REX_R | REX_B;
     }
 
@@ -9011,19 +9111,19 @@ void instruction_zero_extend_byte(u8** b, X64_Reg reg, u8 target_bytes) {
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8* reg_name = reg_names[reg];
+    u8* reg_name = X64_GPR_NAMES[reg];
     printf("movzx %s %s (8 -> %u)\n", reg_name, reg_name, target_bytes*8);
     #endif
 }
 
-void instruction_zero_extend_2_bytes(u8** b, X64_Reg reg, u8 target_bytes) {
+void instruction_zero_extend_2_bytes(u8** b, X64_Gpr reg, u8 target_bytes) {
     u8 modrm =
         0xc0 |
         ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
         ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
     u8 rex = REX_BASE;
 
-    if (reg >= reg_r8) {
+    if (reg >= R8) {
         rex |= REX_R | REX_B;
     }
 
@@ -9043,12 +9143,37 @@ void instruction_zero_extend_2_bytes(u8** b, X64_Reg reg, u8 target_bytes) {
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8* reg_name = reg_names[reg];
+    u8* reg_name = X64_GPR_NAMES[reg];
     printf("movzx %s %s (8 -> %u)\n", reg_name, reg_name, target_bytes*8);
     #endif
 }
 
-void instruction_setcc(u8** b, Condition condition, X64_Reg reg) {
+void instruction_sse(u8** b, X64_Instruction_SSE instruction, X64_Xmm dst, X64_Xmm src) {
+    u8 rex = REX_BASE;
+    u8 modrm = 0xc0;
+
+    modrm |= (dst << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (dst >= R8) rex |= REX_R;
+    assert(dst < 16);
+
+    modrm |= (src << MODRM_RM_OFFSET) & MODRM_RM_MASK;
+    if (src >= R8) rex |= REX_B;
+    assert(src < 16);
+
+    buf_push(*b, 0xf3);
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, 0x0f);
+    buf_push(*b, SSE_INSTRUCTION_OPCODES[instruction]);
+    buf_push(*b, modrm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("%s %s, %s\n", SSE_INSTRUCTION_NAMES[instruction], X64_XMM_NAMES[dst], X64_XMM_NAMES[src]);
+    #endif
+}
+
+void instruction_setcc(u8** b, Condition condition, X64_Gpr reg) {
     u8 opcode;
     switch (condition) {
         case condition_e:  opcode = 0x94; break;
@@ -9068,7 +9193,7 @@ void instruction_setcc(u8** b, Condition condition, X64_Reg reg) {
     u8 modrm = 0xc0;
 
     modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
-    if (reg >= reg_r8) rex |= REX_B;
+    if (reg >= R8) rex |= REX_B;
     assert(reg < 16);
 
     if (rex != REX_BASE) {
@@ -9079,7 +9204,7 @@ void instruction_setcc(u8** b, Condition condition, X64_Reg reg) {
     buf_push(*b, modrm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("set%s %s\n", CONDITION_POSTFIXES[condition], reg_names[reg]);
+    printf("set%s %s\n", CONDITION_POSTFIXES[condition], X64_GPR_NAMES[reg]);
     #endif
 }
 
@@ -9168,13 +9293,13 @@ void instruction_call(Context* context, bool builtin, u32 func_index) {
     buf_push(context->call_fixups, fixup);
 }
 
-void instruction_inc_or_dec(u8** b, bool inc, X64_Reg reg, u8 op_size) {
+void instruction_inc_or_dec(u8** b, bool inc, X64_Gpr reg, u8 op_size) {
     u8 rex = REX_BASE;
     u8 opcode = 0xff;
     u8 modrm = inc? 0xc0 : 0xc8;
 
     modrm |= ((reg << MODRM_RM_OFFSET) & MODRM_RM_MASK);
-    if (reg >= reg_r8) rex |= REX_B;
+    if (reg >= R8) rex |= REX_B;
 
     switch (op_size) {
         case 1: opcode -= 1; break;
@@ -9203,12 +9328,12 @@ Mem_Item* get_stack_item(Func* func, Local local) {
     return item;
 }
 
-void instruction_lea_stack(u8** b, u32 offset, X64_Reg reg) {
+void instruction_lea_stack(u8** b, u32 offset, X64_Gpr reg) {
     u8 rex = REX_BASE | REX_W;
     u8 modrm = 0;
 
     modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (reg >= reg_r8) rex |= REX_R;
+    if (reg >= R8) rex |= REX_R;
     assert(reg < 16);
 
     modrm |= 0x04; // Use SIB with a 32-bit displacement
@@ -9225,11 +9350,11 @@ void instruction_lea_stack(u8** b, u32 offset, X64_Reg reg) {
     str_push_integer(b, (offset <= I8_MAX)? sizeof(i8) : sizeof(i32), offset);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("lea %s, [rsp + %u]\n", reg_names[reg], (u64) offset);
+    printf("lea %s, [rsp + %u]\n", X64_GPR_NAMES[reg], (u64) offset);
     #endif
 }
 
-void instruction_lea_data(Context* context, u32 data_offset, X64_Reg reg) {
+void instruction_lea_data(Context* context, u32 data_offset, X64_Gpr reg) {
     buf_push(context->seg_text, 0x48);
     buf_push(context->seg_text, 0x8d);
     buf_push(context->seg_text, 0x05);
@@ -9245,11 +9370,11 @@ void instruction_lea_data(Context* context, u32 data_offset, X64_Reg reg) {
     buf_push(context->fixups, fixup);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("lea %s, [.data + %u]\n", reg_names[reg], (u64) data_offset);
+    printf("lea %s, [.data + %u]\n", X64_GPR_NAMES[reg], (u64) data_offset);
     #endif
 }
 
-void instruction_lea_mem(Context* context, Func* func, Local local, X64_Reg reg) {
+void instruction_lea_mem(Context* context, Func* func, Local local, X64_Gpr reg) {
     switch (local.kind) {
         case local_global: {
             Global_Var* global = &context->global_vars[local.value];
@@ -9274,7 +9399,7 @@ typedef enum Mov_Mode {
     mov_from,
 } Mov_Mode;
 
-void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Reg pointer_reg, X64_Reg value_reg, u8 bytes) {
+void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Gpr pointer_reg, X64_Gpr value_reg, u8 bytes) {
     u8 rex = REX_BASE;
     u8 opcode;
 
@@ -9302,14 +9427,14 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Reg pointer_reg, X64_Reg
     u8 modrm = 0x00;
 
     modrm |= (value_reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (value_reg >= reg_r8) rex |= REX_R;
+    if (value_reg >= R8) rex |= REX_R;
     assert(value_reg < 16);
 
     modrm |= (pointer_reg << MODRM_RM_OFFSET) & MODRM_RM_MASK;
-    if (pointer_reg >= reg_r8) rex |= REX_B;
+    if (pointer_reg >= R8) rex |= REX_B;
     assert(pointer_reg < 16);
 
-    if (pointer_reg == reg_rsp || pointer_reg == reg_rbp || pointer_reg == reg_r12 || pointer_reg == reg_r13) {
+    if (pointer_reg == RSP || pointer_reg == RBP || pointer_reg == R12 || pointer_reg == R13) {
         panic("Can't encode mov to value pointed to by rsp/rbp direction, as these byte sequences are used to indicate the use of a SIB byte.");
         // TODO there is a table in the intel manual (p. 71) which explains these exceptions. Also see reference/notes.md on modrm/sib, which
         // covers this briefly.
@@ -9323,15 +9448,15 @@ void instruction_mov_pointer(u8** b, Mov_Mode mode, X64_Reg pointer_reg, X64_Reg
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     if (mode == mov_to) {
-        printf("mov%u [%s], %s\n", (u64) bytes*8, reg_names[pointer_reg], reg_names[value_reg]);
+        printf("mov%u [%s], %s\n", (u64) bytes*8, X64_GPR_NAMES[pointer_reg], reg_names[value_reg]);
     } else {
-        printf("mov%u %s, [%s]\n", (u64) bytes*8, reg_names[value_reg], reg_names[pointer_reg]);
+        printf("mov%u %s, [%s]\n", (u64) bytes*8, X64_GPR_NAMES[value_reg], reg_names[pointer_reg]);
     }
     #endif
 }
 
 // Moves to/from '[rsp + offset]'
-void instruction_mov_stack(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 bytes) {
+void instruction_mov_stack(u8** b, Mov_Mode mode, X64_Gpr reg, u32 offset, u8 bytes) {
     u8 rex = REX_BASE;
     u8 modrm = 0;
     u8 opcode;
@@ -9351,7 +9476,7 @@ void instruction_mov_stack(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 by
     }
 
     modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (reg >= reg_r8) rex |= REX_R;
+    if (reg >= R8) rex |= REX_R;
     assert(reg < 16);
 
     modrm |= 0x04; // Use SIB with a 32-bit displacement
@@ -9371,14 +9496,14 @@ void instruction_mov_stack(u8** b, Mov_Mode mode, X64_Reg reg, u32 offset, u8 by
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     if (mode == mov_to) {
-        printf("mov%u [rsp + %x], %s\n", (u64) bytes*8, (u64) offset, reg_names[reg]);
+        printf("mov%u [rsp + %x], %s\n", (u64) bytes*8, (u64) offset, X64_GPR_NAMES[reg]);
     } else {
-        printf("mov%u %s, [rsp + %x]\n", (u64) bytes*8, reg_names[reg], (u64) offset);
+        printf("mov%u %s, [rsp + %x]\n", (u64) bytes*8, X64_GPR_NAMES[reg], (u64) offset);
     }
     #endif
 }
 
-void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, X64_Reg reg, u8 bytes) {
+void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, X64_Gpr reg, u8 bytes) {
     u8 rex = REX_BASE;
     u8 opcode = 0x8d;
     u8 modrm = 0x05;
@@ -9398,7 +9523,7 @@ void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, X64_
     }
 
     modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
-    if (reg >= reg_r8) rex |= REX_R;
+    if (reg >= R8) rex |= REX_R;
     assert(reg < 16);
 
     if (rex != REX_BASE) {
@@ -9420,14 +9545,14 @@ void instruction_mov_data(Context* context, Mov_Mode mode, u32 data_offset, X64_
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     if (mode == mov_to) {
-        printf("mov%u [.data + %u], %s\n", (u64) (bytes*8), (u64) data_offset, reg_names[reg]);
+        printf("mov%u [.data + %u], %s\n", (u64) (bytes*8), (u64) data_offset, X64_GPR_NAMES[reg]);
     } else {
-        printf("mov%u %s, [.data + %u]\n", (u64) (bytes*8), reg_names[reg], (u64) data_offset);
+        printf("mov%u %s, [.data + %u]\n", (u64) (bytes*8), X64_GPR_NAMES[reg], (u64) data_offset);
     }
     #endif
 }
 
-void instruction_mov_mem(Context* context, Func* func, Mov_Mode mode, Local local, X64_Reg reg, u8 bytes) {
+void instruction_mov_mem(Context* context, Func* func, Mov_Mode mode, Local local, X64_Gpr reg, u8 bytes) {
     switch (local.kind) {
         case local_global: {
             Global_Var* global = &context->global_vars[local.value];
@@ -9447,7 +9572,86 @@ void instruction_mov_mem(Context* context, Func* func, Mov_Mode mode, Local loca
     }
 }
 
-void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Reg reg, u8 bytes) {
+void instruction_mov_stack_sse(u8** b, Mov_Mode mode, X64_Xmm reg, u32 offset) {
+    u8 rex = REX_BASE;
+    u8 modrm = 0;
+
+    modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (reg >= 8) rex |= REX_R;
+    assert(reg < 16);
+
+    modrm |= 0x04; // Use SIB with a 32-bit displacement
+    if (offset <= I8_MAX) {
+        modrm |= 0x40;
+    } else {
+        modrm |= 0x80;
+    }
+
+    buf_push(*b, 0xf3);
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, 0x0f);
+    switch (mode) {
+        case mov_to:   buf_push(*b, 0x11); break;
+        case mov_from: buf_push(*b, 0x10); break;
+        default: assert(false);
+    }
+    buf_push(*b, modrm);
+    buf_push(*b, 0x24); // SIB which results in 'rsp + offset'
+
+    str_push_integer(b, (offset <= I8_MAX)? sizeof(i8) : sizeof(i32), offset);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (mode == mov_to) {
+        printf("movss [rsp + %x], %s\n", (u64) offset, X64_XMM_NAMES[reg]);
+    } else {
+        printf("movss %s, [rsp + %x]\n", X64_XMM_NAMES[reg], (u64) offset);
+    }
+    #endif
+}
+
+void instruction_mov_data_sse(Context* context, Mov_Mode mode, u32 data_offset, X64_Xmm reg) {
+    u8 rex = REX_BASE;
+    u8 modrm = 0x05;
+
+    modrm |= (reg << MODRM_REG_OFFSET) & MODRM_REG_MASK;
+    if (reg >= 8) rex |= REX_R;
+    assert(reg < 16);
+
+    buf_push(context->seg_text, 0xf3);
+    if (rex != REX_BASE) {
+        buf_push(context->seg_text, rex);
+    }
+    buf_push(context->seg_text, 0x0f);
+    switch (mode) {
+        case mov_to:   buf_push(context->seg_text, 0x11); break;
+        case mov_from: buf_push(context->seg_text, 0x10); break;
+        default: assert(false);
+    }
+    buf_push(context->seg_text, modrm);
+
+    buf_push(context->seg_text, 0xde);
+    buf_push(context->seg_text, 0xad);
+    buf_push(context->seg_text, 0xbe);
+    buf_push(context->seg_text, 0xef);
+
+    Fixup fixup = {0};
+    fixup.kind = fixup_data;
+    fixup.text_location = buf_length(context->seg_text) - sizeof(u32);
+    fixup.data_offset = data_offset;
+    buf_push(context->fixups, fixup);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (mode == mov_to) {
+        printf("movss [.data + %u], %s\n", (u64) data_offset, X64_XMM_NAMES[reg]);
+    } else {
+        printf("movss %s, [.data + %u]\n", X64_XMM_NAMES[reg], (u64) data_offset);
+    }
+    #endif
+}
+
+void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Gpr reg, u8 bytes) {
     u8 rex = REX_BASE;
     u8 opcode;
 
@@ -9470,7 +9674,7 @@ void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Reg reg, u8 bytes) {
     }
 
     opcode |= reg & 0x07;
-    if (reg >= reg_r8) rex |= REX_B;
+    if (reg >= R8) rex |= REX_B;
     assert(reg < 16);
 
     if (rex != REX_BASE) {
@@ -9482,11 +9686,11 @@ void instruction_mov_imm_to_reg(u8** b, u64 value, X64_Reg reg, u8 bytes) {
     str_push_integer(b, bytes, value);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u %s, %u\n", (u64) bytes*8, reg_names[reg], value);
+    printf("mov%u %s, %u\n", (u64) bytes*8, X64_GPR_NAMES[reg], value);
     #endif
 }
 
-void instruction_load_local(Context* context, Func* func, Local local, X64_Reg reg, u8 bytes) {
+void instruction_load_local(Context* context, Func* func, Local local, X64_Gpr reg, u8 bytes) {
     if (local.kind == local_literal) {
         assert(!local.as_reference);
         instruction_mov_imm_to_reg(&context->seg_text, local.value, reg, bytes);
@@ -9495,6 +9699,46 @@ void instruction_load_local(Context* context, Func* func, Local local, X64_Reg r
         instruction_mov_pointer(&context->seg_text, mov_from, reg, reg, bytes);
     } else {
         instruction_mov_mem(context, func, mov_from, local, reg, bytes);
+    }
+}
+
+void instruction_load_sse(Context* context, Func* func, Mov_Mode mode, Local local, X64_Xmm reg) {
+    assert(!local.as_reference);
+
+    switch (local.kind) {
+        case local_global: {
+            Global_Var* global = &context->global_vars[local.value];
+            instruction_mov_data_sse(context, mode, global->data_offset, reg);
+        } break;
+
+        case local_variable:
+        case local_temporary:
+        {
+            Mem_Item* item = get_stack_item(func, local);
+            u32 offset = item->offset;
+            instruction_mov_stack_sse(&context->seg_text, mode, reg, offset);
+        } break;
+
+        case local_literal: {
+            // TODO TODO TODO This is a big hack. There is no nice way of moving a immediate into a
+            // XMM register, so we have to move it into a general purpose register and than move
+            // that over to a XMM register. This means we have to clobber some GPR.
+            assert(mode == mov_from);
+
+            instruction_mov_imm_to_reg(&context->seg_text, local.value, RBX, sizeof(f32));
+
+            u8 modrm =
+                0xc0 |
+                ((reg << MODRM_REG_OFFSET) & MODRM_REG_MASK) |
+                ((RBX << MODRM_RM_OFFSET)  & MODRM_RM_MASK);
+
+            buf_push(context->seg_text, 0x66);
+            buf_push(context->seg_text, 0x0f);
+            buf_push(context->seg_text, 0x6e);
+            buf_push(context->seg_text, modrm);
+        } break;
+
+        default: assert(false);
     }
 }
 
@@ -9524,42 +9768,42 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         {
             u8 primitive_size = primitive_size_of(op->primitive);
 
-            instruction_load_local(context, func, op->unary, reg_rax, primitive_size);
+            instruction_load_local(context, func, op->unary, RAX, primitive_size);
 
             switch (op->kind) {
                 case op_neg: {
                     // NB we use the same logic for signed and usigned integers!
                     assert(primitive_is_integer(op->primitive));
-                    instruction_general_reg(&context->seg_text, instruction_neg, reg_rax, primitive_size);
+                    instruction_general_reg(&context->seg_text, instruction_neg, RAX, primitive_size);
                 } break;
 
                 case op_not: {
                     // NB this only works if we assume the bools value was either 1 or 0
                     assert(op->primitive == type_bool);
-                    instruction_xor_reg_imm(&context->seg_text, reg_rax, 1, primitive_size);
+                    instruction_xor_reg_imm(&context->seg_text, RAX, 1, primitive_size);
                 } break;
 
                 default: assert(false);
             }
 
             if (op->unary.as_reference) {
-                instruction_mov_mem(context, func, mov_from, op->unary, reg_rcx, POINTER_SIZE);
-                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_mem(context, func, mov_from, op->unary, RCX, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, RCX, RAX, primitive_size);
             } else {
-                instruction_mov_mem(context, func, mov_to, op->unary, reg_rax, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->unary, RAX, primitive_size);
             }
         } break;
 
         case op_set: {
             u8 primitive_size = primitive_size_of(op->primitive);
 
-            instruction_load_local(context, func, op->binary.source, reg_rax, primitive_size);
+            instruction_load_local(context, func, op->binary.source, RAX, primitive_size);
 
             if (op->binary.target.as_reference) {
-                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rcx, POINTER_SIZE);
-                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, RCX, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, RCX, RAX, primitive_size);
             } else {
-                instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->binary.target, RAX, primitive_size);
             }
         } break;
 
@@ -9569,8 +9813,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             if (op->binary.source.as_reference) unimplemented(); // TODO
             if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_lea_mem(context, func, op->binary.source, reg_rax);
-            instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, POINTER_SIZE);
+            instruction_lea_mem(context, func, op->binary.source, RAX);
+            instruction_mov_mem(context, func, mov_to, op->binary.target, RAX, POINTER_SIZE);
         } break;
 
         case op_add:
@@ -9578,27 +9822,50 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         {
             u8 primitive_size = primitive_size_of(op->primitive);
 
-            if (op->binary.target.as_reference) {
-                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rcx, POINTER_SIZE);
-                instruction_mov_pointer(&context->seg_text, mov_from, reg_rcx, reg_rax, primitive_size);
+            if (primitive_is_float(op->primitive)) {
+                assert(op->primitive == type_f32);
+                assert(!op->binary.target.as_reference);
+                assert(!op->binary.source.as_reference);
+
+                instruction_load_sse(context, func, mov_from, op->binary.target, XMM0);
+                instruction_load_sse(context, func, mov_from, op->binary.source, XMM1);
+
+                X64_Instruction_SSE instruction;
+                switch (op->kind) {
+                    case op_add: instruction = instruction_addss; break;
+                    case op_sub: instruction = instruction_subss; break;
+                    default: assert(false);
+                }
+
+                instruction_sse(&context->seg_text, instruction, XMM0, XMM1);
+
+                instruction_load_sse(context, func, mov_to, op->binary.target, XMM0);
+
+            } else if (primitive_is_integer(op->primitive) || op->primitive == type_pointer) {
+                if (op->binary.target.as_reference) {
+                    instruction_mov_mem(context, func, mov_from, op->binary.target, RCX, POINTER_SIZE);
+                    instruction_mov_pointer(&context->seg_text, mov_from, RCX, RAX, primitive_size);
+                } else {
+                    instruction_mov_mem(context, func, mov_from, op->binary.target, RAX, primitive_size);
+                }
+
+                instruction_load_local(context, func, op->binary.source, RDX, primitive_size);
+
+                X64_Instruction_Binary instruction;
+                switch (op->kind) {
+                    case op_add: instruction = instruction_add; break;
+                    case op_sub: instruction = instruction_sub; break;
+                    default: assert(false);
+                }
+                instruction_general_reg_reg(&context->seg_text, instruction, RAX, RDX, primitive_size);
+
+                if (op->binary.target.as_reference) {
+                    instruction_mov_pointer(&context->seg_text, mov_to, RCX, RAX, primitive_size);
+                } else {
+                    instruction_mov_mem(context, func, mov_to, op->binary.target, RAX, primitive_size);
+                }
             } else {
-                instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
-            }
-
-            instruction_load_local(context, func, op->binary.source, reg_rdx, primitive_size);
-
-            int kind;
-            switch (op->kind) {
-                case op_add: kind = instruction_add; break;
-                case op_sub: kind = instruction_sub; break;
-                default: assert(false);
-            }
-            instruction_general_reg_reg(&context->seg_text, kind, reg_rax, reg_rdx, primitive_size);
-
-            if (op->binary.target.as_reference) {
-                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
-            } else {
-                instruction_mov_mem(context, func, mov_to, op->binary.target, reg_rax, primitive_size);
+                assert(false);
             }
         } break;
 
@@ -9608,45 +9875,54 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         {
             u8 primitive_size = primitive_size_of(op->primitive);
 
-            if (op->binary.target.as_reference) unimplemented(); // TODO
+            if (primitive_is_float(op->primitive)) {
+                unimplemented();
+            } else {
+                if (op->binary.target.as_reference) unimplemented(); // TODO
 
-            instruction_mov_mem(context, func, mov_from, op->binary.target, reg_rax, primitive_size);
-            instruction_load_local(context, func, op->binary.source, reg_rcx, primitive_size);
+                instruction_mov_mem(context, func, mov_from, op->binary.target, RAX, primitive_size);
+                instruction_load_local(context, func, op->binary.source, RCX, primitive_size);
 
-            if (op->kind == op_div || op->kind == op_mod) {
-                // NB We need to clear rdx when executing 'div', as x64 divides rdx:rax (128 bits), or in
-                // 8 bit mode, we need to clear ah because 'div' uses ah:al
+                if (op->kind == op_div || op->kind == op_mod) {
+                    // NB We need to clear rdx when executing 'div', as x64 divides rdx:rax (128 bits), or in
+                    // 8 bit mode, we need to clear ah because 'div' uses ah:al
 
-                if (primitive_size == 1) {
-                    instruction_zero_extend_byte(&context->seg_text, reg_rax, 2);
-                } else {
-                    instruction_general_reg_reg(&context->seg_text, instruction_xor, reg_rdx, reg_rdx, POINTER_SIZE);
+                    if (primitive_size == 1) {
+                        instruction_zero_extend_byte(&context->seg_text, RAX, 2);
+                    } else {
+                        instruction_general_reg_reg(&context->seg_text, instruction_xor, RDX, RDX, POINTER_SIZE);
+                    }
                 }
-            }
 
-            X64_Reg result_reg;
-            X64_Instruction_Unary kind;
-            switch (op->kind) {
-                case op_mul: kind = instruction_mul; result_reg = reg_rax; break;
-                case op_div: kind = instruction_div; result_reg = reg_rax; break;
-                case op_mod: kind = instruction_div; result_reg = reg_rdx; break;
-                default: assert(false);
-            }
-            instruction_general_reg(&context->seg_text, kind, reg_rcx, primitive_size);
+                X64_Gpr result_reg;
+                X64_Instruction_Unary kind;
+                switch (op->kind) {
+                    case op_mul: kind = instruction_mul; result_reg = RAX; break;
+                    case op_div: kind = instruction_div; result_reg = RAX; break;
+                    case op_mod: kind = instruction_div; result_reg = RDX; break;
+                    default: assert(false);
+                }
+                instruction_general_reg(&context->seg_text, kind, RCX, primitive_size);
 
-            if (primitive_size == 1 && op->kind == op_mod) {
-                instruction_mov_ah_to_al(&context->seg_text);
-                result_reg = reg_rax;
-            }
+                if (primitive_size == 1 && op->kind == op_mod) {
+                    instruction_mov_ah_to_al(&context->seg_text);
+                    result_reg = RAX;
+                }
 
-            instruction_mov_mem(context, func, mov_to, op->binary.target, result_reg, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->binary.target, result_reg, primitive_size);
+            }
         } break;
 
         case op_cmp: {
             u8 primitive_size = primitive_size_of(op->primitive);
-            instruction_load_local(context, func, op->cmp.left,  reg_rax, primitive_size);
-            instruction_load_local(context, func, op->cmp.right, reg_rdx, primitive_size);
-            instruction_general_reg_reg(&context->seg_text, instruction_cmp, reg_rax, reg_rdx, primitive_size);
+
+            if (primitive_is_float(op->primitive)) {
+                unimplemented();
+            } else {
+                instruction_load_local(context, func, op->cmp.left,  RAX, primitive_size);
+                instruction_load_local(context, func, op->cmp.right, RDX, primitive_size);
+                instruction_general_reg_reg(&context->seg_text, instruction_cmp, RAX, RDX, primitive_size);
+            }
         } break;
 
         case op_call: {
@@ -9655,21 +9931,26 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                 Local local = op->call.params[p].local;
                 u8 size = op->call.params[p].size;
+                Type_Kind operand_primitive = primitive_of(callee->signature.params[p].type);
 
-                u8 reg;
-                switch (p) {
-                    case 0: reg = reg_rcx; break;
-                    case 1: reg = reg_rdx; break;
-                    case 2: reg = reg_r8; break;
-                    case 3: reg = reg_r9; break;
-                    default: reg = reg_rax; break;
-                }
+                if (primitive_is_float(operand_primitive)) {
+                    unimplemented();
+                } else {
+                    u8 reg;
+                    switch (p) {
+                        case 0: reg = RCX; break;
+                        case 1: reg = RDX; break;
+                        case 2: reg = R8; break;
+                        case 3: reg = R9; break;
+                        default: reg = RAX; break;
+                    }
 
-                instruction_load_local(context, func, local, reg, size);
+                    instruction_load_local(context, func, local, reg, size);
 
-                if (p >= 4) {
-                    u32 offset = POINTER_SIZE * p;
-                    instruction_mov_stack(&context->seg_text, mov_to, reg, offset, size);
+                    if (p >= 4) {
+                        u32 offset = POINTER_SIZE * p;
+                        instruction_mov_stack(&context->seg_text, mov_to, reg, offset, size);
+                    }
                 }
             }
 
@@ -9704,10 +9985,10 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (op->primitive != type_void) {
                 if (op->call.target.as_reference) {
-                    instruction_mov_mem(context, func, mov_from, op->call.target, reg_rcx, POINTER_SIZE);
-                    instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size_of(op->primitive));
+                    instruction_mov_mem(context, func, mov_from, op->call.target, RCX, POINTER_SIZE);
+                    instruction_mov_pointer(&context->seg_text, mov_to, RCX, RAX, primitive_size_of(op->primitive));
                 } else {
-                    instruction_mov_mem(context, func, mov_to, op->call.target, reg_rax, primitive_size_of(op->primitive));
+                    instruction_mov_mem(context, func, mov_to, op->call.target, RAX, primitive_size_of(op->primitive));
                 }
             }
         } break;
@@ -9723,17 +10004,17 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
 
             if (new_size > old_size) {
                 if (op->cast.local.as_reference) unimplemented(); // TODO
-                instruction_mov_mem(context, func, mov_from, op->cast.local, reg_rax, old_size);
+                instruction_mov_mem(context, func, mov_from, op->cast.local, RAX, old_size);
 
                 switch (old_size) {
-                    case 1: instruction_zero_extend_byte(&context->seg_text, reg_rax, new_size); break;
-                    case 2: instruction_zero_extend_2_bytes(&context->seg_text, reg_rax, new_size); break;
+                    case 1: instruction_zero_extend_byte(&context->seg_text, RAX, new_size); break;
+                    case 2: instruction_zero_extend_2_bytes(&context->seg_text, RAX, new_size); break;
                     case 4: break; // mov eax, ... automatically zeroes high bits
                     case 8: assert(false); break;
                     default: assert(false);
                 }
 
-                instruction_mov_mem(context, func, mov_to, op->cast.local, reg_rax, new_size);
+                instruction_mov_mem(context, func, mov_to, op->cast.local, RAX, new_size);
             }
         } break;
 
@@ -9758,27 +10039,27 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
         case op_set_bool: {
             u8 primitive_size = primitive_size_of(type_bool);
 
-            instruction_load_local(context, func, op->set_bool.local, reg_rax, primitive_size);
+            instruction_load_local(context, func, op->set_bool.local, RAX, primitive_size);
 
-            instruction_setcc(&context->seg_text, op->set_bool.condition, reg_rax);
+            instruction_setcc(&context->seg_text, op->set_bool.condition, RAX);
 
             if (op->set_bool.local.as_reference) {
-                instruction_mov_mem(context, func, mov_from, op->set_bool.local, reg_rcx, POINTER_SIZE);
-                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, primitive_size);
+                instruction_mov_mem(context, func, mov_from, op->set_bool.local, RCX, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, RCX, RAX, primitive_size);
             } else {
-                instruction_mov_mem(context, func, mov_to, op->set_bool.local, reg_rax, primitive_size);
+                instruction_mov_mem(context, func, mov_to, op->set_bool.local, RAX, primitive_size);
             }
         } break;
 
         case op_load_data: {
-            instruction_lea_data(context, op->load_data.data_offset, reg_rax);
+            instruction_lea_data(context, op->load_data.data_offset, RAX);
 
             Local local = op->load_data.local;
             if (local.as_reference) {
-                instruction_mov_mem(context, func, mov_from, local, reg_rcx, POINTER_SIZE);
-                instruction_mov_pointer(&context->seg_text, mov_to, reg_rcx, reg_rax, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_from, local, RCX, POINTER_SIZE);
+                instruction_mov_pointer(&context->seg_text, mov_to, RCX, RAX, POINTER_SIZE);
             } else {
-                instruction_mov_mem(context, func, mov_to, local, reg_rax, POINTER_SIZE);
+                instruction_mov_mem(context, func, mov_to, local, RAX, POINTER_SIZE);
             }
         } break;
 
@@ -9787,8 +10068,8 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             u64 size = op->builtin_mem_clear.size;
 
             assert(pointer.as_reference);
-            instruction_mov_mem(context, func, mov_from, pointer, reg_rax, POINTER_SIZE);
-            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(type_u64));
+            instruction_mov_mem(context, func, mov_from, pointer, RAX, POINTER_SIZE);
+            instruction_mov_imm_to_reg(&context->seg_text, size, RCX, primitive_size_of(type_u64));
             instruction_call(context, true, runtime_builtin_mem_clear);
         } break;
 
@@ -9800,9 +10081,9 @@ void machinecode_for_op(Context* context, Func* func, u32 op_index) {
             assert(src.as_reference);
             assert(dst.as_reference);
 
-            instruction_mov_mem(context, func, mov_from, src, reg_rax, POINTER_SIZE);
-            instruction_mov_mem(context, func, mov_from, dst, reg_rdx, POINTER_SIZE);
-            instruction_mov_imm_to_reg(&context->seg_text, size, reg_rcx, primitive_size_of(type_u64));
+            instruction_mov_mem(context, func, mov_from, src, RAX, POINTER_SIZE);
+            instruction_mov_mem(context, func, mov_from, dst, RDX, POINTER_SIZE);
+            instruction_mov_imm_to_reg(&context->seg_text, size, RCX, primitive_size_of(type_u64));
             // NB NB This call clobbers reg_rbx
             instruction_call(context, true, runtime_builtin_mem_copy);
         } break;
@@ -9828,8 +10109,8 @@ void build_machinecode(Context* context) {
         u64 forward_jump_from = buf_length(context->seg_text);
         // mov8 [rax], 0
         buf_push(context->seg_text, 0xc6); buf_push(context->seg_text, 0x00); buf_push(context->seg_text, 0x00);
-        instruction_inc_or_dec(&context->seg_text, true, reg_rax, 8);
-        instruction_inc_or_dec(&context->seg_text, false, reg_rcx, 8);
+        instruction_inc_or_dec(&context->seg_text, true, RAX, 8);
+        instruction_inc_or_dec(&context->seg_text, false, RCX, 8);
         u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
         u64 jump_end = buf_length(context->seg_text);
 
@@ -9847,12 +10128,12 @@ void build_machinecode(Context* context) {
         u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
         u64 forward_jump_from = buf_length(context->seg_text);
 
-        instruction_mov_pointer(&context->seg_text, mov_from, reg_rax, reg_rbx, 1);
-        instruction_mov_pointer(&context->seg_text, mov_to,   reg_rdx, reg_rbx, 1);
+        instruction_mov_pointer(&context->seg_text, mov_from, RAX, RBX, 1);
+        instruction_mov_pointer(&context->seg_text, mov_to,   RDX, RBX, 1);
 
-        instruction_inc_or_dec(&context->seg_text, true, reg_rax, 8);
-        instruction_inc_or_dec(&context->seg_text, true, reg_rdx, 8);
-        instruction_inc_or_dec(&context->seg_text, false, reg_rcx, 8);
+        instruction_inc_or_dec(&context->seg_text, true, RAX, 8);
+        instruction_inc_or_dec(&context->seg_text, true, RDX, 8);
+        instruction_inc_or_dec(&context->seg_text, false, RCX, 8);
 
         u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
         u64 jump_end = buf_length(context->seg_text);
@@ -9997,18 +10278,23 @@ void build_machinecode(Context* context) {
             Local local = { local_variable, false, var_index };
 
             u64 operand_size = type_size_of(func->signature.params[p].type);
+            Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
             assert(operand_size <= 8);
 
-            if (p < 4) {
-                u8 reg;
-                switch (p) {
-                    case 0: reg = reg_rcx; break;
-                    case 1: reg = reg_rdx; break;
-                    case 2: reg = reg_r8; break;
-                    case 3: reg = reg_r9; break;
-                    default: assert(false);
+            if (primitive_is_float(operand_primitive)) {
+                unimplemented();
+            } else {
+                if (p < 4) {
+                    u8 reg;
+                    switch (p) {
+                        case 0: reg = RCX; break;
+                        case 1: reg = RDX; break;
+                        case 2: reg = R8; break;
+                        case 3: reg = R9; break;
+                        default: assert(false);
+                    }
+                    instruction_mov_mem(context, func, mov_to, local, reg, (u8) operand_size);
                 }
-                instruction_mov_mem(context, func, mov_to, local, reg, (u8) operand_size);
             }
         }
 
@@ -10052,10 +10338,10 @@ void build_machinecode(Context* context) {
                 }
             } else {
                 u8 operand_size = primitive_size_of(output_primitive);
-                instruction_mov_mem(context, func, mov_from, output_local, reg_rax, operand_size);
+                instruction_mov_mem(context, func, mov_from, output_local, RAX, operand_size);
             }
         } else {
-            instruction_general_reg_reg(&context->seg_text, instruction_xor, reg_rax, reg_rax, POINTER_SIZE);
+            instruction_general_reg_reg(&context->seg_text, instruction_xor, RAX, RAX, POINTER_SIZE);
         }
 
         // Reset stack

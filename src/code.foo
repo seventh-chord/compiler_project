@@ -83,6 +83,8 @@ let NINE = nine();
 fn nine() -> u16 { return 3 * 3; }
 
 fn main() {
+    float_test();
+
     //let nasty = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
     //let nasty = [3]u8 { 1, 2, 3 }[2];
 
@@ -128,7 +130,6 @@ fn main() {
     farwell(); // to kings
     vector_test();
     enum_test();
-    float_test();
 
     ExitProcess(0);
 }
@@ -397,7 +398,7 @@ fn enum_test() {
     print("\n");
 
     print("This thing has type ");
-    print(enum_member_name(type_info_of(Type_Kind)));
+    print(enum_member_name(type_info_of_type(Type_Kind)));
     print("!\n");
 
     let a = 0;
@@ -433,16 +434,26 @@ enum Empty_Enum {}
 
 
 fn float_test() {
-    //let a_nice_number = 1.0;
-    //let bad = {};
+    let a_nice_number = 3.0 + 0.14159265359;
+    let the_sum = 3.14159265359;
+
+    let bits = *cast(*u32, &a_nice_number);
+    let sum_bits = *cast(*u32, &the_sum);
+
+    print("a_nice_number has type ");
+    print(enum_member_name(type_info_of_value(a_nice_number)));
+    print(" and hex value 0x");
+    print_u64(u64(bits), 16);
+    print(" but it should be 0x");
+    print_u64(u64(sum_bits), 16);
+    print("!\n");
 }
 
 
 /*
 real constants
 function pointers
-complete type_info_of
-make type_info_of work on values
+complete type_info_of_{value, type}
 size_of, align_of
 slices, make strings slices
 a 'any' type
@@ -455,6 +466,7 @@ taking the address of temporaries
 a defer statement
 figure out how to do no parentheses in loops/conditionals
 dont generate jump after return if return is the last stmt
+maybe a better parser for floats? The current one is pretty accurate for f32 at least though
 
 .pdata and unwind info
 enabling subsystem windows (over subsystem console)
