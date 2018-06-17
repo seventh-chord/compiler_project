@@ -7646,7 +7646,124 @@ bool linearize_expr_to_local(Expr* expr, Local* local) {
     }
 }
 
-void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_address) {
+
+void linearize_expr(Context *context, Expr *expr, Local assign_to);
+void linearize_expr_get_address(Context *context, Expr *expr, Local assign_to);
+
+void linearize_expr_get_address(Context *context, Expr *expr, Local assign_to) {
+    assert(expr->flags & EXPR_FLAG_ASSIGNABLE);
+
+    switch (expr->kind) {
+        case expr_variable: {
+            Local source;
+
+            u32 var_index = expr->variable.index;
+            if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+                source = (Local) { local_global, false, global_index };
+            } else {
+                source = (Local) { local_variable, false, var_index };
+            }
+                    
+            Op op = {0};
+            op.kind = op_address_of;
+            op.binary.source = source;
+            op.binary.target = assign_to;
+            buf_push(context->tmp_ops, op);
+        } break;
+
+        case expr_unary: {
+            switch (expr->unary.op) {
+                case unary_dereference: {
+                    linearize_expr(context, expr->unary.inner, assign_to);
+                } break;
+
+                default: assert(false);
+            }
+        } break;
+
+        case expr_subscript: {
+            Type* subscript_type = expr->subscript.array->type;
+            Type* child_type;
+            bool is_pointer;
+
+            if (subscript_type->kind == type_pointer) {
+                assert(subscript_type->pointer_to->kind == type_array);
+                child_type = subscript_type->pointer_to->array.of;
+                is_pointer = true;
+            } else {
+                assert(subscript_type->kind == type_array);
+                child_type = subscript_type->array.of;
+                is_pointer = false;
+            }
+
+            u64 stride = type_size_of(child_type);
+
+            Local base_pointer = assign_to;
+            if (is_pointer) {
+                linearize_expr(context, expr->subscript.array, base_pointer);
+            } else {
+                linearize_expr_get_address(context, expr->subscript.array, base_pointer);
+            }
+
+            u64 index_size = primitive_size_of(type_u64);
+            Local offset = intermediate_allocate_temporary(context, index_size);
+            linearize_expr(context, expr->subscript.index, offset);
+
+            if (stride > 1) {
+                Op op = {0};
+                op.kind = op_mul;
+                op.primitive = type_pointer;
+                op.binary.source = (Local) { local_literal, false, stride };
+                op.binary.target = offset;
+                buf_push(context->tmp_ops, op);
+            }
+
+            Op op = {0};
+            op.kind = op_add;
+            op.primitive = type_pointer;
+            op.binary.source = offset;
+            op.binary.target = base_pointer;
+            buf_push(context->tmp_ops, op);
+
+            intermediate_deallocate_temporary(context, offset);
+        } break;
+
+        case expr_member_access: {
+            u32 m = expr->member_access.member_index;
+            Type* parent_type = expr->member_access.parent->type;
+
+            Type* struct_type = parent_type;
+            bool is_pointer = false;
+            if (struct_type->kind == type_pointer) {
+                assert(struct_type->pointer_to->kind == type_struct);
+                struct_type = struct_type->pointer_to;
+                is_pointer = true;
+            }
+
+
+            Local base_pointer = assign_to;
+            if (is_pointer) {
+                linearize_expr(context, expr->member_access.parent, base_pointer);
+            } else {
+                linearize_expr_get_address(context, expr->member_access.parent, base_pointer);
+            }
+
+            u64 offset = struct_type->structure.members[m].offset;
+
+            Op op = {0};
+            op.kind = op_add;
+            op.primitive = type_pointer;
+            op.binary.source = (Local) { local_literal, false, offset };
+            op.binary.target = base_pointer;
+            buf_push(context->tmp_ops, op);
+        } break;
+
+        default: assert(false);
+    }
+}
+
+void linearize_expr(Context *context, Expr *expr, Local assign_to) {
     assert(assign_to.kind != local_literal);
 
     Type_Kind target_primitive = primitive_of(expr->type);
@@ -7671,25 +7788,14 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                         source = (Local) { local_variable, false, var_index };
                     }
                 } break;
+
                 default: assert(false);
             }
 
-            if (get_address) {
-                assert(expr->kind != expr_literal);
-
-                Op op = {0};
-                op.kind = op_address_of;
-                op.binary.source = source;
-                op.binary.target = assign_to;
-                buf_push(context->tmp_ops, op);
-            } else {
-                intermediate_write_compound_set(context, source, assign_to, expr->type);
-            }
+            intermediate_write_compound_set(context, source, assign_to, expr->type);
         } break;
 
         case expr_string_literal: {
-            assert(!get_address);
-
             u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, 1);
             assert(data_offset <= U32_MAX);
 
@@ -7701,7 +7807,6 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_compound: {
-            assert(!get_address);
             assert(assign_to.as_reference);
             assert(primitive_is_compound(target_primitive));
 
@@ -7730,7 +7835,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
                         assert(expr->compound.content[i].name_mode == expr_compound_no_name);
                         Expr* child = expr->compound.content[i].expr;
-                        linearize_expr(context, child, element_pointer, false);
+                        linearize_expr(context, child, element_pointer);
                     }
 
                     u64 negative_offset = stride * (expr->compound.count - 1);
@@ -7786,7 +7891,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                         element_pointer.as_reference = true;
 
                         Expr* child = expr->compound.content[i].expr;
-                        linearize_expr(context, child, element_pointer, false);
+                        linearize_expr(context, child, element_pointer);
                     }
 
                     element_pointer.as_reference = false;
@@ -7806,21 +7911,19 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_binary: {
-            assert(!get_address);
-
             if (assign_to.kind == local_temporary) {
                 u64 left_size = type_size_of(expr->binary.left->type);
                 Tmp* tmp = &context->tmp_tmps[assign_to.value];
                 tmp->size = max(left_size, tmp->size);
             }
 
-            linearize_expr(context, expr->binary.left, assign_to, false);
+            linearize_expr(context, expr->binary.left, assign_to);
 
             Local right_local = {0};
             if (!linearize_expr_to_local(expr->binary.right, &right_local)) {
                 u64 right_size = type_size_of(expr->binary.right->type);
                 right_local = intermediate_allocate_temporary(context, right_size);
-                linearize_expr(context, expr->binary.right, right_local, false);
+                linearize_expr(context, expr->binary.right, right_local);
             }
 
             if (expr->binary.op == binary_add || expr->binary.op == binary_sub) {
@@ -7927,7 +8030,6 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_call: {
-            assert(!get_address);
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
             arena_stack_push(&context->stack); // For 'dealloc_queue'
@@ -7948,7 +8050,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
                 if (callee->signature.params[p].reference_semantics) {
                     Local local = intermediate_allocate_temporary(context, param_size);
-                    linearize_expr(context, param, local, false);
+                    linearize_expr(context, param, local);
 
                     Local pointer_local = intermediate_allocate_temporary(context, POINTER_SIZE);
                     Op op = {0};
@@ -7978,7 +8080,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                     Local local = {0};
                     if (!linearize_expr_to_local(param, &local)) {
                         local = intermediate_allocate_temporary(context, param_size);
-                        linearize_expr(context, param, local, false);
+                        linearize_expr(context, param, local);
 
                         Local_List* node = arena_new(&context->stack, Local_List);
                         node->local = local;
@@ -8008,15 +8110,13 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_cast: {
-            assert(!get_address);
-
             if (assign_to.kind == local_temporary) {
                 u64 left_size = type_size_of(expr->cast_from->type);
                 Tmp* tmp = &context->tmp_tmps[assign_to.value];
                 tmp->size = max(left_size, tmp->size);
             }
 
-            linearize_expr(context, expr->cast_from, assign_to, false);
+            linearize_expr(context, expr->cast_from, assign_to);
 
             if (!type_can_assign(expr->type, expr->cast_from->type)) {
                 Op op = {0};
@@ -8031,9 +8131,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         case expr_unary: {
             switch (expr->unary.op) {
                 case unary_not: {
-                    assert(!get_address);
-                    
-                    linearize_expr(context, expr->unary.inner, assign_to, false);
+                    linearize_expr(context, expr->unary.inner, assign_to);
 
                     Op op = {0};
                     op.kind = op_not;
@@ -8043,9 +8141,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 } break;
 
                 case unary_neg: {
-                    assert(!get_address);
-                    
-                    linearize_expr(context, expr->unary.inner, assign_to, false);
+                    linearize_expr(context, expr->unary.inner, assign_to);
 
                     Op op = {0};
                     op.kind = op_neg;
@@ -8055,28 +8151,22 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
                 } break;
 
                 case unary_dereference: {
-                    if (get_address) {
-                        // Used for lvalues
-                        linearize_expr(context, expr->unary.inner, assign_to, false);
-                    } else {
-                        Local right_local = intermediate_allocate_temporary(context, POINTER_SIZE);
-                        right_local.as_reference = false;
-                        linearize_expr(context, expr->unary.inner, right_local, false);
-                        right_local.as_reference = true;
+                    Local right_local = intermediate_allocate_temporary(context, POINTER_SIZE);
+                    right_local.as_reference = false;
+                    linearize_expr(context, expr->unary.inner, right_local);
+                    right_local.as_reference = true;
 
-                        if (primitive_is_compound(expr->type->kind)) {
-                            assert(assign_to.as_reference);
-                        }
-
-                        intermediate_write_compound_set(context, right_local, assign_to, expr->type);
-
-                        intermediate_deallocate_temporary(context, right_local);
+                    if (primitive_is_compound(expr->type->kind)) {
+                        assert(assign_to.as_reference);
                     }
+
+                    intermediate_write_compound_set(context, right_local, assign_to, expr->type);
+
+                    intermediate_deallocate_temporary(context, right_local);
                 } break;
 
                 case unary_address_of: {
-                    assert(!get_address);
-                    linearize_expr(context, expr->unary.inner, assign_to, true);
+                    linearize_expr_get_address(context, expr->unary.inner, assign_to);
                 } break;
 
                 default: assert(false);
@@ -8100,17 +8190,16 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
 
             u64 stride = type_size_of(child_type);
 
-            Local base_pointer;
-            if (get_address) {
-                base_pointer = assign_to;
+            Local base_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+            if (is_pointer) {
+                linearize_expr(context, expr->subscript.array, base_pointer);
             } else {
-                base_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+                linearize_expr_get_address(context, expr->subscript.array, base_pointer);
             }
-            linearize_expr(context, expr->subscript.array, base_pointer, !is_pointer);
 
             u64 index_size = primitive_size_of(type_u64);
             Local offset = intermediate_allocate_temporary(context, index_size);
-            linearize_expr(context, expr->subscript.index, offset, false);
+            linearize_expr(context, expr->subscript.index, offset);
 
             if (stride > 1) {
                 Op op = {0};
@@ -8128,15 +8217,13 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             op.binary.target = base_pointer;
             buf_push(context->tmp_ops, op);
 
-            if (!get_address) {
-                if (primitive_is_compound(target_primitive)) {
-                    assert(assign_to.as_reference);
-                }
-
-                base_pointer.as_reference = true;
-                intermediate_write_compound_set(context, base_pointer, assign_to, child_type);
-                intermediate_deallocate_temporary(context, base_pointer);
+            if (primitive_is_compound(target_primitive)) {
+                assert(assign_to.as_reference);
             }
+
+            base_pointer.as_reference = true;
+            intermediate_write_compound_set(context, base_pointer, assign_to, child_type);
+            intermediate_deallocate_temporary(context, base_pointer);
 
             intermediate_deallocate_temporary(context, offset);
         } break;
@@ -8154,13 +8241,12 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             }
 
 
-            Local base_pointer;
-            if (get_address) {
-                base_pointer = assign_to;
+            Local base_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+            if (is_pointer) {
+                linearize_expr(context, expr->member_access.parent, base_pointer);
             } else {
-                base_pointer = intermediate_allocate_temporary(context, POINTER_SIZE);
+                linearize_expr_get_address(context, expr->member_access.parent, base_pointer);
             }
-            linearize_expr(context, expr->member_access.parent, base_pointer, !is_pointer);
 
             u64 offset = struct_type->structure.members[m].offset;
 
@@ -8171,18 +8257,17 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             op.binary.target = base_pointer;
             buf_push(context->tmp_ops, op);
 
-            if (!get_address) {
-                if (primitive_is_compound(target_primitive)) {
-                    assert(assign_to.as_reference);
-                }
-
-                Type* child_type = expr->type; 
-                assert(child_type == struct_type->structure.members[m].type);
-
-                base_pointer.as_reference = true;
-                intermediate_write_compound_set(context, base_pointer, assign_to, child_type);
-                intermediate_deallocate_temporary(context, base_pointer);
+            if (primitive_is_compound(target_primitive)) {
+                assert(assign_to.as_reference);
             }
+
+            Type* child_type = expr->type; 
+            assert(child_type == struct_type->structure.members[m].type);
+
+            base_pointer.as_reference = true;
+            intermediate_write_compound_set(context, base_pointer, assign_to, child_type);
+
+            intermediate_deallocate_temporary(context, base_pointer);
         } break;
 
         case expr_static_member_access: {
@@ -8238,7 +8323,6 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
         } break;
 
         case expr_enum_member_name: {
-            assert(!get_address);
             assert(!assign_to.as_reference);
 
             Type* enum_type = expr->enum_member->type;
@@ -8253,7 +8337,7 @@ void linearize_expr(Context* context, Expr* expr, Local assign_to, bool get_addr
             assert(invalid_data_offset < U32_MAX);
 
             Local enum_local = intermediate_allocate_temporary(context, POINTER_SIZE);
-            linearize_expr(context, expr->enum_member, enum_local, false);
+            linearize_expr(context, expr->enum_member, enum_local);
 
             if (primitive_size_of(enum_type->enumeration.value_primitive) < POINTER_SIZE) {
                 buf_push(context->tmp_ops, ((Op) {
@@ -8421,10 +8505,10 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
             }
 
             Local left_local  = intermediate_allocate_temporary(context, POINTER_SIZE);
-            linearize_expr(context, left, left_local, true);
+            linearize_expr_get_address(context, left, left_local);
             left_local.as_reference = true;
 
-            linearize_expr(context, right, right_local, false);
+            linearize_expr(context, right, right_local);
 
             intermediate_write_compound_set(context, right_local, left_local, left->type);
 
@@ -8475,7 +8559,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
                                 .binary = { pointer_to_tmp_local, tmp_pointer },
                             }));
                             tmp_pointer.as_reference = true;
-                            linearize_expr(context, right, tmp_pointer, false);
+                            linearize_expr(context, right, tmp_pointer);
                             intermediate_deallocate_temporary(context, tmp_pointer);
                         }
 
@@ -8505,7 +8589,7 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
                         }));
                         pointer_to_variable_local.as_reference = true;
 
-                        linearize_expr(context, right, pointer_to_variable_local, false);
+                        linearize_expr(context, right, pointer_to_variable_local);
 
                         intermediate_deallocate_temporary(context, pointer_to_variable_local);
                     }
@@ -8516,11 +8600,11 @@ void linearize_assignment(Context* context, Expr* left, Expr* right) {
 
                     if (needs_temporary) {
                         Local tmp_local = intermediate_allocate_temporary(context, operand_size);
-                        linearize_expr(context, right, tmp_local, false);
+                        linearize_expr(context, right, tmp_local);
                         intermediate_write_compound_set(context, tmp_local, variable_local, left->type);
                         intermediate_deallocate_temporary(context, tmp_local);
                     } else {
-                        linearize_expr(context, right, variable_local, false);
+                        linearize_expr(context, right, variable_local);
                     }
                 } break;;
             }
@@ -8538,14 +8622,14 @@ u64 linearize_conditional_jump(Context* context, Expr* condition_expr) {
         if (!linearize_expr_to_local(condition_expr->binary.left, &left_local)) {
             u64 left_size = type_size_of(condition_expr->binary.left->type);
             left_local = intermediate_allocate_temporary(context, left_size);
-            linearize_expr(context, condition_expr->binary.left, left_local, false);
+            linearize_expr(context, condition_expr->binary.left, left_local);
         }
 
         Local right_local = {0};
         if (!linearize_expr_to_local(condition_expr->binary.right, &right_local)) {
             u64 right_size = type_size_of(condition_expr->binary.right->type);
             right_local = intermediate_allocate_temporary(context, right_size);
-            linearize_expr(context, condition_expr->binary.right, right_local, false);
+            linearize_expr(context, condition_expr->binary.right, right_local);
         }
 
         Type_Kind primitive = primitive_of(condition_expr->binary.left->type);
@@ -8573,7 +8657,7 @@ u64 linearize_conditional_jump(Context* context, Expr* condition_expr) {
         }
     } else {
         Local bool_local = intermediate_allocate_temporary(context, 1);
-        linearize_expr(context, condition_expr, bool_local, false);
+        linearize_expr(context, condition_expr, bool_local);
 
         buf_push(context->tmp_ops, ((Op) {
             .kind = op_cmp,
@@ -8606,7 +8690,7 @@ void linearize_stmt(Context* context, Func* func, Stmt* stmt) {
             if (size == 0) size = POINTER_SIZE;
             Local throwaway = intermediate_allocate_temporary(context, size);
 
-            linearize_expr(context, stmt->expr, throwaway, false);
+            linearize_expr(context, stmt->expr, throwaway);
 
             intermediate_deallocate_temporary(context, throwaway);
         } break;
