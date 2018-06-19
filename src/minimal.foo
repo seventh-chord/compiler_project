@@ -1,0 +1,8 @@
+
+fn main() {
+    let a: u64 = 1;
+    let b: u64;
+
+    a = 3;
+    a = b;
+}

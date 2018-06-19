@@ -10,10 +10,10 @@ The rest of a value lies at higher memory addresses.
 
      |  0   1   2   3
   ---+----------------
-   0 | rax rcx rdx rbx
-   4 | rsp rbp rsi rdi
-   8 | r8  r9  r10 r11
-  12 | r12 r13 r14 r15
+   0 | RAX RCX RDX RBX
+   4 | RSP RBP RSI RDI
+   8 | R8  R9  R10 R11
+   c | R12 R13 R14 R15
 
 The eight higher registers can only be encoded using the REX byte.
 
@@ -24,14 +24,15 @@ Prefixes can be used on the 32-bit variants:
 REX.W   64-bit mode instead of 32-bit mode
 
 # ModRM and SIB
-ModRM:
-    mod     6, 7
-    reg     3, 4, 5
-    r/m     0, 1, 2
-SIB:
-    scale   6, 7
-    index   3, 4, 5
-    base    0, 1, 2
+Bitwise layout:
+  ModRM:
+    mod     7, 6,
+    reg           5, 4, 3,
+    r/m                    2, 1, 0
+  SIB:
+    scale   7, 6,
+    index         5, 4, 3,
+    base                   2, 1, 0
 
 'reg' can only specify a register
 Based on the value of 'mod', 'r/m' can either reference a register or a memory location.
