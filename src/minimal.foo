@@ -3,6 +3,11 @@ fn main() {
     let a: u64 = 1;
     let b: u64;
 
-    a = 3;
+    a = 3 + 5;
     a = b;
+
+    a = 4 + a;
+
+    let p = &a;
+    *p = 7;
 }

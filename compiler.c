@@ -197,9 +197,9 @@ void printf_flush();
 #define trap_or_exit()   (ExitProcess(-1))
 #endif
 
-#define assert(x)        ((x)? (null) : (printf("(%s:%u) assert(%s)\n", __FILE__, (u64) __LINE__, #x), printf_flush(), trap_or_exit(), null))
-#define panic(x, ...)    (printf("(%s:%u) Panic: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
-#define unimplemented()  (printf("(%s:%u) Reached unimplemented code\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
+#define assert(x)        ((x)? (null) : (printf("%s(%u): assert(%s)\n", __FILE__, (u64) __LINE__, #x), printf_flush(), trap_or_exit(), null))
+#define panic(x, ...)    (printf("%s(%u): Panic: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
+#define unimplemented()  (printf("%s(%u): Reached unimplemented code\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
 
 // Code that is inserted at the start of every user program
 #define PRELOAD_QUOTE(...) #__VA_ARGS__
@@ -667,6 +667,7 @@ void print(u8* buffer, u32 buffer_length) {
 u8* printf_buf; // Heh, this is gnarly af.
 
 void printf_integer(u64 value, u8 base);
+u8 char_for_digit(u8 c);
 
 void printf_flush() {
     #ifdef DEBUG
@@ -769,6 +770,16 @@ void printf(u8* string, ...) {
                     printf_integer(value, 16);
                 } break;
 
+                case 'b': {
+                    u8 byte = va_arg(args, u8);
+
+                    u8 hi = byte >> 4;
+                    u8 lo = byte & 0x0f;
+
+                    buf_push(printf_buf, char_for_digit(hi));
+                    buf_push(printf_buf, char_for_digit(lo));
+                } break;
+
                 case 's': {
                     u8* other_string = va_arg(args, u8*);
                     assert(other_string != null);
@@ -809,12 +820,7 @@ void printf_integer(u64 value, u8 base) {
         u8 digit = value % base;
         value = value / base;
 
-        if (digit <= 9) {
-            digit = '0' + digit;
-        } else {
-            digit = 'a' + (digit - 10);
-        }
-        buf_push(printf_buf, digit);
+        buf_push(printf_buf, char_for_digit(digit));
 
         length += 1;
     } while (value != 0);
@@ -825,6 +831,14 @@ void printf_integer(u64 value, u8 base) {
         u8 temp = printf_buf[b];
         printf_buf[b] = printf_buf[a];
         printf_buf[a] = temp;
+    }
+}
+
+u8 char_for_digit(u8 c) {
+    if (c <= 9) {
+        return '0' + c;
+    } else {
+        return 'a' + (c - 10);
     }
 }
 
@@ -2082,7 +2096,7 @@ u64 add_exe_data(Context* context, u8* data, u64 length, u64 alignment) {
 void print_file_pos(File_Pos* pos) {
     u8* name = pos->file_name;
     if (name == null) name = "<unkown file>";
-    printf("(%s:%u) ", name, (u64) pos->line);
+    printf("%s(%u): ", name, (u64) pos->line);
 }
 
 void print_type(Context* context, Type* type) {
@@ -2319,7 +2333,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
     }
 }
 
-void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
+void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
     for (u32 i = 0; i < indent_level; i += 1) printf("    ");
 
     switch (stmt->kind) {
@@ -2351,7 +2365,9 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
         case stmt_block: {
             printf("{\n");
 
-            print_stmts(context, func, stmt->block, indent_level + 1);
+            for (Stmt *inner = stmt->block; inner->kind != stmt_end; inner = inner->next) {
+                print_stmt(context, func, inner, indent_level + 1);
+            }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
             printf("}");
@@ -2362,7 +2378,9 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             print_expr(context, func, stmt->conditional.condition);
             printf(") {\n");
 
-            print_stmts(context, func, stmt->conditional.then, indent_level + 1);
+            for (Stmt *inner = stmt->conditional.then; inner->kind != stmt_end; inner = inner->next) {
+                print_stmt(context, func, inner, indent_level + 1);
+            }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
             printf("}");
@@ -2370,7 +2388,9 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             if (stmt->conditional.else_then != null) {
                 printf(" else {\n");
 
-                print_stmts(context, func, stmt->conditional.else_then, indent_level + 1);
+                for (Stmt *inner = stmt->conditional.else_then; inner->kind != stmt_end; inner = inner->next) {
+                    print_stmt(context, func, inner, indent_level + 1);
+                }
 
                 for (u32 i = 0; i < indent_level; i += 1) printf("    ");
                 printf("}");
@@ -2386,7 +2406,9 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
                 printf("for {\n");
             }
 
-            print_stmts(context, func, stmt->loop.body, indent_level + 1);
+            for (Stmt *inner = stmt->loop.body; inner->kind != stmt_end; inner = inner->next) {
+                print_stmt(context, func, inner, indent_level + 1);
+            }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
             printf("}");
@@ -2411,10 +2433,6 @@ void print_stmts(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
     }
 
     printf("\n");
-
-    if (stmt->next != null && stmt->next->kind != stmt_end) {
-        print_stmts(context, func, stmt->next, indent_level);
-    }
 }
 
 u32 find_var(Context* context, Func* func, u32 name) {
@@ -7116,6 +7134,8 @@ typedef enum Register {
     XMM8,  XMM9,  XMM10, XMM11,
     XMM12, XMM13, XMM14, XMM15,
 
+    ALLOCATABLE_REGISTER_COUNT,
+
     // For when the 'modrm/reg' field is used to extend the opcode
     REGISTER_OPCODE_0, REGISTER_OPCODE_1, REGISTER_OPCODE_2,
     REGISTER_OPCODE_3, REGISTER_OPCODE_4, REGISTER_OPCODE_5,
@@ -7123,6 +7143,16 @@ typedef enum Register {
 
     REGISTER_COUNT,
 } Register;
+
+typedef enum Register_Kind {
+    REGISTER_KIND_GPR,
+    REGISTER_KIND_XMM,
+} Register_Kind;
+
+int REGISTER_KIND_RANGES[2][2] = {
+    [REGISTER_KIND_GPR] = { RAX,  R15   },
+    [REGISTER_KIND_XMM] = { XMM0, XMM15 },
+};
 
 u8 REGISTER_INDICES[REGISTER_COUNT] = {
     [RAX] = 0,  [RCX] = 1,  [RDX] = 2,  [RBX] = 3,
@@ -7189,28 +7219,102 @@ typedef struct X64_Address {
     i32 immediate_offset;
 } X64_Address;
 
-typedef struct LHS {
+typedef struct X64_Place {
     enum {
-        LHS_NOWHERE,
-        LHS_REGISTER,
-        LHS_ADDRESS,
-    } place;
+        PLACE_NOWHERE,
+        PLACE_REGISTER,
+        PLACE_ADDRESS,
+    } kind;
 
     union {
         Register reg;
         X64_Address address;
     };
-} LHS;
+} X64_Place;
+
+
+typedef struct Reg_Allocator_Frame Reg_Allocator_Frame;
+struct Reg_Allocator_Frame {
+    struct {
+        bool allocated;
+    } states[ALLOCATABLE_REGISTER_COUNT];
+
+    Reg_Allocator_Frame *next, *previous;
+};
+
+typedef struct Reg_Allocator {
+    Reg_Allocator_Frame *head;
+} Reg_Allocator;
+
+void register_allocator_enter_frame(Context *context, Reg_Allocator *allocator) {
+    if (allocator->head == null) {
+        allocator->head = arena_new(&context->arena, Reg_Allocator_Frame);
+    }
+
+    if (allocator->head->next == null) {
+        allocator->head->next = arena_new(&context->arena, Reg_Allocator_Frame);
+        allocator->head->next->previous = allocator->head;
+    }
+
+    mem_copy((u8*) allocator->head, (u8*) allocator->head->next, sizeof(Reg_Allocator_Frame) - 2*sizeof(void*));
+    allocator->head = allocator->head->next;
+}
+
+void register_allocator_leave_frame(Context *context, Reg_Allocator *allocator) {
+    assert(allocator->head->previous != null);
+    allocator->head = allocator->head->previous;
+}
+
+Register register_allocate(Reg_Allocator *allocator, Register_Kind kind) {
+    Register start = REGISTER_KIND_RANGES[kind][0];
+    Register end = REGISTER_KIND_RANGES[kind][1];
+
+    for (Register reg = start; reg <= end; reg += 1) {
+        if (!allocator->head->states[reg].allocated) {
+            allocator->head->states[reg].allocated = true;
+            return reg;
+        }
+    }
+
+    panic("Out of registers to allocate\n");
+    return REGISTER_NONE;
+}
+
+
 
 #define PRINT_GENERATED_INSTRUCTIONS
+
+#ifdef PRINT_GENERATED_INSTRUCTIONS
+void dump_instruction_bytes(u8 **b) {
+    static u64 last_length = 0;
+    u64 new_length = buf_length(*b);
+
+    u64 pad = 8;
+
+    for (u64 i = last_length; i < new_length; i += 1) {
+        u8 byte = (*b)[i];
+        printf("%b ", byte);
+
+        pad -= 1;
+    }
+
+    if (pad < 60) {
+        u8 *spaces = "                                                            | ";
+        printf(spaces + 60 - (pad*3));
+    } else {
+        printf("| ");
+    }
+
+    last_length = new_length;
+}
+#endif
 
 
 void print_x64_address(X64_Address address) {
     printf("[%s", REGISTER_NAMES[address.base]);
 
     if (address.index != REGISTER_NONE) {
-        u64 actual_scale = (0x08 >> (3 - address.scale)) & 0x0f;
-        printf(" + %s*%u", REGISTER_NAMES[address.index], actual_scale);
+        printf(" + %s*%u", REGISTER_NAMES[address.index], (u64) address.scale);
     }
 
     if (address.immediate_offset > 0) {
@@ -7255,7 +7359,6 @@ void encode_instruction_reg_mem(u8 **b, u8 rex, u8 opcode, X64_Address mem, Regi
         u8 reg_index = REGISTER_INDICES[mem.base];
 
         if ((reg_index & 0x07) == MODRM_RM_USE_SIB) {
-            modrm |= MODRM_RM_USE_SIB;
             use_sib = true;
         } else {
             modrm |= reg_index & 0x07;
@@ -7268,6 +7371,8 @@ void encode_instruction_reg_mem(u8 **b, u8 rex, u8 opcode, X64_Address mem, Regi
     }
 
     if (use_sib) {
+        modrm |= MODRM_RM_USE_SIB;
+
         if (mem.index == REGISTER_NONE) {
             assert(mem.scale == 0);
             sib |= SIB_NO_INDEX;
@@ -7281,7 +7386,7 @@ void encode_instruction_reg_mem(u8 **b, u8 rex, u8 opcode, X64_Address mem, Regi
             }
 
             u8 reg_index = REGISTER_INDICES[mem.index];
-            assert(reg_index & 0x07 != REGISTER_INDICES[RSP]);
+            assert((reg_index & 0x07) != REGISTER_INDICES[RSP]);
 
             sib |= (reg_index & 0x07) << 3;
             if (reg_index & 0x08) {
@@ -7335,6 +7440,7 @@ void instruction_int3(u8 **b) {
     buf_push(*b, 0xcc);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
     printf("int 3\n");
     #endif
 }
@@ -7343,6 +7449,7 @@ void instruction_nop(u8 **b) {
     buf_push(*b, 0x90);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
     printf("nop\n");
     #endif
 }
@@ -7351,6 +7458,7 @@ void instruction_ret(u8 **b) {
     buf_push(*b, 0xc3);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
     printf("ret\n");
     #endif
 }
@@ -7370,7 +7478,19 @@ void instruction_xor(u8 **b, Register left, Register right, u8 op_size) {
     encode_instruction_reg_reg(b, rex, opcode, left, right);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
     printf("xor%u %s, %s\n", (u64) op_size*8, REGISTER_NAMES[left], REGISTER_NAMES[right]);
+    #endif
+}
+
+void instruction_lea(u8 **b, X64_Address mem, Register reg) {
+    encode_instruction_reg_mem(b, REX_BASE | REX_W, 0x8d, mem, reg);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    printf("lea %s, ", REGISTER_NAMES[reg]);
+    print_x64_address(mem);
+    printf("\n");
     #endif
 }
 
@@ -7395,6 +7515,7 @@ void instruction_mov_reg_mem(u8 **b, Mov_Mode mode, X64_Address mem, Register re
     encode_instruction_reg_mem(b, rex, opcode, mem, reg);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
     if (mode == MOV_FROM_MEM) {
         printf("mov%u %s, ", (u64) op_size*8, REGISTER_NAMES[reg]);
         print_x64_address(mem);
@@ -7423,70 +7544,230 @@ void instruction_mov_imm_mem(u8 **b, X64_Address mem, u64 immediate, u8 op_size)
     str_push_integer(b, op_size, immediate);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
     printf("mov%u ", (u64) op_size*8);
     print_x64_address(mem);
     printf(", %x\n", immediate);
     #endif
 }
 
+void instruction_mov_imm_reg(u8 **b, Register reg, u64 immediate, u8 op_size) {
+    u8 rex = REX_BASE;
+    u8 opcode = 0xb8;
 
-void machinecode_immeditate_to_lhs(Context *context, LHS lhs, u64 immediate, u8 bytes) {
-    switch (lhs.place) {
-        case LHS_REGISTER: {
-            unimplemented();
-            //instruction_mov_imm_reg(&context->seg_text, immediate, RAX, bytes);
+    switch (op_size) {
+        case 1: opcode = 0xb0; break;
+        case 2: buf_push(*b, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    opcode |= REGISTER_INDICES[reg] & 0x07;
+    if (REGISTER_INDICES[reg] & 0x08) {
+        reg |= REX_B;
+    }
+
+    if (rex != REX_BASE) {
+        buf_push(*b, rex);
+    }
+    buf_push(*b, opcode);
+    str_push_integer(b, op_size, immediate);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    printf("mov%u %s, %x\n", (u64) op_size*8, REGISTER_NAMES[reg], (u64) immediate);
+    #endif
+}
+
+
+typedef struct Simple_Binary_Info {
+    enum {
+        SIMPLE_BINARY_ADD = binary_add,
+        SIMPLE_BINARY_SUB = binary_sub,
+    } kind;
+
+    enum {
+        SIMPLE_BINARY_A_IS_DST,
+        SIMPLE_BINARY_B_IS_DST,
+    } direction;
+
+    Register a;
+
+    bool b_is_address;
+    union {
+        Register reg;
+        X64_Address address;
+    } b;
+
+    u8 op_size;
+} Simple_Binary_Info;
+
+void instruction_simple_binary(u8 **b, Simple_Binary_Info info) {
+    bool mr = info.direction == SIMPLE_BINARY_B_IS_DST;
+    u8 opcode;
+    switch (info.kind) {
+        case SIMPLE_BINARY_ADD: opcode = mr? 0x01 : 0x03; break;
+        case SIMPLE_BINARY_SUB: opcode = mr? 0x29 : 0x2a; break;
+        default: assert(false);
+    }
+
+    u8 rex = REX_BASE;
+
+    switch (info.op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(*b, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (info.b_is_address) {
+        encode_instruction_reg_mem(b, rex, opcode, info.b.address, info.a);
+    } else {
+        encode_instruction_reg_reg(b, rex, opcode, info.b.reg, info.a);
+    }
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    u8 *name;
+    switch (info.kind) {
+        case SIMPLE_BINARY_ADD: name = "add"; break;
+        case SIMPLE_BINARY_SUB: name = "sub"; break;
+        default: assert(false);
+    }
+    printf("%s%u ", name, (u64) info.op_size*8);
+
+    if (info.direction == SIMPLE_BINARY_A_IS_DST) {
+        printf("%s, ", REGISTER_NAMES[info.a]);
+        if (info.b_is_address) {
+            print_x64_address(info.b.address);
+            printf("\n");
+        } else {
+            printf("%s\n", REGISTER_NAMES[info.b.reg]);
+        }
+    } else {
+        if (info.b_is_address) {
+            print_x64_address(info.b.address);
+        } else {
+            printf("%s", REGISTER_NAMES[info.b.reg]);
+        }
+        printf(", %s\n", REGISTER_NAMES[info.a]);
+    }
+    #endif
+}
+
+
+void machinecode_immediate_to_place(Context *context, X64_Place place, u64 immediate, u8 bytes) {
+    switch (place.kind) {
+        case PLACE_REGISTER: {
+            instruction_mov_imm_reg(&context->seg_text, place.reg, immediate, bytes);
         } break;
 
-        case LHS_ADDRESS: {
+        case PLACE_ADDRESS: {
             if (bytes == 8) {
-                instruction_mov_imm_mem(&context->seg_text, lhs.address, immediate & U32_MAX, 4);
-                lhs.address.immediate_offset += 4;
-                instruction_mov_imm_mem(&context->seg_text, lhs.address, immediate >> 32, 4);
+                instruction_mov_imm_mem(&context->seg_text, place.address, immediate & U32_MAX, 4);
+                place.address.immediate_offset += 4;
+                instruction_mov_imm_mem(&context->seg_text, place.address, immediate >> 32, 4);
             } else {
-                instruction_mov_imm_mem(&context->seg_text, lhs.address, immediate, bytes);
+                instruction_mov_imm_mem(&context->seg_text, place.address, immediate, bytes);
             }
         } break;
 
-        case LHS_NOWHERE: assert(false);
+        case PLACE_NOWHERE: assert(false);
         default: assert(false);
     }
 }
 
-void machinecode_lhs_to_lhs(Context *context, LHS src, LHS dst, u64 size) {
+void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place src, X64_Place dst, u64 size) {
     if (size <= 8) {
-        if (src.place == LHS_ADDRESS && dst.place == LHS_ADDRESS) {
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            // TODO TODO TODO This has to interface with register allocation!!!
-            Register reg = RAX;
+        if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
+            register_allocator_enter_frame(context, reg_allocator);
 
+            Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
             instruction_mov_reg_mem(&context->seg_text, MOV_FROM_MEM, src.address, reg, (u8) size);
             instruction_mov_reg_mem(&context->seg_text, MOV_TO_MEM, dst.address, reg, (u8) size);
-        } else if (src.place == LHS_REGISTER && dst.place == LHS_ADDRESS) {
-            instruction_mov_reg_mem(&context->seg_text, MOV_TO_MEM, src.address, dst.reg, (u8) size);
-        } else if (src.place == LHS_ADDRESS && dst.place == LHS_REGISTER) {
+
+            register_allocator_leave_frame(context, reg_allocator);
+        } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_ADDRESS) {
+            instruction_mov_reg_mem(&context->seg_text, MOV_TO_MEM, dst.address, src.reg, (u8) size);
+        } else if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_REGISTER) {
             instruction_mov_reg_mem(&context->seg_text, MOV_FROM_MEM, src.address, dst.reg, (u8) size);
-        } else if (src.place == LHS_REGISTER && dst.place == LHS_REGISTER) {
+        } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_REGISTER) {
             unimplemented();
             // TODO mov_reg_reg
         } else {
             assert(false);
         }
     } else {
-        assert(src.place == LHS_ADDRESS && dst.place == LHS_ADDRESS);
+        assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
         unimplemented(); // TODO call runtime_builtin_mem_copy
     }
 }
 
-LHS machinecode_for_lhs_expr(Context *context, Func *func, Expr *expr) {
+void machinecode_binary(Context *context, Reg_Allocator *reg_allocator, Binary_Op op, Type_Kind primitive, X64_Place src, X64_Place dst) {
+    switch (op) {
+        case binary_add:
+        case binary_sub:
+        {
+            if (primitive_is_float(primitive)) {
+                unimplemented();
+            } else {
+                register_allocator_enter_frame(context, reg_allocator);
+
+                Register tmp_reg = REGISTER_NONE;
+                if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
+                    tmp_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+                    instruction_mov_reg_mem(&context->seg_text, MOV_FROM_MEM, src.address, tmp_reg, primitive_size_of(primitive));
+                    src = (X64_Place) { .kind = PLACE_REGISTER, .reg = tmp_reg };
+                }
+
+                assert(src.kind == PLACE_REGISTER || dst.kind == PLACE_REGISTER);
+
+                Simple_Binary_Info info = {0};
+                info.kind = op;
+                info.op_size = primitive_size_of(primitive);
+
+                if (src.kind == PLACE_ADDRESS) {
+                    info.a = dst.reg;
+                    info.b_is_address = true;
+                    info.b.address = src.address;
+                    info.direction = SIMPLE_BINARY_A_IS_DST;
+                } else if (dst.kind == PLACE_ADDRESS) {
+                    info.a = src.reg;
+                    info.b_is_address = true;
+                    info.b.address = dst.address;
+                    info.direction = SIMPLE_BINARY_B_IS_DST;
+                } else {
+                    info.a = src.reg;
+                    info.b_is_address = false;
+                    info.b.reg = dst.reg;
+                    info.direction = SIMPLE_BINARY_B_IS_DST;
+                }
+                instruction_simple_binary(&context->seg_text, info);
+
+                register_allocator_leave_frame(context, reg_allocator);
+            }
+        } break;
+
+        case binary_mul: unimplemented(); break;
+        case binary_div: unimplemented(); break;
+        case binary_mod: unimplemented(); break;
+
+        case binary_eq: unimplemented(); break;
+        case binary_neq: unimplemented(); break;
+        case binary_gt: unimplemented(); break;
+        case binary_gteq: unimplemented(); break;
+        case binary_lt: unimplemented(); break;
+        case binary_lteq: unimplemented(); break;
+
+        default: assert(false);
+    }
+}
+
+void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place);
+
+X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator) {
     assert(expr->flags & EXPR_FLAG_ASSIGNABLE);
 
     switch (expr->kind) {
@@ -7494,45 +7775,55 @@ LHS machinecode_for_lhs_expr(Context *context, Func *func, Expr *expr) {
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
             i32 offset = func->body.stack_layout.vars[expr->variable.index].offset;
 
-            LHS lhs = {0};
-            lhs.place = LHS_ADDRESS;
-            lhs.address.base = RSP;
-            lhs.address.immediate_offset = offset;
-            return lhs;
+            X64_Place place = {0};
+            place.kind = PLACE_ADDRESS;
+            place.address.base = RSP;
+            place.address.immediate_offset = offset;
+            return place;
         } break;
 
         case expr_unary: {
             switch (expr->unary.op) {
                 case unary_dereference: {
-                    unimplemented(); // TODO return a LHS
+                    Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+
+                    X64_Place place_value = {0};
+                    place_value.kind = PLACE_REGISTER;
+                    place_value.reg = reg;
+                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place_value);
+
+                    X64_Place place_pointer = {0};
+                    place_pointer.kind = PLACE_ADDRESS;
+                    place_pointer.address = (X64_Address) { .base = reg };
+                    return place_pointer;
                 } break;
             }
         } break;
 
         case expr_subscript: {
-            unimplemented(); // TODO return a LHS
+            unimplemented(); // TODO return a X64_Place
         } break;
 
         case expr_member_access: {
-            unimplemented(); // TODO return a LHS
+            unimplemented(); // TODO return a X64_Place
         } break;
     }
 
-    return (LHS) { .place = LHS_NOWHERE };
+    return (X64_Place) { .kind = PLACE_NOWHERE };
 }
 
-void machinecode_for_expr_into_lhs(Context *context, Func *func, Expr *expr, LHS lhs) {
+void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place) {
     switch (expr->kind) {
         case expr_variable: {
             u64 size = type_size_of(expr->type);
-            LHS right = machinecode_for_lhs_expr(context, func, expr);
-            machinecode_lhs_to_lhs(context, right, lhs, size);
+            X64_Place from = machinecode_for_assignable_expr(context, func, expr, reg_allocator);
+            machinecode_move(context, reg_allocator, from, place, size);
         } break;
 
         case expr_literal: {
             u64 size = type_size_of(expr->type);
             assert(size <= 8);
-            machinecode_immeditate_to_lhs(context, lhs, expr->literal.masked_value, (u8) size);
+            machinecode_immediate_to_place(context, place, expr->literal.masked_value, (u8) size);
         } break;
 
         case expr_string_literal: {
@@ -7544,11 +7835,77 @@ void machinecode_for_expr_into_lhs(Context *context, Func *func, Expr *expr, LHS
         } break;
 
         case expr_binary: {
-            unimplemented();
+            Register_Kind reg_kind = primitive_is_float(primitive_of(expr->binary.left->type))? REGISTER_KIND_XMM : REGISTER_KIND_GPR;
+
+            X64_Place left_place;
+            Register left_reg = REGISTER_NONE;
+            if (place.kind == PLACE_ADDRESS) {
+                register_allocator_enter_frame(context, reg_allocator);
+                left_reg = register_allocate(reg_allocator, reg_kind);
+                left_place = (X64_Place) { .kind = PLACE_REGISTER, .reg = left_reg };
+            } else {
+                left_place = place;
+            }
+
+            machinecode_for_expr(context, func, expr->binary.left, reg_allocator, left_place);
+
+            register_allocator_enter_frame(context, reg_allocator);
+
+            Register right_reg = register_allocate(reg_allocator, reg_kind);
+            X64_Place right_place = { .kind = PLACE_REGISTER, .reg = right_reg };
+            machinecode_for_expr(context, func, expr->binary.right, reg_allocator, right_place);
+
+            Type_Kind primitive = primitive_of(expr->type);
+            machinecode_binary(context, reg_allocator, expr->binary.op, primitive, right_place, left_place);
+
+            register_allocator_leave_frame(context, reg_allocator);
+
+            if (left_reg != REGISTER_NONE) {
+                u64 size = type_size_of(expr->type);
+                assert(size <= 8);
+                machinecode_move(context, reg_allocator, left_place, place, (u8) size);
+                register_allocator_leave_frame(context, reg_allocator);
+            }
         } break;
 
         case expr_unary: {
-            unimplemented();
+            switch (expr->unary.op) {
+                case unary_not: {
+                    unimplemented();
+                } break;
+
+                case unary_neg: {
+                    unimplemented();
+                } break;
+
+                case unary_dereference: {
+                    unimplemented();
+                } break;
+
+                case unary_address_of: {
+                    X64_Place inner_place = machinecode_for_assignable_expr(context, func, expr->unary.inner, reg_allocator);
+                    assert(inner_place.kind == PLACE_ADDRESS);
+
+                    switch (place.kind) {
+                        case PLACE_REGISTER: {
+                            instruction_lea(&context->seg_text, inner_place.address, place.reg);
+                        } break;
+
+                        case PLACE_ADDRESS: {
+                            register_allocator_enter_frame(context, reg_allocator);
+                            Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+                            instruction_lea(&context->seg_text, inner_place.address, reg);
+                            instruction_mov_reg_mem(&context->seg_text, MOV_TO_MEM, place.address, reg, POINTER_SIZE);
+                            register_allocator_leave_frame(context, reg_allocator);
+                        } break;
+
+                        case PLACE_NOWHERE: assert(false);
+                        default: assert(false);
+                    }
+                } break;
+
+                default: assert(false);
+            }
         } break;
 
         case expr_call: {
@@ -7589,7 +7946,14 @@ void machinecode_for_expr_into_lhs(Context *context, Func *func, Expr *expr, LHS
     }
 }
 
-void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt) {
+void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocator *reg_allocator) {
+    register_allocator_enter_frame(context, reg_allocator);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("; ");
+    print_stmt(context, func, stmt, 0);
+    #endif
+
     switch (stmt->kind) {
         case stmt_declaration: {
             Var *var = &func->body.vars[stmt->declaration.var_index];
@@ -7598,19 +7962,19 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt) {
             u64 align = type_align_of(var->type);
             i32 stack_offset = func->body.stack_layout.vars[stmt->declaration.var_index].offset;
 
-            LHS lhs = {0};
-            lhs.place = LHS_ADDRESS;
-            lhs.address.base = RSP;
-            lhs.address.immediate_offset = stack_offset;
+            X64_Place place = {0};
+            place.kind = PLACE_ADDRESS;
+            place.address.base = RSP;
+            place.address.immediate_offset = stack_offset;
 
             if (stmt->declaration.right == null) {
                 if (size != align || size > 8) {
                     unimplemented(); // TODO call runtime_builtin_mem_clear
                 } else {
-                    machinecode_immeditate_to_lhs(context, lhs, 0, (u8) size);
+                    machinecode_immediate_to_place(context, place, 0, (u8) size);
                 }
             } else {
-                machinecode_for_expr_into_lhs(context, func, stmt->declaration.right, lhs);
+                machinecode_for_expr(context, func, stmt->declaration.right, reg_allocator, place);
             }
         } break;
 
@@ -7619,8 +7983,8 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt) {
         } break;
 
         case stmt_assignment: {
-            LHS lhs = machinecode_for_lhs_expr(context, func, stmt->assignment.left);
-            machinecode_for_expr_into_lhs(context, func, stmt->assignment.right, lhs);
+            X64_Place left = machinecode_for_assignable_expr(context, func, stmt->assignment.left, reg_allocator);
+            machinecode_for_expr(context, func, stmt->assignment.right, reg_allocator, left);
         } break;
 
         case stmt_block: {
@@ -7647,6 +8011,8 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt) {
             unimplemented();
         } break;
     }
+
+    register_allocator_leave_frame(context, reg_allocator);
 }
 
 
@@ -7704,6 +8070,8 @@ void build_machinecode(Context *context) {
     }
 
     // Normal functions
+    Reg_Allocator reg_allocator = {0};
+
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
     if (main_func_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
@@ -7797,6 +8165,7 @@ void build_machinecode(Context *context) {
             str_push_integer(&context->seg_text, sizeof(i32), func->body.stack_layout.total_bytes);
         }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
+        dump_instruction_bytes(&context->seg_text);
         printf("sub rsp, %x\n", func->body.stack_layout.total_bytes);
         #endif
         
@@ -7834,8 +8203,12 @@ void build_machinecode(Context *context) {
 
         // Write out operations
         for (Stmt* stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
-            machinecode_for_stmt(context, func, stmt);
+            machinecode_for_stmt(context, func, stmt, &reg_allocator);
         }
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("; (epilog)\n");
+        #endif
 
         // Pass output
         if (func->signature.has_output) {
@@ -7874,14 +8247,12 @@ void build_machinecode(Context *context) {
             str_push_integer(&context->seg_text, sizeof(i32), func->body.stack_layout.total_bytes);
         }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
+        dump_instruction_bytes(&context->seg_text);
         printf("add rsp, %x\n", (u64) func->body.stack_layout.total_bytes);
         #endif
 
         // Return to caller
-        buf_push(context->seg_text, 0xc3);
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("ret\n");
-        #endif
+        instruction_ret(&context->seg_text);
     }
 
     // Call fixups
@@ -8586,7 +8957,9 @@ void print_verbose_info(Context* context) {
                 printf("\n");
 
                 printf("    Statements:\n");
-                print_stmts(context, func, func->body.first_stmt, 2);
+                for (Stmt *stmt = func->body.first_stmt; stmt->kind != stmt_end; stmt = stmt->next) {
+                    print_stmt(context, func, stmt, 2);
+                }
             } break;
 
             case func_kind_imported: {
@@ -8620,7 +8993,7 @@ bool run_executable(u8* exe_path) {
         return false;
     }
 
-    WaitForSingleObject(process_info.process, 0xffffffff);
+    WaitForSingleObject(process_info.process, U32_MAX);
 
     return true;
 }
