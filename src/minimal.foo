@@ -4,10 +4,26 @@ fn main() {
     let b: u64;
 
     a = 3 + 5;
-    a = b;
-
+    b = a;
     a = 4 + a;
 
     let p = &a;
-    *p = 7;
+    *p = a + 7;
+
+    let big: [10]u16;
+    big[0] = 0x48;
+    big[1] = 0x8d;
+
+    let big_p = &big;
+    big_p[1] = 0x8d;
+
+    big_p[b] = 0xf0;
+
+
+    let dude: [2]Foo;
+}
+
+struct Foo {
+    a: u64;
+    b: u8;
 }

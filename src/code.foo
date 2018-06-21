@@ -467,6 +467,7 @@ a defer statement
 figure out how to do no parentheses in loops/conditionals
 dont generate jump after return if return is the last stmt
 maybe a better parser for floats? The current one is pretty accurate for f32 at least though
+structure definitions inside functiosn
 
 .pdata and unwind info
 enabling subsystem windows (over subsystem console)

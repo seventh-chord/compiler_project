@@ -2352,7 +2352,9 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
         case stmt_declaration: {
             Var* var = &func->body.vars[stmt->declaration.var_index];
             u8* name = string_table_access(context->string_table, var->name);
-            printf("var %s", name);
+            printf("let %s: ", name);
+
+            print_type(context, var->type);
 
             if (stmt->declaration.right != null) {
                 printf(" = ");
@@ -7280,6 +7282,12 @@ Register register_allocate(Reg_Allocator *allocator, Register_Kind kind) {
     return REGISTER_NONE;
 }
 
+void register_ensure_free(Reg_Allocator *allocator, Register reg) {
+    // TODO In the future we properly want to flush the old contents of the register, and return
+    // them when we leave the current allocator frame!
+    assert(!allocator->head->states[reg].allocated);
+}
+
 
 
 #define PRINT_GENERATED_INSTRUCTIONS
@@ -7463,6 +7471,84 @@ void instruction_ret(u8 **b) {
     #endif
 }
 
+// Returns an index to a position where a i8 jump offset should be written
+u64 instruction_jmp_i8(u8 **b) {
+    buf_push(*b, 0xeb);
+    buf_push(*b, 0x00);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    printf("jmp ??\n");
+    #endif
+
+    return buf_length(*b) - 1;
+}
+
+// Jumps if RCX equals zero
+// Returns an index to a position where a i8 jump offset should be written
+u64 instruction_jrcxz(u8 **b) {
+    buf_push(*b, 0xe3);
+    buf_push(*b, 0x00);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    printf("jrcxz ??\n");
+    #endif
+
+    return buf_length(*b) - 1;
+}
+
+void instruction_call(Context* context, bool builtin, u32 func_index) {
+    buf_push(context->seg_text, 0xe8);
+    buf_push(context->seg_text, 0xde);
+    buf_push(context->seg_text, 0xad);
+    buf_push(context->seg_text, 0xbe);
+    buf_push(context->seg_text, 0xef);
+
+    Call_Fixup fixup = {0};
+    fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
+    fixup.builtin = builtin;
+    fixup.func_index = func_index;
+    buf_push(context->call_fixups, fixup);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    u8 *name;
+    if (builtin) {
+        switch (func_index) {
+            case runtime_builtin_mem_copy:  name = "builtin_mem_copy"; break;
+            case runtime_builtin_mem_clear: name = "builtin_mem_clear"; break;
+            default: assert(false);
+        }
+    } else {
+        u32 name_index = context->funcs[func_index].name;
+        name = string_table_access(context->string_table, name_index);
+    }
+
+    dump_instruction_bytes(&context->seg_text);
+    printf("call %s\n", name);
+    #endif
+}
+
+void instruction_inc_or_dec(u8 **b, bool inc, Register reg, u8 op_size) {
+    u8 rex = REX_BASE;
+    u8 opcode = 0xff;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(*b, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_reg_reg(b, rex, opcode, reg, inc? REGISTER_OPCODE_0 : REGISTER_OPCODE_1);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    printf("%s%u %s\n", inc? "inc" : "dec", (u64) op_size*8, REGISTER_NAMES[reg]);
+    #endif
+}
+
 void instruction_xor(u8 **b, Register left, Register right, u8 op_size) {
     u8 rex = REX_BASE;
     u8 opcode = 0x31;
@@ -7529,6 +7615,21 @@ void instruction_mov_reg_mem(u8 **b, Mov_Mode mode, X64_Address mem, Register re
 }
 
 void instruction_mov_imm_mem(u8 **b, X64_Address mem, u64 immediate, u8 op_size) {
+    u8 imm_size = op_size;
+
+    if (op_size == 8) {
+        // NB there is no 'mov mem64, imm64' instruction, so we have to improvize
+        // Also, 'mov mem64, imm32' sign-extends, hens I32_MAX
+        if (immediate > I32_MAX) {
+            instruction_mov_imm_mem(b, mem, immediate & U32_MAX, 4);
+            mem.immediate_offset += 4;
+            instruction_mov_imm_mem(b, mem, immediate >> 32, 4);
+            return;
+        } else {
+            imm_size = 4;
+        }
+    }
+
     u8 rex = REX_BASE;
     u8 opcode = 0xc7;
 
@@ -7541,7 +7642,7 @@ void instruction_mov_imm_mem(u8 **b, X64_Address mem, u64 immediate, u8 op_size)
     }
 
     encode_instruction_reg_mem(b, rex, opcode, mem, REGISTER_OPCODE_0);
-    str_push_integer(b, op_size, immediate);
+    str_push_integer(b, imm_size, immediate);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
@@ -7552,6 +7653,11 @@ void instruction_mov_imm_mem(u8 **b, X64_Address mem, u64 immediate, u8 op_size)
 }
 
 void instruction_mov_imm_reg(u8 **b, Register reg, u64 immediate, u8 op_size) {
+    if (immediate < U32_MAX && op_size == 8) {
+        // 32-bit instructions still clear the upper bits, so this is fine, and costs us 4-5 bytes less (depending on whether we still need REX)
+        op_size = 4;
+    }
+
     u8 rex = REX_BASE;
     u8 opcode = 0xb8;
 
@@ -7660,19 +7766,8 @@ void instruction_simple_binary(u8 **b, Simple_Binary_Info info) {
 
 void machinecode_immediate_to_place(Context *context, X64_Place place, u64 immediate, u8 bytes) {
     switch (place.kind) {
-        case PLACE_REGISTER: {
-            instruction_mov_imm_reg(&context->seg_text, place.reg, immediate, bytes);
-        } break;
-
-        case PLACE_ADDRESS: {
-            if (bytes == 8) {
-                instruction_mov_imm_mem(&context->seg_text, place.address, immediate & U32_MAX, 4);
-                place.address.immediate_offset += 4;
-                instruction_mov_imm_mem(&context->seg_text, place.address, immediate >> 32, 4);
-            } else {
-                instruction_mov_imm_mem(&context->seg_text, place.address, immediate, bytes);
-            }
-        } break;
+        case PLACE_REGISTER: instruction_mov_imm_reg(&context->seg_text, place.reg, immediate, bytes); break;
+        case PLACE_ADDRESS:  instruction_mov_imm_mem(&context->seg_text, place.address, immediate, bytes); break;
 
         case PLACE_NOWHERE: assert(false);
         default: assert(false);
@@ -7801,7 +7896,50 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
         } break;
 
         case expr_subscript: {
-            unimplemented(); // TODO return a X64_Place
+            X64_Place place = machinecode_for_assignable_expr(context, func, expr->subscript.array, reg_allocator);
+            assert(place.kind == PLACE_ADDRESS);
+
+            Type *array_type = expr->subscript.array->type;
+            Type *child_type;
+            if (array_type->kind == type_pointer) {
+                assert(array_type->pointer_to->kind == type_array);
+                child_type = array_type->pointer_to->array.of;
+
+                Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+                instruction_mov_reg_mem(&context->seg_text, MOV_FROM_MEM, place.address, address_reg, POINTER_SIZE);
+                place.address = (X64_Address) { .base = address_reg };
+            } else {
+                assert(array_type->kind == type_array);
+                child_type = array_type->array.of;
+            }
+            u64 step = type_size_of(child_type);
+
+            if (expr->subscript.index->kind == expr_literal) {
+                u64 offset = expr->subscript.index->literal.masked_value * step;
+                assert((((i64) place.address.immediate_offset) + ((i64) offset)) <= I32_MAX);
+                place.address.immediate_offset += offset;
+            } else {
+                Register offset_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+
+                X64_Place offset_place = (X64_Place) { .kind = PLACE_REGISTER, .reg = offset_reg };
+                machinecode_for_expr(context, func, expr->subscript.index, reg_allocator, offset_place);
+
+                if (place.address.index == REGISTER_NONE) {
+                    place.address.index = offset_reg;
+
+                    if (step == 1 || step == 2 || step == 4 || step == 8) {
+                        place.address.scale = (u8) step;
+                    } else {
+                        //instruction_mul_reg_imm(&context->seg_text, offset_reg, step, POINTER_SIZE);
+                        unimplemented(); // TODO Explicity issue mul/imul instruction
+                    }
+                } else {
+                    // TODO multiply by step and add onto base register
+                    unimplemented();
+                }
+            }
+
+            return place;
         } break;
 
         case expr_member_access: {
@@ -7969,7 +8107,12 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
             if (stmt->declaration.right == null) {
                 if (size != align || size > 8) {
-                    unimplemented(); // TODO call runtime_builtin_mem_clear
+                    register_ensure_free(reg_allocator, RAX);
+                    register_ensure_free(reg_allocator, RCX);
+
+                    instruction_lea(&context->seg_text, place.address, RAX);
+                    instruction_mov_imm_reg(&context->seg_text, RCX, size, POINTER_SIZE);
+                    instruction_call(context, true, runtime_builtin_mem_clear);
                 } else {
                     machinecode_immediate_to_place(context, place, 0, (u8) size);
                 }
@@ -8020,28 +8163,29 @@ void build_machinecode(Context *context) {
     // Builtins
     u32 runtime_builtin_text_starts[RUNTIME_BUILTIN_COUNT] = {0};
 
-    // TODO we can optimize builtin mem copy/clear by using a bigger mov and looping fewer times
+    // TODO we can optimize builtin mem copy/clear by using a bigger mov and looping fewer times.
+    // We have to consider alignment then though...
+    // The amd performance guide has a section on fast memory copies.
 
     { // mem clear
-
+        // RAX is pointer to memory, RCX is count. Both are modified in the process
+        
         runtime_builtin_text_starts[runtime_builtin_mem_clear] = buf_length(context->seg_text);
 
-        /*
+        u64 before_loop = buf_length(context->seg_text);
+        u64 forward_jump_index = instruction_jrcxz(&context->seg_text);
         u64 loop_start = buf_length(context->seg_text);
-        u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
-        u64 forward_jump_from = buf_length(context->seg_text);
-        // mov8 [rax], 0
-        buf_push(context->seg_text, 0xc6); buf_push(context->seg_text, 0x00); buf_push(context->seg_text, 0x00);
-        instruction_inc_or_dec(&context->seg_text, true, RAX, 8);
-        instruction_inc_or_dec(&context->seg_text, false, RCX, 8);
+
+        instruction_mov_imm_mem(&context->seg_text, (X64_Address) { .base = RAX }, 0, 1);
+        instruction_inc_or_dec(&context->seg_text, true, RAX, POINTER_SIZE);
+        instruction_inc_or_dec(&context->seg_text, false, RCX, POINTER_SIZE);
+
         u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
-        u64 jump_end = buf_length(context->seg_text);
-
-        *((i8*) &context->seg_text[forward_jump_index]) = (i8) (jump_end - forward_jump_from);
-        *((i8*) &context->seg_text[backward_jump_index]) = -((i8) (jump_end - loop_start));
-        */
-
+        u64 loop_end = buf_length(context->seg_text);
         instruction_ret(&context->seg_text);
+
+        *((i8*) &context->seg_text[forward_jump_index]) = (i8) (loop_end - loop_start);
+        *((i8*) &context->seg_text[backward_jump_index]) = -(i8) (loop_end - before_loop);
     }
 
     { // mem copy
