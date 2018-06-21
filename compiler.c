@@ -7943,7 +7943,28 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
         } break;
 
         case expr_member_access: {
-            unimplemented(); // TODO return a X64_Place
+            X64_Place place = machinecode_for_assignable_expr(context, func, expr->member_access.parent, reg_allocator);
+            assert(place.kind == PLACE_ADDRESS);
+
+            Type *parent_type = expr->member_access.parent->type;
+            if (parent_type->kind == type_pointer) {
+                parent_type = parent_type->pointer_to;
+
+                Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+                instruction_mov_reg_mem(&context->seg_text, MOV_FROM_MEM, place.address, address_reg, POINTER_SIZE);
+                place.address = (X64_Address) { .base = address_reg };
+            }
+
+            assert(parent_type->kind == type_struct);
+
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+            u32 member_index = expr->member_access.member_index;
+            u64 offset = parent_type->structure.members[member_index].offset;
+
+            assert((((i64) place.address.immediate_offset) + ((i64) offset)) <= I32_MAX);
+            place.address.immediate_offset += offset;
+
+            return place;
         } break;
     }
 
