@@ -7334,7 +7334,7 @@ void print_x64_address(X64_Address address) {
     printf("]");
 }
 
-void encode_instruction_reg_mem(u8 **b, u8 rex, u8 opcode, X64_Address mem, Register reg) {
+void encode_instruction_reg_mem(u8 **b, u8 rex, u32 opcode, X64_Address mem, Register reg) {
     assert(mem.base >= RAX && mem.base <= R15);
     assert(mem.base != REGISTER_NONE);
     assert((mem.index >= RAX && mem.index <= R15) || mem.index == REGISTER_NONE);
@@ -7413,7 +7413,12 @@ void encode_instruction_reg_mem(u8 **b, u8 rex, u8 opcode, X64_Address mem, Regi
     if (rex != REX_BASE) {
         buf_push(*b, rex);
     }
-    buf_push(*b, opcode);
+
+    do {
+        buf_push(*b, (u8) (opcode & 0xff));
+        opcode >>= 8;
+    } while(opcode != 0);
+
     buf_push(*b, modrm);
     if (use_sib) {
         buf_push(*b, sib);
@@ -7423,7 +7428,7 @@ void encode_instruction_reg_mem(u8 **b, u8 rex, u8 opcode, X64_Address mem, Regi
     }
 }
 
-void encode_instruction_reg_reg(u8 **b, u8 rex, u8 opcode, Register mem, Register reg) {
+void encode_instruction_reg_reg(u8 **b, u8 rex, u32 opcode, Register mem, Register reg) {
     u8 modrm = 0xc0;
 
     modrm |= (REGISTER_INDICES[reg] & 0x07) << 3;
@@ -7439,7 +7444,12 @@ void encode_instruction_reg_reg(u8 **b, u8 rex, u8 opcode, Register mem, Registe
     if (rex != REX_BASE) {
         buf_push(*b, rex);
     }
-    buf_push(*b, opcode);
+
+    do {
+        buf_push(*b, (u8) (opcode & 0xff));
+        opcode >>= 8;
+    } while(opcode != 0);
+
     buf_push(*b, modrm);
 }
 
@@ -7788,6 +7798,53 @@ void machinecode_immediate_to_place(Context *context, X64_Place place, u64 immed
 
         case PLACE_NOWHERE: assert(false);
         default: assert(false);
+    }
+}
+
+void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind to) {
+    u8 from_size = primitive_size_of(from);
+    u8 to_size = primitive_size_of(to);
+
+    if (from == type_pointer && to == type_pointer) {
+        // This is a no-op
+    } else if (primitive_is_float(from) || primitive_is_float(to)) {
+        unimplemented(); // TODO floating point casts
+    } else if (primitive_is_signed(from) || primitive_is_signed(to)) {
+        unimplemented(); // TODO signed casts
+    } else {
+        bool word_prefix = false;
+        bool rex_w = false;
+        u8 opcode = 0;
+
+        switch (from_size) {
+            case 1: switch (to_size) {
+                case 1: break;
+                case 2: { word_prefix = true; opcode = 0xb6; } break;
+                case 4: { opcode = 0xb6; } break;
+                case 8: { rex_w = true; opcode = 0xb6; } break;
+                deafult: assert(false);
+            } break;
+            case 2: switch (to_size) {
+                case 1: break;
+                case 2: break;
+                case 4: { opcode = 0xb7; } break;
+                case 8: { rex_w = true; opcode = 0xb7; } break;
+                default: assert(false);
+            } break;
+            case 4: break;
+            case 8: break;
+            default: assert(false);
+        }
+
+        if (opcode != 0) {
+            u32 big_opcode = 0x0f | (((u32) opcode) << 8);
+            encode_instruction_reg_reg(&context->seg_text, rex_w? (REX_BASE | REX_W) : 0, big_opcode, reg, reg);
+
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            dump_instruction_bytes(&context->seg_text);
+            printf("movzx %s, %s (%u to %u bytes)\n", REGISTER_NAMES[reg], REGISTER_NAMES[reg], (u64) from_size, (u64) to_size);
+            #endif
+        }
     }
 }
 
@@ -8142,7 +8199,30 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case expr_cast: {
-            unimplemented();
+            register_allocator_enter_frame(context, reg_allocator);
+
+            X64_Place inner_place;
+            bool inner_doesnt_match_outer;
+
+            if (place.kind == PLACE_ADDRESS) {
+                inner_place.kind = PLACE_REGISTER;
+                inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+                inner_doesnt_match_outer = true;
+            } else {
+                inner_place = place;
+                inner_doesnt_match_outer = false;
+            }
+
+            machinecode_for_expr(context, func, expr->cast_from, reg_allocator, inner_place);
+
+            if (place.kind == PLACE_NOWHERE) return;
+            assert(inner_place.kind == PLACE_REGISTER);
+            Register inner_reg = inner_place.reg;
+
+            machinecode_cast(context, inner_reg, expr->cast_from->type->kind, expr->type->kind);
+            machinecode_move(context, reg_allocator, inner_place, place, primitive_size_of(expr->type->kind));
+
+            register_allocator_leave_frame(context, reg_allocator);
         } break;
 
         case expr_subscript: {
@@ -8150,7 +8230,11 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case expr_member_access: {
-            unimplemented();
+            X64_Place dst = place;
+            X64_Place src = machinecode_for_assignable_expr(context, func, expr, reg_allocator);
+            u64 size = type_size_of(expr->type);
+
+            machinecode_move(context, reg_allocator, src, dst, size);
         } break;
 
         case expr_static_member_access: {

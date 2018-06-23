@@ -21,6 +21,10 @@ fn main() {
 
     let thing = Foo { 3, 2 };
 
+    // TODO this doesn't work properly because we don't compute the right hand side in a temproary
+    // before assigning it to the left hand side...
+    thing = Foo { a: u64(thing.b), b: u8(thing.a) };
+
     let thinger = &thing;
     thinger.b = 2;
 
