@@ -25,7 +25,14 @@ fn main() {
     thinger.b = 2;
 
     let dude: [2]Foo;
-    //dude[1] = thing; // Oof, this triggers so many 'unimplemented()'s
+    dude[1] = thing;
+
+
+    let matrix: [4][4]u32;
+
+    let i = 3;
+    let j = 3;
+    matrix[i][j] = 1;
 }
 
 struct Foo {

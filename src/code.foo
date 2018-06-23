@@ -452,7 +452,6 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    fix subscripts (two 'unimplemented()'s)
     growing stack while emmiting code, as we figure out we need temporaries
     pointer dereference in lhs
     pointer arithmetic, requires multiplication of the integer being added/subtracted

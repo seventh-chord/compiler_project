@@ -7549,6 +7549,23 @@ void instruction_inc_or_dec(u8 **b, bool inc, Register reg, u8 op_size) {
     #endif
 }
 
+void instruction_imul_pointer_imm(u8 **b, Register reg, i64 mul_by) {
+    if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
+        encode_instruction_reg_reg(b, REX_BASE | REX_W, 0x6b, reg, reg);
+        str_push_integer(b, sizeof(i8), *((u64*) &mul_by));
+    } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
+        encode_instruction_reg_reg(b, REX_BASE | REX_W, 0x69, reg, reg);
+        str_push_integer(b, sizeof(i32), *((u64*) &mul_by));
+    } else {
+        assert(false); // NB the immediate operand to the imul instruction can at most be a i32
+    }
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(b);
+    printf("imul64 %s, %s, %i\n", REGISTER_NAMES[reg], REGISTER_NAMES[reg], mul_by);
+    #endif
+}
+
 void instruction_xor(u8 **b, Register left, Register right, u8 op_size) {
     u8 rex = REX_BASE;
     u8 opcode = 0x31;
@@ -7795,8 +7812,23 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
             assert(false);
         }
     } else {
+        // TODO special case small moves by simply inserting some sequential moves
+
+        register_ensure_free(reg_allocator, RAX);
+        register_ensure_free(reg_allocator, RDX);
+        register_ensure_free(reg_allocator, RCX);
+        register_ensure_free(reg_allocator, RDX);
+
         assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
-        unimplemented(); // TODO call runtime_builtin_mem_copy
+        instruction_lea(&context->seg_text, src.address, RAX);
+        instruction_lea(&context->seg_text, dst.address, RDX);
+
+        instruction_mov_imm_reg(&context->seg_text, RCX, size, POINTER_SIZE);
+
+        register_allocator_enter_frame(context, reg_allocator);
+
+        instruction_call(context, true, runtime_builtin_mem_copy);
+        register_allocator_leave_frame(context, reg_allocator);
     }
 }
 
@@ -7919,23 +7951,26 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
                 assert((((i64) place.address.immediate_offset) + ((i64) offset)) <= I32_MAX);
                 place.address.immediate_offset += offset;
             } else {
+                if (place.address.index != REGISTER_NONE) {
+                    Register new_base = place.address.index;
+                    instruction_lea(&context->seg_text, place.address, new_base);
+                    place.address = (X64_Address) {0};
+                    place.address.base = new_base;
+                }
+                assert(place.address.index == REGISTER_NONE);
+
                 Register offset_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
 
                 X64_Place offset_place = (X64_Place) { .kind = PLACE_REGISTER, .reg = offset_reg };
                 machinecode_for_expr(context, func, expr->subscript.index, reg_allocator, offset_place);
 
-                if (place.address.index == REGISTER_NONE) {
-                    place.address.index = offset_reg;
+                place.address.index = offset_reg;
 
-                    if (step == 1 || step == 2 || step == 4 || step == 8) {
-                        place.address.scale = (u8) step;
-                    } else {
-                        //instruction_mul_reg_imm(&context->seg_text, offset_reg, step, POINTER_SIZE);
-                        unimplemented(); // TODO Explicity issue mul/imul instruction
-                    }
+                if (step == 1 || step == 2 || step == 4 || step == 8) {
+                    place.address.scale = (u8) step;
                 } else {
-                    // TODO multiply by step and add onto base register
-                    unimplemented();
+                    place.address.scale = 1;
+                    instruction_imul_pointer_imm(&context->seg_text, place.address.index, step);
                 }
             }
 
@@ -8178,7 +8213,8 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
         } break;
 
         case stmt_expr: {
-            unimplemented();
+            X64_Place nowhere = { .kind = PLACE_NOWHERE };
+            machinecode_for_expr(context, func, stmt->expr, reg_allocator, nowhere);
         } break;
 
         case stmt_assignment: {
