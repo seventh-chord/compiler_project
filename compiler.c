@@ -7174,19 +7174,58 @@ u8 REGISTER_INDICES[REGISTER_COUNT] = {
     [REGISTER_OPCODE_6] = 6, [REGISTER_OPCODE_7] = 7,
 };
 
-u8* REGISTER_NAMES[REGISTER_COUNT] = {
-    [RAX] = "rax", [RCX] = "rcx", [RDX] = "rdx", [RBX] = "rbx",
-    [RSP] = "rsp", [RBP] = "rbp", [RSI] = "rsi", [RDI] = "rdi",
-    [R8]  = "r8",  [R9]  = "r9",  [R10] = "r10", [R11] = "r11",
-    [R12] = "r12", [R13] = "r13", [R14] = "r14", [R15] = "r15",
+u8 *REGISTER_NAMES[REGISTER_COUNT][4] = {
+    [RAX] = { "al",   "ax",   "eax",  "rax" },
+    [RCX] = { "cl",   "cx",   "ecx",  "rcx" },
+    [RDX] = { "dl",   "dx",   "edx",  "rdx" },
+    [RBX] = { "bl",   "bx",   "ebx",  "rbx" },
+    [RSP] = { "spl",  "sp",   "esp",  "rsp" },
+    [RBP] = { "bpl",  "bp",   "ebp",  "rbp" },
+    [RSI] = { "sil",  "si",   "esi",  "rsi" },
+    [RDI] = { "dil",  "di",   "edi",  "rdi" },
+    [R8]  = { "r8b",  "r8w",  "r8d",  "r8" },
+    [R9]  = { "r9b",  "r9w",  "r9d",  "r9" },
+    [R10] = { "r10b", "r10w", "r10d", "r10" },
+    [R11] = { "r11b", "r11w", "r11d", "r11" },
+    [R12] = { "r12b", "r12w", "r12d", "r12" },
+    [R13] = { "r13b", "r13w", "r13d", "r13" },
+    [R14] = { "r14b", "r14w", "r14d", "r14" },
+    [R15] = { "r15b", "r15w", "r15d", "r15" },
 
-    [AH] = "ah", [CH] = "ch", [DH] = "dh", [BH] = "bh",
+    [AH] = { "ah", null, null, null },
+    [CH] = { "ch", null, null, null },
+    [DH] = { "dh", null, null, null },
+    [BH] = { "bh", null, null, null },
  
-    [XMM0]  = "xmm0",  [XMM1]  = "xmm1",  [XMM2]  = "xmm2",  [XMM3]  = "xmm3", 
-    [XMM4]  = "xmm4",  [XMM5]  = "xmm5",  [XMM6]  = "xmm6",  [XMM7]  = "xmm7", 
-    [XMM8]  = "xmm8",  [XMM9]  = "xmm9", [XMM10] = "xmm10",  [XMM11] = "xmm11",
-    [XMM12] = "xmm12", [XMM13] = "xmm13", [XMM14] = "xmm14", [XMM15] = "xmm15",
+    [XMM0]  = { "xmm0", null, null, null },
+    [XMM1]  = { "xmm1", null, null, null },
+    [XMM2]  = { "xmm2", null, null, null },
+    [XMM3]  = { "xmm3", null, null, null },
+    [XMM4]  = { "xmm4", null, null, null },
+    [XMM5]  = { "xmm5", null, null, null },
+    [XMM6]  = { "xmm6", null, null, null },
+    [XMM7]  = { "xmm7", null, null, null },
+    [XMM8]  = { "xmm8", null, null, null },
+    [XMM9]  = { "xmm9", null, null, null },
+    [XMM10] = { "xmm10", null, null, null },
+    [XMM11] = { "xmm11", null, null, null },
+    [XMM12] = { "xmm12", null, null, null },
+    [XMM13] = { "xmm13", null, null, null },
+    [XMM14] = { "xmm14", null, null, null },
+    [XMM15] = { "xmm15", null, null, null },
 };
+
+u8 *register_name(Register reg, u8 size) {
+    u8 size_index;
+    switch (size) {
+        case 1: size_index = 0; break;
+        case 2: size_index = 1; break;
+        case 4: size_index = 2; break;
+        case 8: size_index = 3; break;
+        default: assert(false);
+    }
+    return REGISTER_NAMES[reg][size_index];
+}
 
 enum {
     REX_BASE = 0x40,
@@ -7319,10 +7358,10 @@ void dump_instruction_bytes(u8 **b) {
 
 
 void print_x64_address(X64_Address address) {
-    printf("[%s", REGISTER_NAMES[address.base]);
+    printf("[%s", register_name(address.base, POINTER_SIZE));
 
     if (address.index != REGISTER_NONE) {
-        printf(" + %s*%u", REGISTER_NAMES[address.index], (u64) address.scale);
+        printf(" + %s*%u", register_name(address.index, POINTER_SIZE), (u64) address.scale);
     }
 
     if (address.immediate_offset > 0) {
@@ -7555,7 +7594,7 @@ void instruction_inc_or_dec(u8 **b, bool inc, Register reg, u8 op_size) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
-    printf("%s%u %s\n", inc? "inc" : "dec", (u64) op_size*8, REGISTER_NAMES[reg]);
+    printf("%su %s\n", inc? "inc" : "dec", register_name(reg, op_size));
     #endif
 }
 
@@ -7572,7 +7611,8 @@ void instruction_imul_pointer_imm(u8 **b, Register reg, i64 mul_by) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
-    printf("imul64 %s, %s, %i\n", REGISTER_NAMES[reg], REGISTER_NAMES[reg], mul_by);
+    u8 *reg_name = register_name(reg, POINTER_SIZE);
+    printf("imul %s, %s, %i\n", reg_name, reg_name, mul_by);
     #endif
 }
 
@@ -7592,7 +7632,7 @@ void instruction_xor(u8 **b, Register left, Register right, u8 op_size) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
-    printf("xor%u %s, %s\n", (u64) op_size*8, REGISTER_NAMES[left], REGISTER_NAMES[right]);
+    printf("xor %s, %s\n", register_name(left, op_size), register_name(right, op_size));
     #endif
 }
 
@@ -7601,7 +7641,7 @@ void instruction_lea(u8 **b, X64_Address mem, Register reg) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
-    printf("lea %s, ", REGISTER_NAMES[reg]);
+    printf("lea %s, ", register_name(reg, POINTER_SIZE));
     print_x64_address(mem);
     printf("\n");
     #endif
@@ -7630,13 +7670,13 @@ void instruction_mov_reg_mem(u8 **b, Mov_Mode mode, X64_Address mem, Register re
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
     if (mode == MOV_FROM_MEM) {
-        printf("mov%u %s, ", (u64) op_size*8, REGISTER_NAMES[reg]);
+        printf("mov %s, ", register_name(reg, op_size));
         print_x64_address(mem);
         printf("\n");
     } else {
-        printf("mov%u ", (u64) op_size*8);
+        printf("mov ");
         print_x64_address(mem);
-        printf(", %s\n", REGISTER_NAMES[reg]);
+        printf(", %s\n", register_name(reg, op_size));
     }
     #endif
 }
@@ -7709,7 +7749,7 @@ void instruction_mov_imm_reg(u8 **b, Register reg, u64 immediate, u8 op_size) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(b);
-    printf("mov%u %s, %x\n", (u64) op_size*8, REGISTER_NAMES[reg], (u64) immediate);
+    printf("mov %s, %x\n", register_name(reg, op_size), (u64) immediate);
     #endif
 }
 
@@ -7769,23 +7809,23 @@ void instruction_simple_binary(u8 **b, Simple_Binary_Info info) {
         case SIMPLE_BINARY_SUB: name = "sub"; break;
         default: assert(false);
     }
-    printf("%s%u ", name, (u64) info.op_size*8);
+    printf("%s ", name);
 
     if (info.direction == SIMPLE_BINARY_A_IS_DST) {
-        printf("%s, ", REGISTER_NAMES[info.a]);
+        printf("%s, ", register_name(info.a, info.op_size));
         if (info.b_is_address) {
             print_x64_address(info.b.address);
             printf("\n");
         } else {
-            printf("%s\n", REGISTER_NAMES[info.b.reg]);
+            printf("%s\n", register_name(info.b.reg, info.op_size));
         }
     } else {
         if (info.b_is_address) {
             print_x64_address(info.b.address);
         } else {
-            printf("%s", REGISTER_NAMES[info.b.reg]);
+            printf("%s", register_name(info.b.reg, info.op_size));
         }
-        printf(", %s\n", REGISTER_NAMES[info.a]);
+        printf(", %s\n", register_name(info.a, info.op_size));
     }
     #endif
 }
@@ -7842,7 +7882,7 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
             dump_instruction_bytes(&context->seg_text);
-            printf("movzx %s, %s (%u to %u bytes)\n", REGISTER_NAMES[reg], REGISTER_NAMES[reg], (u64) from_size, (u64) to_size);
+            printf("movzx %s, %s\n", register_name(reg, to_size), register_name(reg, from_size));
             #endif
         }
     }
