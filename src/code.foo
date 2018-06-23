@@ -451,30 +451,45 @@ fn float_test(a, b: f32) {
 
 
 /*
-real constants
-function pointers
-complete type_info_of_{value, type}
-size_of, align_of
-slices, make strings slices
-a 'any' type
-uninitialized (zeroed) global variables in .bss
-unions
-more operators      <<   >>   |   &   ~   ||   &&    /=    *=
-character literals
-variable shadowing
-taking the address of temporaries
-a defer statement
-figure out how to do no parentheses in loops/conditionals
-dont generate jump after return if return is the last stmt
-maybe a better parser for floats? The current one is pretty accurate for f32 at least though
-structure definitions inside functiosn
+Current TODO
+    fix subscripts (two 'unimplemented()'s)
+    growing stack while emmiting code, as we figure out we need temporaries
+    pointer dereference in lhs
+    pointer arithmetic, requires multiplication of the integer being added/subtracted
+    spilling registers
+    function calls
+    floating point things
+    implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
 
-.pdata and unwind info
-enabling subsystem windows (over subsystem console)
-debug info
-growing the stack? __chkstk
-constant folding
-register allocation
-peephole optimizer (?)
-static libraries, or at least good errors when trying to use a static .lib instead of a import .lib
+Language features
+    real constants
+    function pointers
+    complete type_info_of_{value, type}
+    size_of, align_of
+    slices, make strings slices
+    a 'any' type
+    uninitialized (zeroed) global variables in .bss
+    unions
+    more operators      <<   >>   |   &   ~   ||   &&    /=    *=
+    character literals
+    variable shadowing
+    taking the address of temporaries
+    a defer statement
+    figure out how to do no parentheses in loops/conditionals
+    maybe a better parser for floats? The current one is pretty accurate for f32 at least though
+    structure definitions inside functiosn
+
+Compiler functionality
+    .pdata and unwind info
+    enabling subsystem windows (over subsystem console)
+    debug info
+    growing the stack? __chkstk
+    static libraries, or at least good errors when trying to use a static .lib instead of a import .lib
+
+Performance
+    dont generate jump after return if return is the last stmt
+    register allocation accross statement-boundaries
+    align functions to 32-bit boundaries, padding with nops (many compilers do this!)
+    constant folding
+    peephole optimizer (?)
 */

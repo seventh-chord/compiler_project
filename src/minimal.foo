@@ -19,14 +19,13 @@ fn main() {
 
     big_p[b] = 0xf0;
 
-    let thing: Foo;
-    thing.a = 3;
-    thing.b = 2;
+    let thing = Foo { 3, 2 };
 
     let thinger = &thing;
     thinger.b = 2;
 
     let dude: [2]Foo;
+    //dude[1] = thing; // Oof, this triggers so many 'unimplemented()'s
 }
 
 struct Foo {

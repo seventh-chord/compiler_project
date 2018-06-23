@@ -1937,24 +1937,6 @@ u64 type_size_of(Type* type) {
     return 0;
 }
 
-u32 user_type_name(Type* type) {
-    u32 name;
-    switch (type->kind) {
-        case type_struct: name = type->structure.name; break;
-        case type_enum:   name = type->enumeration.name; break;
-        default: assert(false);
-    }
-    return name;
-}
- 
-Type_Kind primitive_of(Type* type) {
-    if (type->kind == type_enum) {
-        return type->enumeration.value_primitive;
-    } else {
-        return type->kind;
-    }
-}
-
 u64 type_align_of(Type* type) {
     while (true) {
         if (type->kind == type_array) {
@@ -1972,6 +1954,24 @@ u64 type_align_of(Type* type) {
 
     assert(false);
     return 0;
+}
+
+u32 user_type_name(Type* type) {
+    u32 name;
+    switch (type->kind) {
+        case type_struct: name = type->structure.name; break;
+        case type_enum:   name = type->enumeration.name; break;
+        default: assert(false);
+    }
+    return name;
+}
+ 
+Type_Kind primitive_of(Type* type) {
+    if (type->kind == type_enum) {
+        return type->enumeration.value_primitive;
+    } else {
+        return type->kind;
+    }
 }
 
 bool primitive_is_compound(Type_Kind primitive) {
@@ -7990,7 +7990,42 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case expr_compound: {
-            unimplemented();
+            assert(place.kind == PLACE_ADDRESS);
+
+            switch (expr->type->kind) {
+                case type_array: {
+                    Type* child_type = expr->type->array.of;
+                    u64 child_size = type_size_of(child_type);
+
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        assert(expr->compound.content[i].name_mode == expr_compound_no_name);
+
+                        Expr* child = expr->compound.content[i].expr;
+                        machinecode_for_expr(context, func, child, reg_allocator, place);
+
+                        assert((((i64) place.address.immediate_offset) + ((i64) child_size)) < I32_MAX);
+                        place.address.immediate_offset += child_size;
+                    }
+                } break;
+
+                case type_struct: {
+                    for (u32 i = 0; i < expr->compound.count; i += 1) {
+                        assert(expr->compound.content[i].name_mode != expr_compound_unresolved_name);
+
+                        u32 type_member_index = expr->compound.content[i].member_index;
+                        u64 member_offset = expr->type->structure.members[type_member_index].offset;
+
+                        assert((((i64) place.address.immediate_offset) + ((i64) member_offset)) < I32_MAX);
+                        X64_Place offset_place = place;
+                        offset_place.address.immediate_offset += (i32) member_offset;
+
+                        Expr* child = expr->compound.content[i].expr;
+                        machinecode_for_expr(context, func, child, reg_allocator, offset_place);
+                    }
+                } break;
+
+                default: assert(false);
+            }
         } break;
 
         case expr_binary: {
@@ -8189,6 +8224,10 @@ void build_machinecode(Context *context) {
     // The amd performance guide has a section on fast memory copies.
 
     { // mem clear
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("; --- builtin mem clear ---\n");
+        #endif
+
         // RAX is pointer to memory, RCX is count. Both are modified in the process
         
         runtime_builtin_text_starts[runtime_builtin_mem_clear] = buf_length(context->seg_text);
@@ -8203,33 +8242,37 @@ void build_machinecode(Context *context) {
 
         u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
         u64 loop_end = buf_length(context->seg_text);
-        instruction_ret(&context->seg_text);
 
         *((i8*) &context->seg_text[forward_jump_index]) = (i8) (loop_end - loop_start);
         *((i8*) &context->seg_text[backward_jump_index]) = -(i8) (loop_end - before_loop);
+
+        instruction_ret(&context->seg_text);
     }
 
     { // mem copy
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("; --- builtin mem copy ---\n");
+        #endif
+
+        // RAX is src pointer, RDX is dst pointer, RCX is count, RBX is clobbered.
+
         runtime_builtin_text_starts[runtime_builtin_mem_copy] = buf_length(context->seg_text);
 
-        /*
+        u64 before_loop = buf_length(context->seg_text);
+        u64 forward_jump_index = instruction_jrcxz(&context->seg_text);
         u64 loop_start = buf_length(context->seg_text);
-        u64 forward_jump_index = instruction_jmp_rcx_zero(&context->seg_text);
-        u64 forward_jump_from = buf_length(context->seg_text);
 
-        instruction_mov_pointer(&context->seg_text, mov_from, RAX, RBX, 1);
-        instruction_mov_pointer(&context->seg_text, mov_to,   RDX, RBX, 1);
-
-        instruction_inc_or_dec(&context->seg_text, true, RAX, 8);
-        instruction_inc_or_dec(&context->seg_text, true, RDX, 8);
-        instruction_inc_or_dec(&context->seg_text, false, RCX, 8);
+        instruction_mov_reg_mem(&context->seg_text, MOV_FROM_MEM, (X64_Address) { .base = RAX }, RBX, 1);
+        instruction_mov_reg_mem(&context->seg_text, MOV_TO_MEM,   (X64_Address) { .base = RDX }, RBX, 1);
+        instruction_inc_or_dec(&context->seg_text, true, RAX, POINTER_SIZE);
+        instruction_inc_or_dec(&context->seg_text, true, RDX, POINTER_SIZE);
+        instruction_inc_or_dec(&context->seg_text, false, RCX, POINTER_SIZE);
 
         u64 backward_jump_index = instruction_jmp_i8(&context->seg_text);
-        u64 jump_end = buf_length(context->seg_text);
+        u64 loop_end = buf_length(context->seg_text);
 
-        *((i8*) &context->seg_text[forward_jump_index]) = (i8) (jump_end - forward_jump_from);
-        *((i8*) &context->seg_text[backward_jump_index]) = -((i8) (jump_end - loop_start));
-        */
+        *((i8*) &context->seg_text[forward_jump_index]) = (i8) (loop_end - loop_start);
+        *((i8*) &context->seg_text[backward_jump_index]) = -(i8) (loop_end - before_loop);
 
         instruction_ret(&context->seg_text);
     }
