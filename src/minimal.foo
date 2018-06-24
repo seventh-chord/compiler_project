@@ -10,6 +10,8 @@ fn main() {
     let p = &a;
     *p = a + 7;
 
+    *p = 2 + *p;
+
     let big: [10]u16;
     big[0] = 0x48;
     big[1] = 0x8d;
@@ -19,24 +21,25 @@ fn main() {
 
     big_p[b] = 0xf0;
 
-    let thing = Foo { 3, 2 };
-
-    // TODO this doesn't work properly because we don't compute the right hand side in a temproary
-    // before assigning it to the left hand side...
-    thing = Foo { a: u64(thing.b), b: u8(thing.a) };
-
-    let thinger = &thing;
-    thinger.b = 2;
-
-    let dude: [2]Foo;
-    dude[1] = thing;
-
 
     let matrix: [4][4]u32;
 
     let i = 3;
     let j = 3;
     matrix[i][j] = 1;
+
+    let thing = Foo { 3, 2 };
+
+    // TODO this doesn't work properly because we don't compute the right hand side in a temproary
+    // before assigning it to the left hand side...
+    //thing = Foo { a: u64(thing.b), b: u8(thing.a) }; // TODO TODO TDOO
+
+    let thinger = &thing;
+    thinger.b = 2;
+
+
+    let dude: [2]Foo;
+    //dude[1] = thing; // TODO TODO TODO
 }
 
 struct Foo {

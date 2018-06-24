@@ -1589,18 +1589,6 @@ Condition condition_not(Condition c) {
     }
 }
 
-typedef struct Mem_Item {
-    u64 size;
-    i32 offset;
-} Mem_Item;
-
-typedef struct Mem_Layout {
-    u64 total_bytes;
-    // NB pointers point to same number of members as vars in the coresponding 'Func'
-    Mem_Item* vars;
-} Mem_Layout;
-
-
 
 typedef struct Import_Index {
     // names are string table indices
@@ -1674,8 +1662,6 @@ typedef struct Func {
             Var* vars;
             u32 var_count;
             u32 output_var_index;
-
-            Mem_Layout stack_layout;
 
             Stmt* first_stmt;
 
@@ -7262,7 +7248,7 @@ typedef struct X64_Address {
 
 typedef struct X64_Place {
     enum {
-        PLACE_NOWHERE,
+        PLACE_NOWHERE = 0,
         PLACE_REGISTER,
         PLACE_ADDRESS,
     } kind;
@@ -7285,6 +7271,13 @@ struct Reg_Allocator_Frame {
 
 typedef struct Reg_Allocator {
     Reg_Allocator_Frame *head;
+
+    i32 next_stack_offset;
+    struct {
+        u64 size;
+        X64_Address address;
+    } *var_mem_infos;
+    u64 allocated_var_mem_infos;
 } Reg_Allocator;
 
 void register_allocator_enter_frame(Context *context, Reg_Allocator *allocator) {
@@ -7997,12 +7990,10 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
     switch (expr->kind) {
         case expr_variable: {
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
-            i32 offset = func->body.stack_layout.vars[expr->variable.index].offset;
 
             X64_Place place = {0};
             place.kind = PLACE_ADDRESS;
-            place.address.base = RSP;
-            place.address.immediate_offset = offset;
+            place.address = reg_allocator->var_mem_infos[expr->variable.index].address;
             return place;
         } break;
 
@@ -8205,7 +8196,26 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 } break;
 
                 case unary_dereference: {
-                    unimplemented();
+                    register_allocator_enter_frame(context, reg_allocator);
+                    X64_Place inner_place = {0};
+                    inner_place.kind = PLACE_REGISTER;
+                    if (place.kind == PLACE_REGISTER) {
+                        inner_place.reg = place.reg;
+                    } else {
+                        inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
+                    }
+
+                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, inner_place);
+
+                    Register inner_reg = inner_place.reg;
+                    inner_place = (X64_Place) {0};
+                    inner_place.kind = PLACE_ADDRESS;
+                    inner_place.address.base = inner_reg;
+
+                    u64 dereferenced_size = type_size_of(expr->type);
+                    machinecode_move(context, reg_allocator, inner_place,place, dereferenced_size);
+
+                    register_allocator_leave_frame(context, reg_allocator);
                 } break;
 
                 case unary_address_of: {
@@ -8270,6 +8280,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case expr_member_access: {
+            // TODO does this actually work in complicated cases. At first, I would think it doesn't, but it might actually be fine...
+
             X64_Place dst = place;
             X64_Place src = machinecode_for_assignable_expr(context, func, expr, reg_allocator);
             u64 size = type_size_of(expr->type);
@@ -8313,12 +8325,10 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
             u64 size = type_size_of(var->type);
             u64 align = type_align_of(var->type);
-            i32 stack_offset = func->body.stack_layout.vars[stmt->declaration.var_index].offset;
 
             X64_Place place = {0};
             place.kind = PLACE_ADDRESS;
-            place.address.base = RSP;
-            place.address.immediate_offset = stack_offset;
+            place.address = reg_allocator->var_mem_infos[stmt->declaration.var_index].address;
 
             if (stmt->declaration.right == null) {
                 if (size != align || size > 8) {
@@ -8342,8 +8352,13 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
         } break;
 
         case stmt_assignment: {
-            X64_Place left = machinecode_for_assignable_expr(context, func, stmt->assignment.left, reg_allocator);
-            machinecode_for_expr(context, func, stmt->assignment.right, reg_allocator, left);
+            if (primitive_is_compound(stmt->assignment.right->type->kind)) {
+                unimplemented();
+                //X64_Place left = ;
+            } else {
+                X64_Place left = machinecode_for_assignable_expr(context, func, stmt->assignment.left, reg_allocator);
+                machinecode_for_expr(context, func, stmt->assignment.right, reg_allocator, left);
+            }
         } break;
 
         case stmt_block: {
@@ -8458,83 +8473,60 @@ void build_machinecode(Context *context) {
         #endif
 
         // Lay out stack
-        assert(func->body.stack_layout.vars == null);
-
-        u64 mem_item_data_bytes = sizeof(Mem_Item) * func->body.var_count;
-        func->body.stack_layout.vars = (Mem_Item*) arena_alloc(&context->arena, mem_item_data_bytes);
-        mem_clear((u8*) func->body.stack_layout.vars, mem_item_data_bytes);
-
-        i32 offset = 0;
-
-        // Shadow space for calling other functions
-        u32 max_params = 4;
-        bool any_function_calls = true;
-        // TODO iterate through all functions and find the one with the highest number of parameters
-        // TODO iterate through all functions and find the one with the highest number of parameters
-        // TODO iterate through all functions and find the one with the highest number of parameters
-        // TODO iterate through all functions and find the one with the highest number of parameters
-        if (any_function_calls) {
-            offset += max_params * POINTER_SIZE;
+        if (reg_allocator.allocated_var_mem_infos < func->body.var_count) {
+            // TODO this leaks memory. We should allocate on 'context->stack', but it probably doesn't really matter in this case
+            u32 alloc_count = func->body.var_count * 2;
+            reg_allocator.allocated_var_mem_infos = alloc_count;
+            reg_allocator.var_mem_infos = (void*) arena_alloc(&context->arena, alloc_count * sizeof(*reg_allocator.var_mem_infos));
         }
+        mem_clear((u8*) reg_allocator.var_mem_infos, sizeof(*reg_allocator.var_mem_infos) * reg_allocator.allocated_var_mem_infos);
+
+        reg_allocator.next_stack_offset = 0;
+
+        // Allocate shadow space for calling other functions
+        reg_allocator.next_stack_offset += 4*POINTER_SIZE;
 
         // Mark parameter variables so they don't get allocated normaly
         for (u32 p = 0; p < func->signature.param_count; p += 1) {
             u32 var_index = func->signature.params[p].var_index;
-            func->body.stack_layout.vars[var_index].offset = -1;
+
+            X64_Address address = { .base = RBP, .immediate_offset = var_index * POINTER_SIZE };
+
+            reg_allocator.var_mem_infos[var_index].size = POINTER_SIZE;
+            reg_allocator.var_mem_infos[var_index].address = address;
+
+            // TODO this also requires us to properly set up RBP at the beginning of functions...
+            // Also, figure out what the actual immediate offset should be!
+            // The unimplemented() is just so I remember this
+            // While we are at it, we gotta figure out how that shadow space for calling other functions is going to work...
+            // At the moment we just allocate space for four parameters :/ :/ :/
+            unimplemented();
         }
 
         // Variables
         for (u32 v = 0; v < func->body.var_count; v += 1) {
-            Mem_Item* mem_item = &func->body.stack_layout.vars[v];
-
-            if (mem_item->offset == -1) continue; // Ignore parameters for now
+            if (reg_allocator.var_mem_infos[v].address.base != REGISTER_NONE) continue; // Ignore parameters, see previous loop
 
             u64 size = type_size_of(func->body.vars[v].type);
-            offset = (i32) round_to_next(offset, min(size, POINTER_SIZE));
-            mem_item->size = size;
-            mem_item->offset = offset;
-            offset += size;
+            reg_allocator.next_stack_offset = (i32) round_to_next(reg_allocator.next_stack_offset, min(size, POINTER_SIZE));
+
+            X64_Address address = { .base = RSP, .immediate_offset = reg_allocator.next_stack_offset };
+
+            reg_allocator.var_mem_infos[v].size = size;
+            reg_allocator.var_mem_infos[v].address = address;
+
+            reg_allocator.next_stack_offset += size;
         }
 
-        offset = (i32) (((((u32) offset) + 7) & (~0x0f)) + 8); // Aligns so last nibble is 8
-        func->body.stack_layout.total_bytes = (u64) offset;
+        buf_push(context->seg_text, 0x48);
+        buf_push(context->seg_text, 0x81);
+        buf_push(context->seg_text, 0xec);
+        u64 insert_stack_size_at_index = buf_length(context->seg_text);
+        str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
 
-        // Parameters
-        for (u32 p = 0; p < func->signature.param_count; p += 1) {
-            u32 var_index = func->signature.params[p].var_index;
-            Mem_Item* mem_item = &func->body.stack_layout.vars[var_index];
-            assert(mem_item->offset == -1);
-
-            u64 size = type_size_of(func->body.vars[var_index].type);
-            assert(size <= POINTER_SIZE);
-
-            mem_item->size = POINTER_SIZE;
-            mem_item->offset = func->body.stack_layout.total_bytes + POINTER_SIZE + POINTER_SIZE*p;
-        }
-
-        #if 0
-        printf("%x total size\n", func->body.stack_layout.total_bytes);
-        for (u32 v = 0; v < func->body.var_count; v += 1) {
-            Mem_Item* item = &func->body.stack_layout.vars[v];
-            Var* var = &func->body.vars[v];
-            printf("  %s\t%x, %x\n", string_table_access(context->string_table, var->name), (u32) item->offset, (u64) item->size);
-        }
-        #endif
-
-        if (func->body.stack_layout.total_bytes < I8_MAX) {
-            buf_push(context->seg_text, 0x48);
-            buf_push(context->seg_text, 0x83);
-            buf_push(context->seg_text, 0xec);
-            str_push_integer(&context->seg_text, sizeof(i8), (u8) func->body.stack_layout.total_bytes);
-        } else {
-            buf_push(context->seg_text, 0x48);
-            buf_push(context->seg_text, 0x81);
-            buf_push(context->seg_text, 0xec);
-            str_push_integer(&context->seg_text, sizeof(i32), func->body.stack_layout.total_bytes);
-        }
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         dump_instruction_bytes(&context->seg_text);
-        printf("sub rsp, %x\n", func->body.stack_layout.total_bytes);
+        printf("sub rsp, ??? (We fill in stack size after generating all code!)\n");
         #endif
         
         // TODO calling convention -- Preserve non-volatile registers! Also, we need to allocate stack space for that!
@@ -8578,6 +8570,12 @@ void build_machinecode(Context *context) {
         printf("; (epilog)\n");
         #endif
 
+        u64 total_stack_bytes = ((((u64) reg_allocator.next_stack_offset) + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
+
+        i32 *insert_stack_size_here = (i32*) (&context->seg_text[insert_stack_size_at_index]);
+        assert(total_stack_bytes < I32_MAX);
+        *insert_stack_size_here = total_stack_bytes;
+
         // Pass output
         if (func->signature.has_output) {
             unimplemented();
@@ -8603,20 +8601,13 @@ void build_machinecode(Context *context) {
         }
 
         // Reset stack
-        if (func->body.stack_layout.total_bytes < I8_MAX) {
-            buf_push(context->seg_text, 0x48);
-            buf_push(context->seg_text, 0x83);
-            buf_push(context->seg_text, 0xc4);
-            buf_push(context->seg_text, func->body.stack_layout.total_bytes);
-        } else {
-            buf_push(context->seg_text, 0x48);
-            buf_push(context->seg_text, 0x81);
-            buf_push(context->seg_text, 0xc4);
-            str_push_integer(&context->seg_text, sizeof(i32), func->body.stack_layout.total_bytes);
-        }
+        buf_push(context->seg_text, 0x48);
+        buf_push(context->seg_text, 0x81);
+        buf_push(context->seg_text, 0xc4);
+        str_push_integer(&context->seg_text, sizeof(i32), total_stack_bytes);
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         dump_instruction_bytes(&context->seg_text);
-        printf("add rsp, %x\n", (u64) func->body.stack_layout.total_bytes);
+        printf("add rsp, %x\n", total_stack_bytes);
         #endif
 
         // Return to caller
@@ -9386,12 +9377,16 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
 
 
 void main() {
+    u8 value = 3;
+    u8 *pointer = &value;
+    *pointer = 2 + *pointer;
+
     i64 compile_time, run_time;
 
-    compile_and_run("W:/asm2/src/minimal.foo", "build/minimal_out.exe", &compile_time, &run_time);
-    //compile_and_run("W:/asm2/src/code.foo", "build/foo_out.exe", &compile_time, &run_time);
-    //compile_and_run("W:/asm2/src/link_test/backend.foo", "W:/asm2/src/link_test/build/out.exe", &compile_time, &run_time);
-    //compile_and_run("W:/asm2/src/glfw_test/main.foo", "W:/asm2/src/glfw_test/out.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/minimal.foo", "build/minimal_out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/code.foo", "build/foo_out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
 
     printf("Compiled in %i ms, ran in %i ms\n", compile_time, run_time);
 }
