@@ -452,7 +452,6 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    growing stack while emmiting code, as we figure out we need temporaries
     spilling registers
     function calls
     pointer arithmetic, requires multiplication of the integer being added/subtracted
