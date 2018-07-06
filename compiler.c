@@ -1184,8 +1184,8 @@ typedef enum Type_Kind {
 } Type_Kind;
 
 enum { POINTER_SIZE = 8 };
-Type_Kind DEFAULT_INT_TYPE = TYPE_U64; // TODO make this TYPE_I64
-Type_Kind DEFAULT_FLOAT_TYPE   = TYPE_F32;
+Type_Kind DEFAULT_INT_TYPE   = TYPE_I64;
+Type_Kind DEFAULT_FLOAT_TYPE = TYPE_F32;
 
 u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_VOID] = "void",
@@ -6014,10 +6014,11 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 return TYPECHECK_EXPR_BAD;
             }
 
-            if (expr->subscript.index->type->kind != TYPE_U64) {
+            Type_Kind index_type = expr->subscript.index->type->kind;
+            if (index_type != TYPE_U64 && index_type != TYPE_I64) {
                 // TODO should we allow other integer types and insert automatic promotions as neccesary here??
                 print_file_pos(&expr->subscript.index->pos);
-                printf("Can only use u64 as an array index, not ");
+                printf("Can only use %s and %s as an array index, not ", PRIMITIVE_NAMES[TYPE_U64], PRIMITIVE_NAMES[TYPE_I64]);
                 print_type(info->context, expr->subscript.index->type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
@@ -8096,40 +8097,42 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
         // This is a no-op
     } else if (primitive_is_float(from) || primitive_is_float(to)) {
         unimplemented(); // TODO floating point casts
-    } else if (primitive_is_signed(from) || primitive_is_signed(to)) {
-        unimplemented(); // TODO signed casts
     } else {
+        // Zero-extend or sign-extendto correct width, if needed
+        
         bool word_prefix = false;
         bool rex_w = false;
-        u8 opcode = 0;
+        u32 opcode = 0;
 
-        switch (from_size) {
-            case 1: switch (to_size) {
-                case 1: break;
-                case 2: { word_prefix = true; opcode = 0xb6; } break;
-                case 4: { opcode = 0xb6; } break;
-                case 8: { rex_w = true; opcode = 0xb6; } break;
-                deafult: assert(false);
-            } break;
-            case 2: switch (to_size) {
-                case 1: break;
-                case 2: break;
-                case 4: { opcode = 0xb7; } break;
-                case 8: { rex_w = true; opcode = 0xb7; } break;
-                default: assert(false);
-            } break;
-            case 4: break;
-            case 8: break;
-            default: assert(false);
+        bool sign_extend = primitive_is_signed(from);
+
+        #define CASE(a, b) if(from_size == a && to_size == b)
+        if (sign_extend) {
+            CASE(1, 2) { opcode = 0xbe0f; rex_w = false; word_prefix = true;  }
+            CASE(1, 4) { opcode = 0xbe0f; rex_w = false; word_prefix = false; }
+            CASE(1, 8) { opcode = 0xbe0f; rex_w = true;  word_prefix = false; }
+            CASE(2, 4) { opcode = 0xbf0f; rex_w = false; word_prefix = false; }
+            CASE(2, 8) { opcode = 0xbf0f; rex_w = true;  word_prefix = false; }
+            CASE(4, 8) { opcode = 0x63;   rex_w = true;  word_prefix = false; }
+        } else {
+            CASE(1, 2) { opcode = 0xb60f; rex_w = false; word_prefix = true;  }
+            CASE(1, 4) { opcode = 0xb60f; rex_w = false; word_prefix = false; }
+            CASE(1, 8) { opcode = 0xb60f; rex_w = true;  word_prefix = false; }
+            CASE(2, 4) { opcode = 0xb70f; rex_w = false; word_prefix = false; }
+            CASE(2, 8) { opcode = 0xb70f; rex_w = true;  word_prefix = false; }
         }
+        #undef CASE
 
         if (opcode != 0) {
-            u32 big_opcode = 0x0f | (((u32) opcode) << 8);
-            encode_instruction_reg_reg(context, rex_w? (REX_BASE | REX_W) : 0, big_opcode, reg, reg);
+            if (word_prefix) {
+                buf_push(context->seg_text, WORD_OPERAND_PREFIX);
+            }
+
+            encode_instruction_reg_reg(context, rex_w? (REX_BASE | REX_W) : REX_BASE, opcode, reg, reg);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
             dump_instruction_bytes(context);
-            printf("movzx %s, %s\n", register_name(reg, to_size), register_name(reg, from_size));
+            printf("%s %s, %s\n", sign_extend? "movsx" : "movzx", register_name(reg, to_size), register_name(reg, from_size));
             #endif
         }
     }
@@ -8653,6 +8656,7 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
 
             // TODO We need to special case when both the lhs and the rhs are simple stack loads, so that we 
             // use one memory operand for the compare in that case.
+            // Also, do a similar check for when one of the sides is a literal
 
             Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR);
             X64_Place left_place = { .kind = PLACE_REGISTER, .reg = left_reg };
@@ -8666,11 +8670,11 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
 
             register_allocator_leave_frame(context, reg_allocator);
         } else {
-            assert(false);
+            assert(false); // NB We don't support comparasion operators on compound literals, see the typechecker
         }
     } else {
-        unimplemented(); // TODO treat 'if (x)' as 'if (x == 0)'
-        condition = COND_NE; // Or 'COND_E'???
+        unimplemented(); // TODO treat 'if (x)' as 'if (x != 0)'
+        condition = COND_NE;
     }
 
     if (invert) {

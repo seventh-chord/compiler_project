@@ -5,7 +5,7 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-fn c_string_length(string: *u8) -> u64 {
+fn c_string_length(string: *u8) -> i64 {
     let length = 0;
     for (*string != 0) {
         string += 1;
@@ -24,6 +24,8 @@ fn print(string: *u8) {
 fn main() {
     print("In Marco Polos descriptions the Kahn discovered...\n");
     other(1, 2);
+
+    wont_work_for_now();
 }
 
 fn other(a, b: u32) {
@@ -75,3 +77,11 @@ struct Foo {
     a: u64;
     b: u8;
 }
+
+
+fn wont_work_for_now() {
+    let a = 1;
+    let b = a + secret();
+}
+
+fn secret() -> i64 { return 1; }
