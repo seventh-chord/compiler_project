@@ -101,6 +101,7 @@ fn wont_work_for_now() {
     *n = a();
 
     let along_the_road = Another_Town { a(), a() }; 
+    build(along_the_road);
 
     big_a(a(), a());
 
@@ -112,3 +113,7 @@ fn wont_work_for_now() {
 }
 
 struct Another_Town { a, b: i64; }
+
+fn build(town: Another_Town) {
+    town.a = 1;
+}

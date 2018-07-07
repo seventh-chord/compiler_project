@@ -7143,8 +7143,8 @@ typedef enum Register {
     REGISTER_NONE = 0,
 
     // These have special meanings for X64_Address.base
-    RSP_OFFSET_INPUTS,  // parameters passed to us
-    RSP_OFFSET_LOCALS,  // local variables
+    RSP_OFFSET_INPUTS,  // RSP, but we add some value (calculated later) to the immediate offset
+    RSP_OFFSET_LOCALS,
     RIP_OFFSET_DATA,    // relative to .data
 
     // General purpose registers, up to 64 bits
@@ -7310,7 +7310,7 @@ typedef struct X64_Place {
 
 typedef struct Reg_Allocator_Frame Reg_Allocator_Frame;
 struct Reg_Allocator_Frame {
-    i32 next_stack_offset;
+    i32 stack_size;
 
     struct {
         bool allocated;
@@ -7328,14 +7328,14 @@ typedef struct Reg_Allocator {
     } *var_mem_infos;
     u64 allocated_var_mem_infos;
 
-    i32 highest_stack_offset;
+    i32 max_stack_size;
     u32 max_callee_param_count;
 } Reg_Allocator;
 
 void register_allocator_enter_frame(Context *context, Reg_Allocator *allocator) {
     if (allocator->head == null) {
         allocator->head = arena_new(&context->arena, Reg_Allocator_Frame);
-        allocator->head->next_stack_offset = allocator->highest_stack_offset;
+        allocator->head->stack_size = allocator->max_stack_size;
     }
 
     if (allocator->head->next == null) {
@@ -7353,14 +7353,15 @@ void register_allocator_leave_frame(Context *context, Reg_Allocator *allocator) 
 }
 
 X64_Address register_allocator_allocate_temporary_stack_space(Reg_Allocator *allocator, u64 size, u64 align) {
-    i32 *offset = &allocator->head->next_stack_offset;
+    i32 *offset = &allocator->head->stack_size;
     *offset = (i32) round_to_next(*offset, align);
 
-    X64_Address address = { .base = RSP_OFFSET_LOCALS, .immediate_offset = *offset };
+    i32 immediate_offset = *offset;
+    X64_Address address = { .base = RSP_OFFSET_LOCALS, .immediate_offset = immediate_offset };
 
     *offset += size;
-    if (*offset > allocator->highest_stack_offset) {
-        allocator->highest_stack_offset = *offset;
+    if (*offset > allocator->max_stack_size) {
+        allocator->max_stack_size = *offset;
     }
 
     return address;
@@ -8214,6 +8215,18 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
     }
 }
 
+void machinecode_lea(Context *context, Reg_Allocator *reg_allocator, X64_Address address, X64_Place place) {
+    if (place.kind == PLACE_REGISTER) {
+        instruction_lea(context, address, place.reg);
+    } else {
+        register_allocator_enter_frame(context, reg_allocator);
+        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+        instruction_lea(context, address, reg);
+        machinecode_move(context, reg_allocator, x64_place_reg(reg), place, POINTER_SIZE);
+        register_allocator_leave_frame(context, reg_allocator);
+    }
+}
+
 void machinecode_binary(Context *context, Reg_Allocator *reg_allocator, Binary_Op op, Type_Kind primitive, X64_Place src, X64_Place dst) {
     if (primitive_is_float(primitive)) unimplemented();
 
@@ -8470,15 +8483,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             assert(data_offset < I32_MAX);
             X64_Address data_address = { .base = RIP_OFFSET_DATA, .immediate_offset = data_offset };
 
-            if (place.kind == PLACE_REGISTER) {
-                instruction_lea(context, data_address, place.reg);
-            } else {
-                register_allocator_enter_frame(context, reg_allocator);
-                Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
-                instruction_lea(context, data_address, reg);
-                machinecode_move(context, reg_allocator, x64_place_reg(reg), place, POINTER_SIZE);
-                register_allocator_leave_frame(context, reg_allocator);
-            }
+            machinecode_lea(context, reg_allocator, data_address, place);
         } break;
 
         case EXPR_COMPOUND: {
@@ -8626,8 +8631,13 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
 
             for (u32 p = 0; p < callee->signature.param_count; p += 1) {
-                assert(!callee->signature.params[p].reference_semantics);
                 Type *param_type = callee->signature.params[p].type;
+                bool reference_semantics = callee->signature.params[p].reference_semantics;
+
+                if (reference_semantics) {
+                    assert(param_type->kind == TYPE_POINTER);
+                    param_type = param_type->pointer_to;
+                }
 
                 X64_Place target_place;
                 if (p < 4) {
@@ -8644,13 +8654,24 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         }
                     }
 
-                    register_allocate_specific(reg_allocator, reg);
                     target_place = x64_place_reg(reg);
                 } else {
                     target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = p*POINTER_SIZE } };
                 }
 
-                machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
+                if (callee->signature.params[p].reference_semantics) {
+                    u64 size = type_size_of(param_type);
+                    u64 align = type_align_of(param_type);
+                    X64_Address tmp_address = register_allocator_allocate_temporary_stack_space(reg_allocator, size, align);
+                    X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
+
+                    machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, tmp_place);
+                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(reg_allocator, target_place.reg);
+                    machinecode_lea(context, reg_allocator, tmp_address, target_place);
+                } else {
+                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(reg_allocator, target_place.reg);
+                    machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
+                }
             }
 
             if (place.kind == PLACE_REGISTER && place.reg == RAX) {
@@ -8855,12 +8876,12 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 u64 align = type_align_of(type);
 
                 X64_Address tmp_address = register_allocator_allocate_temporary_stack_space(reg_allocator, size, align);
-                X64_Place tmp = { .kind = PLACE_ADDRESS, .address = tmp_address };
+                X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
 
-                machinecode_for_expr(context, func, right, reg_allocator, tmp);
+                machinecode_for_expr(context, func, right, reg_allocator, tmp_place);
 
                 X64_Place left_place = machinecode_for_assignable_expr(context, func, left, reg_allocator, false);
-                machinecode_move(context, reg_allocator, tmp, left_place, size);
+                machinecode_move(context, reg_allocator, tmp_place, left_place, size);
             } else {
                 bool reserve_rax_for_rhs = machinecode_expr_needs_rax(right);
                 X64_Place left_place = machinecode_for_assignable_expr(context, func, left, reg_allocator, reserve_rax_for_rhs);
@@ -9106,7 +9127,8 @@ void build_machinecode(Context *context) {
             next_stack_offset += size;
         }
 
-        reg_allocator.highest_stack_offset = next_stack_offset;
+        reg_allocator.max_stack_size = next_stack_offset;
+        if (reg_allocator.head != null) reg_allocator.head->stack_size = next_stack_offset;
 
         u64 insert_stack_size_at_index;
         {
@@ -9177,7 +9199,7 @@ void build_machinecode(Context *context) {
         if (reg_allocator.max_callee_param_count > 0) {
             stack_space_for_params = POINTER_SIZE * max(reg_allocator.max_callee_param_count, 4);
         }
-        u64 total_stack_bytes = ((u64) reg_allocator.highest_stack_offset) + stack_space_for_params;
+        u64 total_stack_bytes = ((u64) reg_allocator.max_stack_size) + stack_space_for_params;
         total_stack_bytes = ((total_stack_bytes + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
 
         i32 *insert_stack_size_here = (i32*) (&context->seg_text[insert_stack_size_at_index]);
