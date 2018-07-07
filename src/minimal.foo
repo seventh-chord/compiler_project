@@ -79,9 +79,36 @@ struct Foo {
 }
 
 
-fn wont_work_for_now() {
-    let a = 1;
-    let b = a + secret();
+fn a() -> i64 {
+    return -24;
 }
 
-fn secret() -> i64 { return 1; }
+fn big_a(b, c: i64) {}
+
+fn wont_work_for_now() {
+    let b = a() + a() + a();
+    let c = 2 * 12 * 3;
+
+    if (b == -c) {
+        print("Nice\n");
+    } else {
+        print("Something is borked\n");
+    }
+
+
+    let m = 0;
+    let n = &m;
+    *n = a();
+
+    let along_the_road = Another_Town { a(), a() }; 
+
+    big_a(a(), a());
+
+    /*
+    let array: [3]i64;
+    let pointer = &array;
+    c = pointer[0];
+    */
+}
+
+struct Another_Town { a, b: i64; }
