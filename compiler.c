@@ -6712,6 +6712,8 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             return CONTROL_FLOW_INVALID;
         }
 
+        bool is_last_stmt = stmt->next->kind == STMT_END;
+
         switch (stmt->kind) {
             case STMT_DECLARATION:
             case STMT_EXPR:
@@ -6719,7 +6721,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             {} break;
 
             case STMT_BLOCK: {
-                Control_Flow_Result result = check_control_flow(stmt->block, parent_loop, return_would_be_trailing);
+                Control_Flow_Result result = check_control_flow(stmt->block, parent_loop, return_would_be_trailing && is_last_stmt);
                 switch (result) {
                     case CONTROL_FLOW_WILL_RETURN: has_returned = true; break;
                     case CONTROL_FLOW_MIGHT_RETURN: break;
@@ -6729,15 +6731,15 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             } break;
 
             case STMT_IF: {
-                bool then_return_would_be_trailing = return_would_be_trailing;
-                then_return_would_be_trailing &= stmt->conditional.else_then == null;
+                bool else_return_would_be_trailing = return_would_be_trailing && is_last_stmt;
+                bool then_return_would_be_trailing = else_return_would_be_trailing && (stmt->conditional.else_then == null);
 
                 Control_Flow_Result then_result = check_control_flow(stmt->conditional.then, parent_loop, then_return_would_be_trailing);
                 if (then_result == CONTROL_FLOW_INVALID) return then_result;
 
                 Control_Flow_Result else_result = CONTROL_FLOW_MIGHT_RETURN;
                 if (stmt->conditional.else_then != null) {
-                    else_result = check_control_flow(stmt->conditional.else_then, parent_loop, return_would_be_trailing);
+                    else_result = check_control_flow(stmt->conditional.else_then, parent_loop, else_return_would_be_trailing);
                     if (else_result == CONTROL_FLOW_INVALID) return else_result;
                 }
 
@@ -6753,7 +6755,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
 
             case STMT_RETURN: {
                 has_returned = true;
-                stmt->return_stmt.trailing = return_would_be_trailing;
+                stmt->return_stmt.trailing = return_would_be_trailing && is_last_stmt;
             } break;
 
             case STMT_BREAK:
@@ -8709,15 +8711,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             // Save volatile registers, unless we are using them for parameters
             for (u32 i = 0; i < VOLATILE_REGISTER_COUNT; i += 1) {
-                if (used_volatile_registers[i]) continue;
                 Register reg = VOLATILE_REGISTERS[i];
 
-                if (reg == RAX) {
-                    if (place.kind == PLACE_REGISTER && place.reg == RAX) {
-                        continue;
-                    } else {
-                        assert(!register_is_allocated(reg_allocator, RAX));
-                    }
+                if (used_volatile_registers[i] || (place.kind == PLACE_REGISTER && place.reg == reg) || reg == RAX) {
+                    continue;
                 }
 
                 register_allocate_specific(context, reg_allocator, reg);
@@ -8836,7 +8833,9 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
             // use one memory operand for the compare in that case.
             // Also, do a similar check for when one of the sides is a literal
 
-            Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+            bool reserve_rax_for_rhs = machinecode_expr_needs_rax(right);
+
+            Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax_for_rhs);
             X64_Place left_place = { .kind = PLACE_REGISTER, .reg = left_reg };
             machinecode_for_expr(context, func, left, reg_allocator, left_place);
 

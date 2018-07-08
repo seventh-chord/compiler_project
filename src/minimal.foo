@@ -1,5 +1,4 @@
 
-/*
 extern "kernel32.lib" {
     fn ExitProcess(exit_code: u32);
     fn GetStdHandle(key: u32) -> u64;
@@ -22,15 +21,29 @@ fn print(string: *u8) {
     WriteFile(stdout_handle, string, u32(length), &written, null);
 }
 
+/*
+fn assert(condition: bool, message: *u8) {
+    if (!condition) {
+        print("Assertion failed: ");
+        print(message);
+        print("\n");
+        ExitProcess(-1);
+    }
+}
+*/
+
 fn main() {
     print("In Marco Polos descriptions the Kahn discovered...\n");
-    other(1, 2);
+
+    let three = other(1, 2);
+    //assert(three == 3, "Math is broken");
 
     wont_work_for_now();
 }
 
-fn other(a, b: u32) {
+fn other(a, b: u32) -> u32 {
     big_function();
+    return a + b;
 }
 
 fn big_function() {
@@ -117,14 +130,4 @@ struct Another_Town { a, b: i64; }
 
 fn build(town: Another_Town) {
     town.a = 1;
-}
-*/
-
-
-fn main() {
-    let a = 3 + function();
-}
-
-fn function() -> i64 {
-    return 7;
 }
