@@ -21,7 +21,6 @@ fn print(string: *u8) {
     WriteFile(stdout_handle, string, u32(length), &written, null);
 }
 
-/*
 fn assert(condition: bool, message: *u8) {
     if (!condition) {
         print("Assertion failed: ");
@@ -30,7 +29,6 @@ fn assert(condition: bool, message: *u8) {
         ExitProcess(-1);
     }
 }
-*/
 
 fn main() {
     print("In Marco Polos descriptions the Kahn discovered...\n");
@@ -39,6 +37,9 @@ fn main() {
     //assert(three == 3, "Math is broken");
 
     wont_work_for_now();
+
+    assert(true, "This should NOT assert");
+    assert(false, "This should assert");
 }
 
 fn other(a, b: u32) -> u32 {

@@ -7620,6 +7620,49 @@ u64 instruction_jcc(Context *context, Condition condition) {
     return buf_length(context->seg_text) - sizeof(i32);
 }
 
+void instruction_setcc(Context *context, Condition condition, X64_Place place) {
+    u32 opcode;
+    switch (condition) {
+        case COND_E:  opcode = 0x940f; break;
+        case COND_NE: opcode = 0x950f; break;
+        case COND_G:  opcode = 0x9f0f; break;
+        case COND_GE: opcode = 0x9d0f; break;
+        case COND_L:  opcode = 0x9c0f; break;
+        case COND_LE: opcode = 0x9e0f; break;
+        case COND_A:  opcode = 0x970f; break;
+        case COND_AE: opcode = 0x930f; break;
+        case COND_B:  opcode = 0x920f; break;
+        case COND_BE: opcode = 0x960f; break;
+        default: assert(false);
+    }
+
+    switch (place.kind) {
+        case PLACE_REGISTER: {
+            encode_instruction_reg_reg(context, REX_BASE, opcode, place.reg, REGISTER_OPCODE_0);
+
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            dump_instruction_bytes(context);
+            printf("set%s %s\n", CONDITION_POSTFIXES[condition], register_name(place.reg, 1));
+            #endif
+        } break;
+
+        case PLACE_ADDRESS: {
+            encode_instruction_reg_mem(context, REX_BASE, opcode, place.address, REGISTER_OPCODE_0);
+
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            dump_instruction_bytes(context);
+            printf("set%s ", CONDITION_POSTFIXES[condition]);
+            print_x64_address(place.address);
+            printf("\n");
+            #endif
+        } break;
+
+        case PLACE_NOWHERE: assert(false);
+        default: assert(false);
+    }
+
+}
+
 void instruction_cmp_reg_reg(Context *context, Register left, Register right, u8 op_size) {
     u8 opcode = 0x39;
     u8 rex = REX_BASE;
@@ -7637,6 +7680,51 @@ void instruction_cmp_reg_reg(Context *context, Register left, Register right, u8
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     dump_instruction_bytes(context);
     printf("cmp %s, %s\n", register_name(left, op_size), register_name(right, op_size));
+    #endif
+}
+
+void instruction_cmp_imm(Context *context, X64_Place place, u64 imm, u8 op_size) {
+    u8 opcode = 0x81;
+    u8 rex = REX_BASE;
+    u8 imm_size = op_size;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    if (op_size > 1 && imm <= I8_MAX) {
+        opcode = 0x83;
+        imm_size = 1;
+    }
+
+    if (op_size == 8) {
+        assert(imm < I32_MAX);
+    }
+
+    if (place.kind == PLACE_REGISTER) {
+        encode_instruction_reg_reg(context, rex, opcode, place.reg, REGISTER_OPCODE_7);
+    } else if (place.kind == PLACE_ADDRESS) {
+        encode_instruction_reg_mem(context, rex, opcode, place.address, REGISTER_OPCODE_7);
+    } else {
+        assert(false);
+    }
+    str_push_integer(&context->seg_text, imm_size, imm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(context);
+    printf("cmp ");
+    if (place.kind == PLACE_REGISTER) {
+        printf("%s", register_name(place.reg, op_size));
+    } else if (place.kind == PLACE_ADDRESS) {
+        print_x64_address(place.address);
+    } else {
+        assert(false);
+    }
+    printf(", %u\n", imm);
     #endif
 }
 
@@ -8600,8 +8688,16 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 {
                     machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place);
 
-                    bool unary = expr->unary.op == UNARY_NOT;
-                    instruction_negative(context, unary, place, primitive_size_of(expr->type->kind));
+                    Type_Kind primitive = expr->type->kind;
+                    if (expr->unary.op == UNARY_NOT && primitive == TYPE_BOOL) {
+                        assert(primitive_size_of(primitive) == 1);
+
+                        instruction_cmp_imm(context, place, 0, 1);
+                        instruction_setcc(context, COND_E, place);
+                    } else {
+                        bool unary = expr->unary.op == UNARY_NOT;
+                        instruction_negative(context, unary, place, primitive_size_of(primitive));
+                    }
                 } break;
 
                 case UNARY_DEREFERENCE: {
@@ -8811,9 +8907,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
     }
 }
 
-Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *expr, bool invert, Reg_Allocator *reg_allocator) {
-    // TODO optimization: If the expr is a UNARY_NOT, peel it of and flip 'invert'
-
+Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *expr, bool invert, Reg_Allocator *reg_allocator) { 
     Condition condition;
     if (expr->kind == EXPR_BINARY && BINARY_OP_COMPARATIVE[expr->binary.op]) {
         Expr *left  = expr->binary.left;
@@ -8840,8 +8934,7 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
             machinecode_for_expr(context, func, left, reg_allocator, left_place);
 
             Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
-            X64_Place right_place = { .kind = PLACE_REGISTER, .reg = right_reg };
-            machinecode_for_expr(context, func, right, reg_allocator, right_place);
+            machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
 
             instruction_cmp_reg_reg(context, left_reg, right_reg, primitive_size);
 
@@ -8850,7 +8943,17 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
             assert(false); // NB We don't support comparasion operators on compound literals, see the typechecker
         }
     } else {
-        unimplemented(); // TODO treat 'if (x)' as 'if (x != 0)'
+        while (expr->kind == EXPR_UNARY && expr->unary.op == UNARY_NOT) {
+            invert = !invert;
+            expr = expr->unary.inner;
+        }
+
+        Type_Kind primitive = expr->type->kind;
+        u8 primitive_size = primitive_size_of(primitive);
+
+        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+        machinecode_for_expr(context, func, expr, reg_allocator, x64_place_reg(reg));
+        instruction_cmp_imm(context, x64_place_reg(reg), 0, primitive_size);
         condition = COND_NE;
     }
 
