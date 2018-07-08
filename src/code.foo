@@ -452,7 +452,7 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    spilling registers
+    sethi-ullman? (reordering the order in which we evaluate subexpressions for better register allocation)
     reference semantics for return values (I don't think we ever supported this before)
     pointer arithmetic, requires multiplication of the integer being added/subtracted
     floating point things

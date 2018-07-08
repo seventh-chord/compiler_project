@@ -7258,6 +7258,12 @@ u8 *register_name(Register reg, u8 size) {
     return REGISTER_NAMES[reg][size_index];
 }
 
+// NB The first four registers in 'VOLATILE_REGISTERS' are used to pass parameters
+#define VOLATILE_REGISTER_COUNT 7
+#define NONVOLATILE_REGISTER_COUNT 9
+Register VOLATILE_REGISTERS[VOLATILE_REGISTER_COUNT]       = { RCX, RDX, R8, R9, RAX, R10, R11 };
+Register NONVOLATILE_REGISTERS[NONVOLATILE_REGISTER_COUNT] = { RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15 };
+
 enum {
     REX_BASE = 0x40,
     REX_W    = 0x08, // selects 64-bit operands over 32-bit operands
@@ -7306,96 +7312,6 @@ typedef struct X64_Place {
 } X64_Place;
 
 #define x64_place_reg(r) (X64_Place) { .kind = PLACE_REGISTER, .reg = (r) }
-
-
-typedef struct Reg_Allocator_Frame Reg_Allocator_Frame;
-struct Reg_Allocator_Frame {
-    i32 stack_size;
-
-    struct {
-        bool allocated;
-    } states[ALLOCATABLE_REGISTER_COUNT];
-
-    Reg_Allocator_Frame *next, *previous;
-};
-
-typedef struct Reg_Allocator {
-    Reg_Allocator_Frame *head;
-
-    struct {
-        u64 size;
-        X64_Address address;
-    } *var_mem_infos;
-    u64 allocated_var_mem_infos;
-
-    i32 max_stack_size;
-    u32 max_callee_param_count;
-} Reg_Allocator;
-
-void register_allocator_enter_frame(Context *context, Reg_Allocator *allocator) {
-    if (allocator->head == null) {
-        allocator->head = arena_new(&context->arena, Reg_Allocator_Frame);
-        allocator->head->stack_size = allocator->max_stack_size;
-    }
-
-    if (allocator->head->next == null) {
-        allocator->head->next = arena_new(&context->arena, Reg_Allocator_Frame);
-        allocator->head->next->previous = allocator->head;
-    }
-
-    mem_copy((u8*) allocator->head, (u8*) allocator->head->next, sizeof(Reg_Allocator_Frame) - 2*sizeof(void*));
-    allocator->head = allocator->head->next;
-}
-
-void register_allocator_leave_frame(Context *context, Reg_Allocator *allocator) {
-    assert(allocator->head->previous != null);
-    allocator->head = allocator->head->previous;
-}
-
-X64_Address register_allocator_allocate_temporary_stack_space(Reg_Allocator *allocator, u64 size, u64 align) {
-    i32 *offset = &allocator->head->stack_size;
-    *offset = (i32) round_to_next(*offset, align);
-
-    i32 immediate_offset = *offset;
-    X64_Address address = { .base = RSP_OFFSET_LOCALS, .immediate_offset = immediate_offset };
-
-    *offset += size;
-    if (*offset > allocator->max_stack_size) {
-        allocator->max_stack_size = *offset;
-    }
-
-    return address;
-}
-
-Register register_allocate(Reg_Allocator *allocator, Register_Kind kind, bool dont_rax) {
-    Register start, end;
-    switch (kind) {
-        case REGISTER_KIND_GPR: { start = RAX;  end = R15;   } break;
-        case REGISTER_KIND_XMM: { start = XMM0; end = XMM15; } break;
-    }
-
-    for (Register reg = start; reg < end; reg += 1) {
-        if (reg == RSP || reg == RBP) continue;
-        if (reg == RAX && dont_rax) continue;
-
-        if (!allocator->head->states[reg].allocated) {
-            allocator->head->states[reg].allocated = true;
-            return reg;
-        }
-    }
-
-    panic("Out of registers to allocate\n");
-    return REGISTER_NONE;
-}
-
-void register_allocate_specific(Reg_Allocator *allocator, Register reg) {
-    if (allocator->head->states[reg].allocated) {
-        unimplemented(); // TODO flush register and restore on register_allocator_leave_frame
-    }
-
-    allocator->head->states[reg].allocated = true;
-}
-
 
 
 #define PRINT_GENERATED_INSTRUCTIONS
@@ -8117,6 +8033,120 @@ void instruction_multiply(Context *context, X64_Place mul_by, bool is_signed, u8
 }
 
 
+typedef struct Reg_Allocator_Frame Reg_Allocator_Frame;
+struct Reg_Allocator_Frame {
+    i32 stack_size;
+
+    struct {
+        bool allocated;
+
+        bool flushed;
+        X64_Address flushed_to;
+    } states[ALLOCATABLE_REGISTER_COUNT];
+
+    Reg_Allocator_Frame *next, *previous;
+};
+
+typedef struct Reg_Allocator {
+    Reg_Allocator_Frame *head;
+
+    struct {
+        u64 size;
+        X64_Address address;
+    } *var_mem_infos;
+    u64 allocated_var_mem_infos;
+
+    i32 max_stack_size;
+    u32 max_callee_param_count;
+} Reg_Allocator;
+
+void register_allocator_enter_frame(Context *context, Reg_Allocator *allocator) {
+    if (allocator->head == null) {
+        allocator->head = arena_new(&context->arena, Reg_Allocator_Frame);
+        allocator->head->stack_size = allocator->max_stack_size;
+    }
+
+    if (allocator->head->next == null) {
+        allocator->head->next = arena_new(&context->arena, Reg_Allocator_Frame);
+        allocator->head->next->previous = allocator->head;
+    }
+
+    mem_copy((u8*) allocator->head, (u8*) allocator->head->next, sizeof(Reg_Allocator_Frame) - 2*sizeof(void*));
+    allocator->head = allocator->head->next;
+
+    for (u32 i = 0; i < ALLOCATABLE_REGISTER_COUNT; i += 1) {
+        allocator->head->states[i].flushed = false;
+    }
+}
+
+void register_allocator_leave_frame(Context *context, Reg_Allocator *allocator) {
+    for (int reg = 0; reg < ALLOCATABLE_REGISTER_COUNT; reg += 1) {
+        if (allocator->head->states[reg].flushed) {
+            X64_Address tmp_address = allocator->head->states[reg].flushed_to;
+            instruction_mov_reg_mem(context, MOVE_FROM_MEM, tmp_address, reg, POINTER_SIZE);
+        }
+    }
+
+    assert(allocator->head->previous != null);
+    allocator->head = allocator->head->previous;
+}
+
+X64_Address register_allocator_allocate_temporary_stack_space(Reg_Allocator *allocator, u64 size, u64 align) {
+    i32 *offset = &allocator->head->stack_size;
+    *offset = (i32) round_to_next(*offset, align);
+
+    i32 immediate_offset = *offset;
+    X64_Address address = { .base = RSP_OFFSET_LOCALS, .immediate_offset = immediate_offset };
+
+    *offset += size;
+    if (*offset > allocator->max_stack_size) {
+        allocator->max_stack_size = *offset;
+    }
+
+    return address;
+}
+
+Register register_allocate(Reg_Allocator *allocator, Register_Kind kind, bool dont_rax) {
+    Register start, end;
+    switch (kind) {
+        case REGISTER_KIND_GPR: { start = RAX;  end = R15;   } break;
+        case REGISTER_KIND_XMM: { start = XMM0; end = XMM15; } break;
+    }
+
+    for (Register reg = start; reg < end; reg += 1) {
+        if (reg == RSP || reg == RBP) continue;
+        if (reg == RAX && dont_rax) continue;
+
+        if (!allocator->head->states[reg].allocated) {
+            allocator->head->states[reg].allocated = true;
+            return reg;
+        }
+    }
+
+    panic("Out of registers to allocate\n");
+    return REGISTER_NONE;
+}
+
+void register_allocate_specific(Context *context, Reg_Allocator *allocator, Register reg) {
+    if (allocator->head->states[reg].allocated) {
+        assert(!allocator->head->states[reg].flushed);
+
+        X64_Address tmp_address = register_allocator_allocate_temporary_stack_space(allocator, POINTER_SIZE, POINTER_SIZE);
+        instruction_mov_reg_mem(context, MOVE_TO_MEM, tmp_address, reg, POINTER_SIZE);
+
+        allocator->head->states[reg].flushed = true;
+        allocator->head->states[reg].flushed_to = tmp_address;
+    }
+
+    allocator->head->states[reg].allocated = true;
+}
+
+bool register_is_allocated(Reg_Allocator *allocator, Register reg) {
+    return allocator->head->states[reg].allocated;
+}
+
+
+
 void machinecode_immediate_to_place(Context *context, X64_Place place, u64 immediate, u8 bytes) {
     switch (place.kind) {
         case PLACE_REGISTER: instruction_mov_imm_reg(context, place.reg, immediate, bytes); break;
@@ -8199,10 +8229,10 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
         // TODO special case small moves by simply inserting some sequential moves
 
         register_allocator_enter_frame(context, reg_allocator);
-        register_allocate_specific(reg_allocator, RAX);
-        register_allocate_specific(reg_allocator, RDX);
-        register_allocate_specific(reg_allocator, RCX);
-        register_allocate_specific(reg_allocator, RBX);
+        register_allocate_specific(context, reg_allocator, RAX);
+        register_allocate_specific(context, reg_allocator, RDX);
+        register_allocate_specific(context, reg_allocator, RCX);
+        register_allocate_specific(context, reg_allocator, RBX);
 
         assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
         instruction_lea(context, src.address, RAX);
@@ -8282,12 +8312,12 @@ void machinecode_binary(Context *context, Reg_Allocator *reg_allocator, Binary_O
             register_allocator_enter_frame(context, reg_allocator);
 
             if (dst_is_not_rax) {
-                register_allocate_specific(reg_allocator, RAX);
+                register_allocate_specific(context, reg_allocator, RAX);
                 machinecode_move(context, reg_allocator, dst, x64_place_reg(RAX), op_size);
             }
 
             if (op_size > 1 && !(src.kind == PLACE_REGISTER && src.reg == RDX)) {
-                register_allocate_specific(reg_allocator, RDX); // We will clobber RDX
+                register_allocate_specific(context, reg_allocator, RDX); // We will clobber RDX
             }
 
             instruction_multiply(context, src, primitive_is_signed(primitive), op_size);
@@ -8630,6 +8660,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
 
+            // Compute parameters
+            bool used_volatile_registers[4] = { false };
             for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                 Type *param_type = callee->signature.params[p].type;
                 bool reference_semantics = callee->signature.params[p].reference_semantics;
@@ -8654,6 +8686,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         }
                     }
 
+                    used_volatile_registers[p] = true;
                     target_place = x64_place_reg(reg);
                 } else {
                     target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = p*POINTER_SIZE } };
@@ -8666,18 +8699,35 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
 
                     machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, tmp_place);
-                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(reg_allocator, target_place.reg);
+                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
                     machinecode_lea(context, reg_allocator, tmp_address, target_place);
                 } else {
-                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(reg_allocator, target_place.reg);
+                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
                     machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
                 }
             }
 
+            // Save volatile registers, unless we are using them for parameters
+            for (u32 i = 0; i < VOLATILE_REGISTER_COUNT; i += 1) {
+                if (used_volatile_registers[i]) continue;
+                Register reg = VOLATILE_REGISTERS[i];
+
+                if (reg == RAX) {
+                    if (place.kind == PLACE_REGISTER && place.reg == RAX) {
+                        continue;
+                    } else {
+                        assert(!register_is_allocated(reg_allocator, RAX));
+                    }
+                }
+
+                register_allocate_specific(context, reg_allocator, reg);
+            }
+
+            // Call function and handle return value
             if (place.kind == PLACE_REGISTER && place.reg == RAX) {
                 instruction_call(context, false, func_index);
             } else {
-                register_allocate_specific(reg_allocator, RAX);
+                register_allocate_specific(context, reg_allocator, RAX);
                 X64_Place return_place = { .kind = PLACE_REGISTER, .reg = RAX };
 
                 instruction_call(context, false, func_index);
@@ -8841,8 +8891,8 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 if (size != align || size > 8) {
                     register_allocator_enter_frame(context, reg_allocator);
 
-                    register_allocate_specific(reg_allocator, RAX);
-                    register_allocate_specific(reg_allocator, RCX);
+                    register_allocate_specific(context, reg_allocator, RAX);
+                    register_allocate_specific(context, reg_allocator, RCX);
 
                     instruction_lea(context, place.address, RAX);
                     instruction_mov_imm_reg(context, RCX, size, POINTER_SIZE);
@@ -8966,7 +9016,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
         case STMT_RETURN: {
             if (stmt->return_stmt.value != null) {
                 register_allocator_enter_frame(context, reg_allocator);
-                register_allocate_specific(reg_allocator, RAX);
+                register_allocate_specific(context, reg_allocator, RAX);
                 X64_Place return_location = x64_place_reg(RAX);
                 machinecode_for_expr(context, func, stmt->return_stmt.value, reg_allocator, return_location);
                 register_allocator_leave_frame(context, reg_allocator);
