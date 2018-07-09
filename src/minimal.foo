@@ -39,6 +39,8 @@ fn main() {
 
     wont_work_for_now();
 
+    more_breakage_incomming();
+
     assert(true, "This should NOT assert");
     assert(false, "This should assert");
 }
@@ -132,4 +134,26 @@ struct Another_Town { a, b: i64; }
 
 fn build(town: Another_Town) {
     town.a = 1;
+}
+
+
+fn more_breakage_incomming() {
+    //let capacity = Cloud { capacity: 10 }.capacity; // TODO
+    //capacity = modernize().capacity; // TODO
+
+    let other_cloud: Cloud;
+    //upgrade(&other_cloud);
+}
+
+/*
+fn upgrade(cloud: *Cloud) -> *Cloud {
+    cloud.capacity += 1;
+    return cloud;
+}
+*/
+
+//fn modernize() -> Cloud {} // TODO return by reference
+
+struct Cloud {
+    capacity: i32;
 }

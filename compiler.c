@@ -1675,8 +1675,8 @@ typedef struct Func {
     } kind;
 
     struct {
-        bool has_output;
-        Type* output_type;
+        bool has_return;
+        Type* return_type;
 
         struct {
             Type* type;
@@ -1694,7 +1694,6 @@ typedef struct Func {
         struct {
             Var* vars;
             u32 var_count;
-            u32 output_var_index;
 
             Stmt* first_stmt;
 
@@ -4424,28 +4423,21 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     t += parameter_length;
 
     // Return type
-    func->signature.has_output = false;
-    func->signature.output_type = &context->primitive_types[TYPE_VOID];
-    func->body.output_var_index = U32_MAX;
+    func->signature.has_return = false;
+    func->signature.return_type = &context->primitive_types[TYPE_VOID];
 
     if (t->kind == TOKEN_ARROW) {
         t += 1;
 
-        u32 output_type_length = 0;
-        Type* output_type = parse_type(context, t, &output_type_length);
-        t += output_type_length;
+        u32 return_type_length = 0;
+        Type* return_type = parse_type(context, t, &return_type_length);
+        t += return_type_length;
 
-        if (output_type == null) {
+        if (return_type == null) {
             return null;
-        } else if (output_type->kind != TYPE_VOID) {
-            func->signature.has_output = true;
-            func->signature.output_type = output_type;
-            func->body.output_var_index = buf_length(context->tmp_vars);
-
-            Var output_var = {0};
-            output_var.name = U32_MAX;
-            output_var.type = output_type;
-            buf_push(context->tmp_vars, output_var);
+        } else if (return_type->kind != TYPE_VOID) {
+            func->signature.has_return = true;
+            func->signature.return_type = return_type;
         }
     }
 
@@ -5907,7 +5899,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             }
 
             Func* callee = &info->context->funcs[expr->call.func_index];
-            expr->type = callee->signature.output_type;
+            expr->type = callee->signature.return_type;
 
             if (expr->call.param_count != callee->signature.param_count) {
                 u8* name = string_table_access(info->context->string_table, callee->name);
@@ -6305,7 +6297,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case STMT_RETURN: {
-            if (!info->func->signature.has_output) {
+            if (!info->func->signature.has_return) {
                 if (stmt->return_stmt.value != null) {
                     u8* name = string_table_access(info->context->string_table, info->func->name);
                     print_file_pos(&stmt->pos);
@@ -6314,7 +6306,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 }
 
             } else {
-                Type* expected_type = info->func->signature.output_type;
+                Type* expected_type = info->func->signature.return_type;
 
                 if (stmt->return_stmt.value == null) {
                     u8* name = string_table_access(info->context->string_table, info->func->name);
@@ -6956,6 +6948,33 @@ bool typecheck(Context* context) {
                 }
             }
         }
+
+        /*
+        TODO TODO
+        TODO TODO
+        TODO TODO
+        TODO TODO
+        TODO TODO
+        TODO TODO
+        TODO TODO
+        Type** return_type = &func->signature.params[p].type;
+        if ((*type)->flags & TYPE_FLAG_UNRESOLVED) {
+            if (resolve_type(context, type, &func->declaration_pos)) {
+                (*type)->flags &= ~TYPE_FLAG_UNRESOLVED;
+            } else {
+                valid = false;
+            }
+        }
+
+        if (primitive_is_compound((*type)->kind)) {
+            func->signature.params[p].reference_semantics = true;
+            *type = get_pointer_type(context, *type);
+
+            if (func->kind == FUNC_KIND_NORMAL) {
+                func->body.vars[func->signature.params[p].var_index].type = *type;
+            }
+        }
+        */
     }
 
     if (!valid) return false;
@@ -7050,10 +7069,7 @@ bool typecheck(Context* context) {
 
         info.scope = scope_new(context, info.func->body.var_count);
 
-        // output and parameters are allways in scope
-        if (info.func->signature.has_output) {
-            info.scope->map[info.func->body.output_var_index] = true;
-        }
+        // Parameters are allways in scope
         for (u32 i = 0; i < info.func->signature.param_count; i += 1) {
             u32 var_index = info.func->signature.params[i].var_index;
             info.scope->map[var_index] = true;
@@ -7070,7 +7086,7 @@ bool typecheck(Context* context) {
         Control_Flow_Result result = check_control_flow(info.func->body.first_stmt, null, true);
         if (result == CONTROL_FLOW_INVALID) {
             valid = false;
-        } else if (info.func->signature.has_output && result != CONTROL_FLOW_WILL_RETURN) {
+        } else if (info.func->signature.has_return && result != CONTROL_FLOW_WILL_RETURN) {
             u8* name = string_table_access(info.context->string_table, info.func->name);
             print_file_pos(&info.func->declaration_pos);
             printf("Function '%s' might not return\n", name);
@@ -8630,7 +8646,8 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
         } break;
     }
 
-    return (X64_Place) { .kind = PLACE_NOWHERE };
+    assert(false);
+    return (X64_Place) {0};
 }
 
 void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place) {
@@ -8875,9 +8892,9 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                 instruction_call(context, false, func_index);
 
-                if (place.kind != PLACE_NOWHERE && callee->signature.has_output) {
-                    Type *return_type = callee->signature.output_type;
-                    u64 return_size = type_size_of(callee->signature.output_type);
+                if (place.kind != PLACE_NOWHERE && callee->signature.has_return) {
+                    Type *return_type = callee->signature.return_type;
+                    u64 return_size = type_size_of(callee->signature.return_type);
 
                     if (primitive_is_compound(return_type->kind)) {
                         unimplemented(); // TODO reference-semantics. What does the windows spec say here?
@@ -8926,13 +8943,21 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_MEMBER_ACCESS: {
-            // TODO does this actually work in complicated cases. At first, I would think it doesn't, but it might actually be fine...
-
-            X64_Place dst = place;
-            X64_Place src = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
-            u64 size = type_size_of(expr->type);
-
-            machinecode_move(context, reg_allocator, src, dst, size);
+            if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
+                X64_Place dst = place;
+                X64_Place src = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
+                u64 size = type_size_of(expr->type);
+                machinecode_move(context, reg_allocator, src, dst, size);
+            } else {
+                unimplemented();
+                /*
+                literal.value
+                call().value (the call can return a pointer, hmm)
+                pointer.value?
+                register_allocator_allocate_temporary_stack_space();
+                unimplemented();
+                */
+            }
         } break;
 
         case EXPR_STATIC_MEMBER_ACCESS: {
@@ -9392,7 +9417,7 @@ void build_machinecode(Context *context) {
         printf("; (epilog)\n");
         #endif
 
-        if (!func->signature.has_output) {
+        if (!func->signature.has_return) {
             instruction_xor(context, RAX, RAX, POINTER_SIZE);
         }
 
@@ -10128,8 +10153,6 @@ void print_verbose_info(Context* context) {
             {
                 printf("    %u variables: ", (u64) func->body.var_count);
                 for (u32 v = 0; v < func->body.var_count; v += 1) {
-                    if (v == func->body.output_var_index) continue;
-
                     Var* var = &func->body.vars[v];
                     u8* name = string_table_access(context->string_table, var->name);
 

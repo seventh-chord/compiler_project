@@ -478,6 +478,7 @@ Language features
     structure definitions inside functiosn
 
 Compiler functionality
+    stack unwinding - so we can produce a stack trace on e.g. assert
     .pdata and unwind info
     enabling subsystem windows (over subsystem console)
     debug info
