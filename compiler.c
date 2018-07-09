@@ -7683,6 +7683,28 @@ void instruction_cmp_reg_reg(Context *context, Register left, Register right, u8
     #endif
 }
 
+void instruction_cmp_reg_mem(Context *context, X64_Address left, Register right, u8 op_size) {
+    u8 opcode = 0x39;
+    u8 rex = REX_BASE;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_reg_mem(context, rex, opcode, left, right);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    dump_instruction_bytes(context);
+    printf("cmp ");
+    print_x64_address(left);
+    printf(", %s\n", register_name(right, op_size));
+    #endif
+}
+
 void instruction_cmp_imm(Context *context, X64_Place place, u64 imm, u8 op_size) {
     u8 opcode = 0x81;
     u8 rex = REX_BASE;
@@ -8419,12 +8441,40 @@ void machinecode_binary(Context *context, Reg_Allocator *reg_allocator, Binary_O
             register_allocator_leave_frame(context, reg_allocator);
         } break;
 
-        case BINARY_EQ:   unimplemented(); break;
-        case BINARY_NEQ:  unimplemented(); break;
-        case BINARY_GT:   unimplemented(); break;
-        case BINARY_GTEQ: unimplemented(); break;
-        case BINARY_LT:   unimplemented(); break;
-        case BINARY_LTEQ: unimplemented(); break;
+        case BINARY_EQ:
+        case BINARY_NEQ:
+        case BINARY_GT:
+        case BINARY_GTEQ:
+        case BINARY_LT:
+        case BINARY_LTEQ:
+        {
+            register_allocator_enter_frame(context, reg_allocator);
+
+            Register tmp_reg = REGISTER_NONE;
+            if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
+                tmp_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, tmp_reg, primitive_size_of(primitive));
+                src = x64_place_reg(tmp_reg);
+            }
+
+            u8 inner_size = primitive_size_of(primitive);
+            Condition condition = find_condition_for_op_and_type(op, primitive);
+
+            if (src.kind == PLACE_REGISTER && dst.kind == PLACE_REGISTER) {
+                instruction_cmp_reg_reg(context, dst.reg, src.reg, inner_size);
+            } else if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_REGISTER) {
+                instruction_cmp_reg_mem(context, src.address, dst.reg, inner_size);
+                condition = condition_not(condition);
+            } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_ADDRESS) {
+                instruction_cmp_reg_mem(context, dst.address, src.reg, inner_size);
+            } else {
+                assert(false);
+            }
+
+            instruction_setcc(context, condition, dst);
+
+            register_allocator_leave_frame(context, reg_allocator);
+        } break;
 
         default: assert(false);
     }
@@ -8668,7 +8718,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             X64_Place right_place = { .kind = PLACE_REGISTER, .reg = right_reg };
             machinecode_for_expr(context, func, expr->binary.right, reg_allocator, right_place);
 
-            Type_Kind primitive = primitive_of(expr->type);
+            Type_Kind primitive = primitive_of(expr->binary.left->type);
             machinecode_binary(context, reg_allocator, expr->binary.op, primitive, right_place, left_place);
 
             register_allocator_leave_frame(context, reg_allocator);

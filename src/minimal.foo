@@ -34,7 +34,8 @@ fn main() {
     print("In Marco Polos descriptions the Kahn discovered...\n");
 
     let three = other(1, 2);
-    //assert(three == 3, "Math is broken");
+    let b = three == 3;
+    assert(b, "Math is broken");
 
     wont_work_for_now();
 
