@@ -6021,7 +6021,15 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
         case EXPR_MEMBER_ACCESS: {
             Expr* parent = expr->member_access.parent;
-            if (typecheck_expr(info, parent, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+
+            bool bad_but_keep_on_going = false;
+            if (typecheck_expr(info, parent, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) {
+                if (parent->type == null) {
+                    return TYPECHECK_EXPR_BAD;
+                } else {
+                    bad_but_keep_on_going = true;
+                }
+            }
 
             if (parent->flags & EXPR_FLAG_ASSIGNABLE) {
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
@@ -6057,6 +6065,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     return TYPECHECK_EXPR_BAD;
                 }
             }
+
+            if (bad_but_keep_on_going) return TYPECHECK_EXPR_BAD;
         } break;
 
         case EXPR_STATIC_MEMBER_ACCESS: {
@@ -6195,15 +6205,12 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             bool good_types = true;
 
             if (right != null) {
-                good_types = false;
-
                 Type* resolve_to = var->type;
                 if (resolve_to == null) resolve_to = &info->context->primitive_types[TYPE_VOID];
 
                 if (typecheck_expr(info, right, resolve_to) != TYPECHECK_EXPR_BAD) {
                     if (var->type == null) {
                         var->type = right->type;
-                        good_types = true;
                     } else {
                         if (!type_can_assign(var->type, right->type)) {
                             print_file_pos(&stmt->pos);
@@ -6212,19 +6219,19 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                             printf(" but got ");
                             print_type(info->context, right->type);
                             printf("\n");
-                        } else {
-                            good_types = true;
+                            good_types = false;
                         }
                     }
+                } else {
+                    if (var->type == null) {
+                        var->type = right->type;
+                    }
+                    good_types = false;
                 }
             } else {
                 assert(var->type != null);
-                if (var->type->flags & TYPE_FLAG_UNRESOLVED) {
-                    if (!resolve_type(info->context, &var->type, &var->declaration_pos)) {
-                        good_types = true;
-                    } else {
-                        var->type->flags &= ~TYPE_FLAG_UNRESOLVED;
-                    }
+                if (!resolve_type(info->context, &var->type, &var->declaration_pos)) {
+                    good_types = false;
                 }
             }
 

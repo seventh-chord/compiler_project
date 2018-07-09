@@ -165,5 +165,4 @@ fn modernize() -> Cloud {
 struct Cloud {
     length: i32;
     capacity: i32;
-    //capacity, a: i32; // TODO replacing the line above with this causes funny error messages
 }
