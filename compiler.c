@@ -5302,18 +5302,18 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
 typedef struct Scope Scope;
 struct Scope {
     u32 var_count;
-    u8* map; // list of booleans, for marking which variables currently are in scope
+    u8 *map; // list of booleans, for marking which variables currently are in scope
 
     Scope *child, *parent;
 };
 
 typedef struct Typecheck_Info {
-    Context* context;
-    Func* func;
-    Scope* scope;
+    Context *context;
+    Func *func;
+    Scope *scope;
 } Typecheck_Info;
 
-Scope* scope_new(Context* context, u32 var_count) {
+Scope* scope_new(Context *context, u32 var_count) {
     Scope* scope = arena_new(&context->stack, Scope);
     scope->var_count = var_count;
     scope->map = arena_alloc(&context->stack, var_count);
@@ -5321,7 +5321,7 @@ Scope* scope_new(Context* context, u32 var_count) {
     return scope;
 }
 
-void typecheck_scope_push(Typecheck_Info* info) {
+void typecheck_scope_push(Typecheck_Info *info) {
     if (info->scope->child == null) {
         info->scope->child = scope_new(info->context, info->scope->var_count);
         info->scope->child->parent = info->scope;
@@ -5332,12 +5332,12 @@ void typecheck_scope_push(Typecheck_Info* info) {
     info->scope = info->scope->child;
 }
 
-void typecheck_scope_pop(Typecheck_Info* info) {
+void typecheck_scope_pop(Typecheck_Info *info) {
     assert(info->scope->parent != null);
     info->scope = info->scope->parent;
 }
 
-bool resolve_type(Context* context, Type** type_slot, File_Pos* pos) {
+bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
     // The reason we have a pretty complex system here is because we want types to be pointer-equal
 
     Type* type = *type_slot;
@@ -6929,17 +6929,11 @@ bool typecheck(Context* context) {
     // Function signatures
     buf_foreach (Func, func, context->funcs) {
         for (u32 p = 0; p < func->signature.param_count; p += 1) {
-            Type** type = &func->signature.params[p].type;
+            Type **type = &func->signature.params[p].type;
 
-            if ((*type)->flags & TYPE_FLAG_UNRESOLVED) {
-                if (resolve_type(context, type, &func->declaration_pos)) {
-                    (*type)->flags &= ~TYPE_FLAG_UNRESOLVED;
-                } else {
-                    valid = false;
-                }
-            }
-
-            if (primitive_is_compound((*type)->kind)) {
+            if (!resolve_type(context, type, &func->declaration_pos)) {
+                valid = false;
+            } else if (primitive_is_compound((*type)->kind)) {
                 func->signature.params[p].reference_semantics = true;
                 *type = get_pointer_type(context, *type);
 
@@ -6949,32 +6943,15 @@ bool typecheck(Context* context) {
             }
         }
 
-        /*
-        TODO TODO
-        TODO TODO
-        TODO TODO
-        TODO TODO
-        TODO TODO
-        TODO TODO
-        TODO TODO
-        Type** return_type = &func->signature.params[p].type;
-        if ((*type)->flags & TYPE_FLAG_UNRESOLVED) {
-            if (resolve_type(context, type, &func->declaration_pos)) {
-                (*type)->flags &= ~TYPE_FLAG_UNRESOLVED;
-            } else {
+        if (func->signature.has_return) {
+            Type **return_type = &func->signature.return_type;
+
+            if (!resolve_type(context, return_type, &func->declaration_pos)) {
                 valid = false;
+            } else if (primitive_is_compound((*return_type)->kind)) {
+                unimplemented(); // TODO return by reference
             }
         }
-
-        if (primitive_is_compound((*type)->kind)) {
-            func->signature.params[p].reference_semantics = true;
-            *type = get_pointer_type(context, *type);
-
-            if (func->kind == FUNC_KIND_NORMAL) {
-                func->body.vars[func->signature.params[p].var_index].type = *type;
-            }
-        }
-        */
     }
 
     if (!valid) return false;

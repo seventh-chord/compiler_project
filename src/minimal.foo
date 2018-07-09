@@ -142,15 +142,16 @@ fn more_breakage_incomming() {
     //capacity = modernize().capacity; // TODO
 
     let other_cloud: Cloud;
-    //upgrade(&other_cloud);
+    upgrade(&other_cloud);
+    assert(other_cloud.capacity == 1, "My cloud didn't grow\n");
+
+    //let new_capacity = upgrade(&other_cloud).capacity; // TODO
 }
 
-/*
 fn upgrade(cloud: *Cloud) -> *Cloud {
     cloud.capacity += 1;
     return cloud;
 }
-*/
 
 //fn modernize() -> Cloud {} // TODO return by reference
 
