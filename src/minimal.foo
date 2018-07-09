@@ -138,7 +138,9 @@ fn build(town: Another_Town) {
 
 
 fn more_breakage_incomming() {
-    //let capacity = Cloud { capacity: 10 }.capacity; // TODO
+    let capacity = Cloud { 5, 10 }.capacity;
+    assert(capacity == 10, "It didn't work after all :(\n");
+
     //capacity = modernize().capacity; // TODO
 
     let other_cloud: Cloud;

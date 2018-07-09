@@ -7307,6 +7307,7 @@ typedef struct X64_Place {
 } X64_Place;
 
 #define x64_place_reg(r) (X64_Place) { .kind = PLACE_REGISTER, .reg = (r) }
+#define x64_place_address(a) (X64_Place) { .kind = PLACE_ADDRESS, .address = (a) }
 
 
 #define PRINT_GENERATED_INSTRUCTIONS
@@ -8954,11 +8955,21 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     member_place.address.base = pointer_reg;
                     member_place.address.immediate_offset = member_offset;
 
-                    register_allocator_leave_frame(context, reg_allocator);
-
                     machinecode_move(context, reg_allocator, member_place, place, member_size);
+
+                    register_allocator_leave_frame(context, reg_allocator);
                 } else {
-                    unimplemented(); // TODO
+                    register_allocator_enter_frame(context, reg_allocator);
+
+                    X64_Address tmp_address = register_allocator_allocate_temporary_stack_space(reg_allocator, parent_type->structure.size, parent_type->structure.align);
+                    machinecode_for_expr(context, func, parent, reg_allocator, x64_place_address(tmp_address));
+
+                    X64_Place member_place = { .kind = PLACE_ADDRESS };
+                    member_place.address = tmp_address;
+                    member_place.address.immediate_offset += member_offset;
+                    machinecode_move(context, reg_allocator, member_place, place, member_size);
+
+                    register_allocator_leave_frame(context, reg_allocator);
                 }
             }
         } break;
