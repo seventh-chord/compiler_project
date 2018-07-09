@@ -1234,11 +1234,11 @@ struct Type {
             struct {
                 u32 name;
                 Type* type;
-                u64 offset;
+                i32 offset;
                 File_Pos declaration_pos;
             } *members;
 
-            u64 size, align;
+            u32 size, align;
         } structure;
 
         struct {
@@ -6784,8 +6784,8 @@ bool typecheck(Context* context) {
         switch (type->kind) {
             case TYPE_STRUCT: {
                 if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
-                    u64 max_align = 0;
-                    u64 size = 0;
+                    u32 max_align = 0;
+                    u32 size = 0;
 
                     for (u32 m = 0; m < type->structure.member_count; m += 1) {
                         File_Pos* member_pos = &type->structure.members[m].declaration_pos;
@@ -6796,12 +6796,12 @@ bool typecheck(Context* context) {
                             break;
                         }
 
-                        type->structure.members[m].offset = size;
+                        type->structure.members[m].offset = (i32) size;
 
-                        u64 member_size = 0;
-                        u64 member_align = 0;
+                        u32 member_size = 0;
+                        u32 member_align = 0;
 
-                        u64 array_multiplier = 1;
+                        u32 array_multiplier = 1;
                         while (true) {
                             if (member_type->kind == TYPE_ARRAY) {
                                 array_multiplier *= member_type->array.length;
@@ -8674,9 +8674,9 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         assert(expr->compound.content[i].name_mode != EXPR_COMPOUND_UNRESOLVED_NAME);
 
                         u32 type_member_index = expr->compound.content[i].member_index;
-                        u64 member_offset = expr->type->structure.members[type_member_index].offset;
+                        i32 member_offset = expr->type->structure.members[type_member_index].offset;
 
-                        assert((((i64) place.address.immediate_offset) + ((i64) member_offset)) < I32_MAX);
+                        assert((place.address.immediate_offset + member_offset) < I32_MAX);
                         X64_Place offset_place = place;
                         offset_place.address.immediate_offset += (i32) member_offset;
 
@@ -8920,20 +8920,46 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_MEMBER_ACCESS: {
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+            u64 member_size = type_size_of(expr->type);
+
             if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
                 X64_Place dst = place;
                 X64_Place src = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
-                u64 size = type_size_of(expr->type);
-                machinecode_move(context, reg_allocator, src, dst, size);
+                machinecode_move(context, reg_allocator, src, dst, member_size);
             } else {
-                unimplemented();
-                /*
-                literal.value
-                call().value (the call can return a pointer, hmm)
-                pointer.value?
-                register_allocator_allocate_temporary_stack_space();
-                unimplemented();
-                */
+                Expr *parent = expr->member_access.parent;
+
+                Type *parent_type = parent->type;
+                bool parent_is_pointer = parent_type->kind == TYPE_POINTER;
+                if (parent_is_pointer) parent_type = parent_type->pointer_to;
+
+                assert(parent_type->kind == TYPE_STRUCT);
+
+                i32 member_offset = parent_type->structure.members[expr->member_access.member_index].offset;
+
+                if (parent_is_pointer) {
+                    register_allocator_enter_frame(context, reg_allocator);
+
+                    Register pointer_reg;
+                    if (place.kind == PLACE_REGISTER) {
+                        pointer_reg = place.reg;
+                    } else {
+                        pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                    }
+
+                    machinecode_for_expr(context, func, parent, reg_allocator, x64_place_reg(pointer_reg));
+
+                    X64_Place member_place = { .kind = PLACE_ADDRESS };
+                    member_place.address.base = pointer_reg;
+                    member_place.address.immediate_offset = member_offset;
+
+                    register_allocator_leave_frame(context, reg_allocator);
+
+                    machinecode_move(context, reg_allocator, member_place, place, member_size);
+                } else {
+                    unimplemented(); // TODO
+                }
             }
         } break;
 

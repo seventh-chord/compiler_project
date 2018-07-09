@@ -145,7 +145,8 @@ fn more_breakage_incomming() {
     upgrade(&other_cloud);
     assert(other_cloud.capacity == 1, "My cloud didn't grow\n");
 
-    //let new_capacity = upgrade(&other_cloud).capacity; // TODO
+    let new_capacity = upgrade(&other_cloud).capacity;
+    assert(new_capacity == 2, "All the cloud rained away\n");
 }
 
 fn upgrade(cloud: *Cloud) -> *Cloud {
@@ -156,5 +157,6 @@ fn upgrade(cloud: *Cloud) -> *Cloud {
 //fn modernize() -> Cloud {} // TODO return by reference
 
 struct Cloud {
+    length: i32;
     capacity: i32;
 }
