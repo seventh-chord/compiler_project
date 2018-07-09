@@ -141,7 +141,8 @@ fn more_breakage_incomming() {
     let capacity = Cloud { 5, 10 }.capacity;
     assert(capacity == 10, "It didn't work after all :(\n");
 
-    //capacity = modernize().capacity; // TODO
+    capacity = modernize().capacity;
+    assert(capacity == 20, "I really hope this doesn't assert\n");
 
     let other_cloud: Cloud;
     upgrade(&other_cloud);
@@ -156,9 +157,13 @@ fn upgrade(cloud: *Cloud) -> *Cloud {
     return cloud;
 }
 
-//fn modernize() -> Cloud {} // TODO return by reference
+fn modernize() -> Cloud {
+    let shiny_new_thing = Cloud { length: 10, capacity: 20 };
+    return shiny_new_thing;
+}
 
 struct Cloud {
     length: i32;
     capacity: i32;
+    //capacity, a: i32; // TODO replacing the line above with this causes funny error messages
 }

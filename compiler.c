@@ -1677,6 +1677,8 @@ typedef struct Func {
     struct {
         bool has_return;
         Type* return_type;
+        bool return_by_reference;
+        // ... otherwise return in RAX, which we can even do for structs. See reference/notes.md
 
         struct {
             Type* type;
@@ -6949,7 +6951,12 @@ bool typecheck(Context* context) {
             if (!resolve_type(context, return_type, &func->declaration_pos)) {
                 valid = false;
             } else if (primitive_is_compound((*return_type)->kind)) {
-                unimplemented(); // TODO return by reference
+                u32 size = type_size_of(*return_type);
+                if (size == 1 || size == 2 || size == 4 || size == 8) {
+                    // We just squish the struct/array into RAX
+                } else {
+                    func->signature.return_by_reference = true;
+                }
             }
         }
     }
@@ -8652,8 +8659,24 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_COMPOUND: {
-            assert(place.kind == PLACE_ADDRESS);
+            register_allocator_enter_frame(context, reg_allocator);
 
+            u64 size = type_size_of(expr->type);
+            u64 align = type_align_of(expr->type);
+
+            X64_Place real_place = place;
+            bool return_to_real_place = false;
+
+            if (place.kind != PLACE_ADDRESS) {
+                assert(size == 1 || size == 2 || size == 4 || size == 8);
+
+                return_to_real_place = true;
+
+                place.kind = PLACE_ADDRESS;
+                place.address = register_allocator_allocate_temporary_stack_space(reg_allocator, size, align);
+            }
+
+            assert(place.kind == PLACE_ADDRESS);
             switch (expr->type->kind) {
                 case TYPE_ARRAY: {
                     Type* child_type = expr->type->array.of;
@@ -8688,6 +8711,12 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                 default: assert(false);
             }
+
+            if (return_to_real_place) {
+                machinecode_move(context, reg_allocator, place, real_place, size);
+            }
+
+            register_allocator_leave_frame(context, reg_allocator);
         } break;
 
         case EXPR_BINARY: {
@@ -8874,7 +8903,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     Type *return_type = callee->signature.return_type;
                     u64 return_size = type_size_of(callee->signature.return_type);
 
-                    if (primitive_is_compound(return_type->kind)) {
+                    if (callee->signature.return_by_reference) {
                         unimplemented(); // TODO reference-semantics. What does the windows spec say here?
                     } else {
                         machinecode_move(context, reg_allocator, return_place, place, return_size);

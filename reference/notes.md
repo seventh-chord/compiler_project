@@ -110,6 +110,17 @@ Larger types are passed as pointers to caller-allocated memory
 Caller-allocated memory must be 16-byte alligned
 Values are returned in rax or xmm0 if they fit
 
+Compound types can be squished into RAX or returned by reference.
+Only structures which are 1, 2, 4 or 8 bytes large can be returned in RAX (A lot of other rules
+apply to this in the windows spec, but those rules all pertain to c++ nonsense which we don't have
+to care about in a c-like language).
+When we can't return in RAX, we return "by reference" (what I refer to as reference semantics in code).
+When returning by reference, the following change of function signature effectively happens:
+    fn f(a, b: u32) -> Foo
+    fn f(_: *Foo, a, b: u32) -> *Foo
+Here, the caller allocates space for the return value and passes it as the first parameter (in RCX)
+and the callee returns the same pointer in RAX.
+
 Voltatile registers can be overwritten by the callee, invalidating their previous
 values. Nonvolatile registers must remain constant across function calls.
 Volatile         rax rcx rdx  r8  r9 r10 r11
