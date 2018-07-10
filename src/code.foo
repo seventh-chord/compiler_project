@@ -452,12 +452,12 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
+    apparently, small structs are also stuck into registers when passed as parameters
     reference semantics for return values (I don't think we ever supported this before)
     pointer arithmetic, requires multiplication of the integer being added/subtracted
     floating point things
     implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
     fix empty structs - do we even want to allow this?
-
 
 Language features
     real constants

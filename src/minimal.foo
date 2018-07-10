@@ -134,6 +134,9 @@ struct Another_Town { a, b: i64; }
 
 fn build(town: Another_Town) {
     town.a = 1;
+
+    //let t = type_info_of_value(town);
+    //assert(t == Type_Kind::POINTER);
 }
 
 
@@ -147,6 +150,9 @@ fn more_breakage_incomming() {
     let other_cloud: Cloud;
     upgrade(&other_cloud);
     assert(other_cloud.capacity == 1, "My cloud didn't grow\n");
+    let newer_capacity = upgrade_by_value(other_cloud).capacity;
+    assert(newer_capacity == 2, "Didn't grow again, darn\n");
+    assert(other_cloud.capacity == 1, "Still works here though\n");
 
     let new_capacity = upgrade(&other_cloud).capacity;
     assert(new_capacity == 2, "All the cloud rained away\n");
@@ -157,11 +163,17 @@ fn upgrade(cloud: *Cloud) -> *Cloud {
     return cloud;
 }
 
+fn upgrade_by_value(cloud: Cloud) -> Cloud {
+    cloud.capacity += 1;
+    return cloud;
+}
+
 fn modernize() -> Cloud {
     let shiny_new_thing = Cloud { length: 10, capacity: 20 };
     return shiny_new_thing;
 }
 
+// Note that this struct is 64 bits large, and that it thus fits in a register
 struct Cloud {
     length: i32;
     capacity: i32;

@@ -6943,11 +6943,15 @@ bool typecheck(Context* context) {
             if (!resolve_type(context, type, &func->declaration_pos)) {
                 valid = false;
             } else if (primitive_is_compound((*type)->kind)) {
-                func->signature.params[p].reference_semantics = true;
-                *type = get_pointer_type(context, *type);
-
-                if (func->kind == FUNC_KIND_NORMAL) {
-                    func->body.vars[func->signature.params[p].var_index].type = *type;
+                u32 size = type_size_of(*type);
+                if (size == 1 || size == 2 || size == 4 || size == 8) {
+                    // Just squish the value into a register
+                } else {
+                    func->signature.params[p].reference_semantics = true;
+                    *type = get_pointer_type(context, *type);
+                    if (func->kind == FUNC_KIND_NORMAL) {
+                        func->body.vars[func->signature.params[p].var_index].type = *type;
+                    }
                 }
             }
         }

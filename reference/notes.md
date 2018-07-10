@@ -110,6 +110,7 @@ Larger types are passed as pointers to caller-allocated memory
 Caller-allocated memory must be 16-byte alligned
 Values are returned in rax or xmm0 if they fit
 
+## Return values
 Compound types can be squished into RAX or returned by reference.
 Only structures which are 1, 2, 4 or 8 bytes large can be returned in RAX (A lot of other rules
 apply to this in the windows spec, but those rules all pertain to c++ nonsense which we don't have
