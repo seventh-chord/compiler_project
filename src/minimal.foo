@@ -142,7 +142,6 @@ fn build(town: Another_Town) {
 
     t = type_info_of_type(Another_Town);
     assert(t == Type_Kind::STRUCT, "At least this works as intended\n");
-    //t != Type_Kind::STRUCT; // TODO errors
 }
 
 

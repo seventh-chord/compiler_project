@@ -5754,7 +5754,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.left->type->kind == TYPE_POINTER) {
                     valid_types = true;
                 }
-                if (expr->binary.op != BINARY_EQ && !primitive_is_integer(expr->binary.left->type->kind)) {
+                if (!(expr->binary.op == BINARY_EQ || expr->binary.op == BINARY_NEQ) && !primitive_is_integer(expr->binary.left->type->kind)) {
                     valid_types = false;
                 }
             } else {
@@ -8331,7 +8331,7 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
 }
 
 void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place src, X64_Place dst, u64 size) {
-    if (size <= 8) {
+    if (size == 1 || size == 2 || size == 4 || size == 8) {
         if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
             register_allocator_enter_frame(context, reg_allocator);
 
@@ -8649,18 +8649,24 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
 void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place) {
     switch (expr->kind) {
         case EXPR_VARIABLE: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             u64 size = type_size_of(expr->type);
             X64_Place from = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
             machinecode_move(context, reg_allocator, from, place, size);
         } break;
 
         case EXPR_LITERAL: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             u64 size = type_size_of(expr->type);
             assert(size <= 8);
             machinecode_immediate_to_place(context, place, expr->literal.masked_value, (u8) size);
         } break;
 
         case EXPR_STRING_LITERAL: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, 1);
 
             assert(data_offset < I32_MAX);
@@ -8670,6 +8676,14 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_COMPOUND: {
+            if (place.kind == PLACE_NOWHERE) {
+                for (u32 i = 0; i < expr->compound.count; i += 1) {
+                    Expr *child = expr->compound.content[i].expr;
+                    machinecode_for_expr(context, func, child, reg_allocator, place);
+                }
+                return;
+            }
+
             register_allocator_enter_frame(context, reg_allocator);
 
             u64 size = type_size_of(expr->type);
@@ -8696,7 +8710,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     for (u32 i = 0; i < expr->compound.count; i += 1) {
                         assert(expr->compound.content[i].name_mode == EXPR_COMPOUND_NO_NAME);
 
-                        Expr* child = expr->compound.content[i].expr;
+                        Expr *child = expr->compound.content[i].expr;
                         machinecode_for_expr(context, func, child, reg_allocator, place);
 
                         assert((((i64) place.address.immediate_offset) + ((i64) child_size)) < I32_MAX);
@@ -8731,6 +8745,12 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_BINARY: {
+            if (place.kind == PLACE_NOWHERE) {
+                machinecode_for_expr(context, func, expr->binary.left, reg_allocator, place);
+                machinecode_for_expr(context, func, expr->binary.right, reg_allocator, place);
+                return;
+            }
+
             Register_Kind reg_kind = primitive_is_float(primitive_of(expr->binary.left->type))? REGISTER_KIND_XMM : REGISTER_KIND_GPR;
 
             X64_Place left_place;
@@ -8767,6 +8787,11 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_UNARY: {
+            if (place.kind == PLACE_NOWHERE) {
+                machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place);
+                return;
+            }
+
             switch (expr->unary.op) {
                 case UNARY_NOT:
                 case UNARY_NEG:
@@ -8926,6 +8951,11 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_CAST: {
+            if (place.kind == PLACE_NOWHERE) {
+                machinecode_for_expr(context, func, expr->cast_from, reg_allocator, place);
+                return;
+            }
+
             if (expr->type->kind == expr->cast_from->type->kind) {
                 machinecode_for_expr(context, func, expr->cast_from, reg_allocator, place);
             } else {
@@ -8957,10 +8987,21 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_SUBSCRIPT: {
+            if (place.kind == PLACE_NOWHERE) {
+                machinecode_for_expr(context, func, expr->subscript.array, reg_allocator, place);
+                machinecode_for_expr(context, func, expr->subscript.index, reg_allocator, place);
+                return;
+            }
+
             unimplemented();
         } break;
 
         case EXPR_MEMBER_ACCESS: {
+            if (place.kind == PLACE_NOWHERE) {
+                machinecode_for_expr(context, func, expr->member_access.parent, reg_allocator, place);
+                return;
+            }
+
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
             u64 member_size = type_size_of(expr->type);
 
@@ -9015,6 +9056,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_STATIC_MEMBER_ACCESS: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
             Type* type = expr->static_member_access.parent_type;
@@ -9027,21 +9070,33 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_TYPE_INFO_OF_TYPE: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             Type_Kind primitive = expr->type_info_of_type->kind;
             machinecode_immediate_to_place(context, place, (u64) primitive, 1);
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             Type_Kind primitive = expr->type_info_of_value->type->kind;
             machinecode_immediate_to_place(context, place, (u64) primitive, 1);
         } break;
 
         case EXPR_ENUM_LENGTH: {
+            if (place.kind == PLACE_NOWHERE) return;
+
             unimplemented();
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
+            if (place.kind == PLACE_NOWHERE) {
+                machinecode_for_expr(context, func, expr->enum_member, reg_allocator, place);
+                return;
+            }
+
             unimplemented(); // Maybe wait until we have proper strings until we do this...
+            // expr->enum_member
         } break;
     }
 }
