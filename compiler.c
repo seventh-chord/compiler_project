@@ -205,7 +205,7 @@ void printf_flush();
 #define PRELOAD_QUOTE(...) #__VA_ARGS__
 u8 *preload_code_text = PRELOAD_QUOTE(
 
-enum Type_Kind (u8) {
+enum Type_Kind (u8) { // We rely on this enum being one byte large!
     VOID    = 1,
     BOOL    = 2,
     U8      = 4,
@@ -9015,15 +9015,25 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_STATIC_MEMBER_ACCESS: {
-            unimplemented();
+            assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
+
+            Type* type = expr->static_member_access.parent_type;
+            assert(type->kind == TYPE_ENUM);
+            u32 member_index = expr->static_member_access.member_index;
+            u64 member_value = type->enumeration.members[member_index].value;
+            u8 size = primitive_size_of(type->enumeration.value_primitive);
+
+            machinecode_immediate_to_place(context, place, member_value, size);
         } break;
 
         case EXPR_TYPE_INFO_OF_TYPE: {
-            unimplemented();
+            Type_Kind primitive = expr->type_info_of_type->kind;
+            machinecode_immediate_to_place(context, place, (u64) primitive, 1);
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
-            unimplemented();
+            Type_Kind primitive = expr->type_info_of_value->type->kind;
+            machinecode_immediate_to_place(context, place, (u64) primitive, 1);
         } break;
 
         case EXPR_ENUM_LENGTH: {
@@ -9031,7 +9041,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
-            unimplemented();
+            unimplemented(); // Maybe wait until we have proper strings until we do this...
         } break;
     }
 }
