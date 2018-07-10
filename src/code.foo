@@ -452,12 +452,11 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    avoid using reference semantics for structs of sizes 3, 5, 6, and 7 (we don't for sizes 1, 2, 4 and 8)
-    reference semantics for return values (I don't think we ever supported this before)
     pointer arithmetic, requires multiplication of the integer being added/subtracted
     floating point things
     implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
     fix empty structs - do we even want to allow this?
+    store/restore nonvolatile registers we modify (requires generation the prolog after we write out the function)
 
 Language features
     real constants
@@ -486,11 +485,13 @@ Compiler functionality
     static libraries, or at least good errors when trying to use a static .lib instead of a import .lib
     proper error message when 'fn main' is missing
 
-Performance
+Optimized code-gen
+    constant folding
+    common subexpression elimination
+    avoid using reference semantics for structs of sizes 3, 5, 6, and 7 (we don't for sizes 1, 2, 4 and 8)
     sethi-ullman? (reordering the order in which we evaluate subexpressions for better register allocation)
     at least prefer using non-volatile registers when a function call is comming up, so we don't have to store the contents
-    constant folding
     register allocation accross statement-boundaries
     align functions to 32-bit boundaries, padding with nops (many compilers do this, do we have to though? also, why the padding with noops?)
-    peephole optimizer (?)
+    peephole optimizations
 */

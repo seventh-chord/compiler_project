@@ -163,6 +163,8 @@ fn more_breakage_incomming() {
 
     let new_capacity = upgrade(&other_cloud).capacity;
     assert(new_capacity == 2, "All the cloud rained away\n");
+
+    assert(will_it_crash_though().a == 1, "It did crash, though!\n");
 }
 
 fn upgrade(cloud: *Cloud) -> *Cloud {
@@ -184,4 +186,10 @@ fn modernize() -> Cloud {
 struct Cloud {
     length: i32;
     capacity: i32;
+}
+
+struct Bigger_Struct { a, b, c: i64; } // This won't fit in a register
+
+fn will_it_crash_though() -> Bigger_Struct {
+    return { 1, 2, 3 };
 }

@@ -1678,8 +1678,8 @@ typedef struct Func {
     struct {
         bool has_return;
         Type* return_type;
-        bool return_by_reference;
-        // ... otherwise return in RAX, which we can even do for structs. See reference/notes.md
+
+        bool return_by_reference; // otherwise return in RAX, which we can even do for structs. See reference/notes.md
 
         struct {
             Type* type;
@@ -4428,6 +4428,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     // Return type
     func->signature.has_return = false;
     func->signature.return_type = &context->primitive_types[TYPE_VOID];
+    func->signature.return_by_reference = false;
 
     if (t->kind == TOKEN_ARROW) {
         t += 1;
@@ -8180,6 +8181,8 @@ typedef struct Reg_Allocator {
     } *var_mem_infos;
     u64 allocated_var_mem_infos;
 
+    X64_Address return_value_address; // only used when we return with reference semantics
+
     i32 max_stack_size;
     u32 max_callee_param_count;
 } Reg_Allocator;
@@ -8868,12 +8871,31 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
 
             // Compute parameters
+            bool skip_first_param_reg = false;
             bool used_volatile_registers[INPUT_REGISTER_COUNT] = { false };
-            for (u32 p = 0; p < callee->signature.param_count; p += 1) {
+
+            if (callee->signature.return_by_reference) {
+                skip_first_param_reg = true;
+                used_volatile_registers[0] = true;
+
+                X64_Address return_into;
+                if (place.kind == PLACE_NOWHERE) {
+                    u64 size = type_size_of(callee->signature.return_type);
+                    u64 align = type_align_of(callee->signature.return_type);
+                    return_into = register_allocator_allocate_temporary_stack_space(reg_allocator, size, align);
+                } else {
+                    assert(place.kind == PLACE_ADDRESS);
+                    return_into = place.address;
+                }
+
+                instruction_lea(context, return_into, INPUT_REGISTERS[0]);
+            }
+
+            for (u32 p = skip_first_param_reg? 1 : 0; p < callee->signature.param_count; p += 1) {
                 Type *param_type = callee->signature.params[p].type;
 
                 X64_Place target_place;
-                if (p < 4) {
+                if (p < INPUT_REGISTER_COUNT) {
                     Register reg;
                     if (primitive_is_float(param_type->kind)) {
                         reg = XMM0 + p;
@@ -8927,7 +8949,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 u64 return_size = type_size_of(callee->signature.return_type);
 
                 if (callee->signature.return_by_reference) {
-                    unimplemented(); // TODO
+                    // The function just wrote the result into a pointer we passed it, so we don't have to
+                    // do anything more here.
+                    // NB The function also returns the pointer we passed (in RCX) in RAX, which we could
+                    // make use of.
                 } else {
                     machinecode_move(context, reg_allocator, x64_place_reg(RAX), place, return_size);
                 }
@@ -9299,8 +9324,16 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
             if (stmt->return_stmt.value != null) {
                 register_allocator_enter_frame(context, reg_allocator);
                 register_allocate_specific(context, reg_allocator, RAX);
-                X64_Place return_location = x64_place_reg(RAX);
+
+                X64_Place return_location;
+                if (func->signature.return_by_reference) {
+                    instruction_mov_reg_mem(context, MOVE_FROM_MEM, reg_allocator->return_value_address, RAX, POINTER_SIZE);
+                    return_location = x64_place_address((X64_Address) { .base = RAX });
+                } else {
+                    return_location = x64_place_reg(RAX);
+                }
                 machinecode_for_expr(context, func, stmt->return_stmt.value, reg_allocator, return_location);
+
                 register_allocator_leave_frame(context, reg_allocator);
             }
 
@@ -9459,6 +9492,14 @@ void build_machinecode(Context *context) {
             next_stack_offset += size;
         }
 
+        if (func->signature.return_by_reference) {
+            next_stack_offset = (i32) round_to_next(next_stack_offset, POINTER_SIZE);
+            reg_allocator.return_value_address = (X64_Address) { .base = RSP_OFFSET_LOCALS, .immediate_offset = next_stack_offset };
+            next_stack_offset += POINTER_SIZE;
+        } else {
+            reg_allocator.return_value_address = (X64_Address) {0};
+        }
+
         reg_allocator.max_stack_size = next_stack_offset;
         if (reg_allocator.head != null) reg_allocator.head->stack_size = next_stack_offset;
 
@@ -9479,7 +9520,17 @@ void build_machinecode(Context *context) {
         // TODO calling convention -- Preserve non-volatile registers! Also, we need to allocate stack space for that!
 
         // Copy parameters onto stack
-        for (u32 p = 0; p < min(func->signature.param_count, INPUT_REGISTER_COUNT); p += 1) {
+        bool skip_first_param_reg = false;
+
+        if (func->signature.return_by_reference) {
+            skip_first_param_reg = true;
+
+            Register reg = INPUT_REGISTERS[0];
+            X64_Address address = reg_allocator.return_value_address;
+            instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
+        }
+
+        for (u32 p = skip_first_param_reg? 1: 0; p < min(func->signature.param_count, INPUT_REGISTER_COUNT); p += 1) {
             u32 var_index = func->signature.params[p].var_index;
             X64_Address address = reg_allocator.var_mem_infos[var_index].address;
 
