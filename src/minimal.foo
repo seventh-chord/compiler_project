@@ -133,12 +133,14 @@ fn wont_work_for_now() {
 struct Another_Town { a, b: i64; }
 
 fn build(town: Another_Town) {
+    assert(town.a == town.b, "Broken? Yeah\n");
+
     town.a = 1;
 
     let t: Type_Kind;
 
     t = type_info_of_value(town);
-    assert(t == Type_Kind::POINTER, "Darn this is no good\n");
+    assert(t == Type_Kind::STRUCT, "Darn this is no good\n");
 
     t = type_info_of_type(Another_Town);
     assert(t == Type_Kind::STRUCT, "At least this works as intended\n");

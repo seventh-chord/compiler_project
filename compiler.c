@@ -1289,6 +1289,7 @@ typedef struct Var {
     u32 name;
     Type* type; // We set this to 'null' to indicate that we want to infer the type
     File_Pos declaration_pos;
+    bool is_reference; // Only used for structs as function parameters!
 } Var;
 
 typedef struct Global_Var {
@@ -5906,29 +5907,27 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             if (expr->call.param_count != callee->signature.param_count) {
                 u8* name = string_table_access(info->context->string_table, callee->name);
                 print_file_pos(&expr->pos);
+
+                u64 expected = callee->signature.param_count;
+                u64 given = expr->call.param_count;
                 printf(
-                    "Function '%s' takes %u parameters, but %u were given\n",
-                    name, (u64) callee->signature.param_count, (u64) expr->call.param_count
+                    "Function '%s' takes %u parameters, but %u %s given\n",
+                    name, expected, given, given == 1? "was" : "were"
                 );
                 return TYPECHECK_EXPR_BAD;
             }
 
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
-                Expr* param_expr = expr->call.params[p];
+                Expr *param_expr = expr->call.params[p];
 
                 u32 var_index = callee->signature.params[p].var_index;
-
-                Type* expected_type = callee->signature.params[p].type;
-                if (callee->signature.params[p].reference_semantics) {
-                    assert(expected_type->kind == TYPE_POINTER);
-                    expected_type = expected_type->pointer_to;
-                }
+                Type *expected_type = callee->signature.params[p].type;
 
                 if (typecheck_expr(info, param_expr, expected_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
-                Type* actual_type = param_expr->type;
+                Type *actual_type = param_expr->type;
                 if (!type_can_assign(expected_type, actual_type)) {
-                    u8* func_name = string_table_access(info->context->string_table, callee->name);
+                    u8 *func_name = string_table_access(info->context->string_table, callee->name);
                     print_file_pos(&expr->pos);
                     printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), func_name);
                     print_type(info->context, expected_type);
@@ -6948,9 +6947,8 @@ bool typecheck(Context* context) {
                     // Just squish the value into a register
                 } else {
                     func->signature.params[p].reference_semantics = true;
-                    *type = get_pointer_type(context, *type);
                     if (func->kind == FUNC_KIND_NORMAL) {
-                        func->body.vars[func->signature.params[p].var_index].type = *type;
+                        func->body.vars[func->signature.params[p].var_index].is_reference = true;
                     }
                 }
             }
@@ -7274,8 +7272,10 @@ u8 *register_name(Register reg, u8 size) {
 // NB The first four registers in 'VOLATILE_REGISTERS' are used to pass parameters
 #define VOLATILE_REGISTER_COUNT 7
 #define NONVOLATILE_REGISTER_COUNT 9
+#define INPUT_REGISTER_COUNT 4
 Register VOLATILE_REGISTERS[VOLATILE_REGISTER_COUNT]       = { RCX, RDX, R8, R9, RAX, R10, R11 };
 Register NONVOLATILE_REGISTERS[NONVOLATILE_REGISTER_COUNT] = { RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15 };
+Register INPUT_REGISTERS[INPUT_REGISTER_COUNT]             = { RCX, RDX, R8, R9 };
 
 enum {
     REX_BASE = 0x40,
@@ -7325,7 +7325,7 @@ typedef struct X64_Place {
 } X64_Place;
 
 #define x64_place_reg(r) (X64_Place) { .kind = PLACE_REGISTER, .reg = (r) }
-#define x64_place_address(a) (X64_Place) { .kind = PLACE_ADDRESS, .address = (a) }
+#define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
 #define PRINT_GENERATED_INSTRUCTIONS
@@ -8542,26 +8542,25 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
         case EXPR_VARIABLE: {
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
-            X64_Place place = {0};
-            place.kind = PLACE_ADDRESS;
-            place.address = reg_allocator->var_mem_infos[expr->variable.index].address;
-            return place;
+            u32 var_index = expr->variable.index;
+            Var *var = &func->body.vars[var_index];
+            X64_Address address = reg_allocator->var_mem_infos[var_index].address;
+
+            if (var->is_reference) {
+                Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax);
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, address, reg, POINTER_SIZE);
+                return x64_place_address((X64_Address) { .base = reg });
+            } else {
+                return x64_place_address(address);
+            }
         } break;
 
         case EXPR_UNARY: {
             switch (expr->unary.op) {
                 case UNARY_DEREFERENCE: {
                     Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax);
-
-                    X64_Place place_value = {0};
-                    place_value.kind = PLACE_REGISTER;
-                    place_value.reg = reg;
-                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place_value);
-
-                    X64_Place place_pointer = {0};
-                    place_pointer.kind = PLACE_ADDRESS;
-                    place_pointer.address = (X64_Address) { .base = reg };
-                    return place_pointer;
+                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, x64_place_reg(reg));
+                    return x64_place_address((X64_Address) { .base = reg });
                 } break;
             }
         } break;
@@ -8869,15 +8868,9 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
 
             // Compute parameters
-            bool used_volatile_registers[4] = { false };
+            bool used_volatile_registers[INPUT_REGISTER_COUNT] = { false };
             for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                 Type *param_type = callee->signature.params[p].type;
-                bool reference_semantics = callee->signature.params[p].reference_semantics;
-
-                if (reference_semantics) {
-                    assert(param_type->kind == TYPE_POINTER);
-                    param_type = param_type->pointer_to;
-                }
 
                 X64_Place target_place;
                 if (p < 4) {
@@ -8885,13 +8878,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     if (primitive_is_float(param_type->kind)) {
                         reg = XMM0 + p;
                     } else {
-                        switch (p) {
-                            case 0: reg = RCX; break;
-                            case 1: reg = RDX; break;
-                            case 2: reg = R8;  break;
-                            case 3: reg = R9;  break;
-                            default: assert(false);
-                        }
+                        reg = INPUT_REGISTERS[p];
                     }
 
                     used_volatile_registers[p] = true;
@@ -8927,23 +8914,22 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             }
 
             // Call function and handle return value
-            if (place.kind == PLACE_REGISTER && place.reg == RAX) {
+            if ((place.kind == PLACE_REGISTER && place.reg == RAX) || place.kind == PLACE_NOWHERE || !callee->signature.has_return) {
                 instruction_call(context, false, func_index);
             } else {
                 register_allocate_specific(context, reg_allocator, RAX);
-                X64_Place return_place = { .kind = PLACE_REGISTER, .reg = RAX };
 
                 instruction_call(context, false, func_index);
 
-                if (place.kind != PLACE_NOWHERE && callee->signature.has_return) {
-                    Type *return_type = callee->signature.return_type;
-                    u64 return_size = type_size_of(callee->signature.return_type);
+                assert(place.kind != PLACE_NOWHERE && callee->signature.has_return);
 
-                    if (callee->signature.return_by_reference) {
-                        unimplemented(); // TODO reference-semantics. What does the windows spec say here?
-                    } else {
-                        machinecode_move(context, reg_allocator, return_place, place, return_size);
-                    }
+                Type *return_type = callee->signature.return_type;
+                u64 return_size = type_size_of(callee->signature.return_type);
+
+                if (callee->signature.return_by_reference) {
+                    unimplemented(); // TODO
+                } else {
+                    machinecode_move(context, reg_allocator, x64_place_reg(RAX), place, return_size);
                 }
             }
 
@@ -9446,7 +9432,7 @@ void build_machinecode(Context *context) {
 
         reg_allocator.max_callee_param_count = 0;
 
-        // Mark parameter variables so they don't get allocated normaly
+        // Parameters
         for (u32 p = 0; p < func->signature.param_count; p += 1) {
             u32 var_index = func->signature.params[p].var_index;
 
@@ -9493,26 +9479,24 @@ void build_machinecode(Context *context) {
         // TODO calling convention -- Preserve non-volatile registers! Also, we need to allocate stack space for that!
 
         // Copy parameters onto stack
-        for (u32 p = 0; p < min(func->signature.param_count, 4); p += 1) {
+        for (u32 p = 0; p < min(func->signature.param_count, INPUT_REGISTER_COUNT); p += 1) {
             u32 var_index = func->signature.params[p].var_index;
             X64_Address address = reg_allocator.var_mem_infos[var_index].address;
 
-            u64 operand_size = type_size_of(func->signature.params[p].type);
-            Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
-            assert(operand_size <= 8);
-
-            if (primitive_is_float(operand_primitive)) {
-                unimplemented(); // TODO floating point parameters
+            if (func->signature.params[p].reference_semantics) {
+                Register reg = INPUT_REGISTERS[p];
+                instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
             } else {
-                Register reg;
-                switch (p) {
-                    case 0: reg = RCX; break;
-                    case 1: reg = RDX; break;
-                    case 2: reg = R8; break;
-                    case 3: reg = R9; break;
-                    default: assert(false);
+                u64 operand_size = type_size_of(func->signature.params[p].type);
+                Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
+                assert(operand_size == 1 || operand_size == 2 || operand_size == 4 || operand_size == 8);
+
+                if (primitive_is_float(operand_primitive)) {
+                    unimplemented(); // TODO floating point parameters
+                } else {
+                    Register reg = INPUT_REGISTERS[p];
+                    instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, (u8) operand_size);
                 }
-                instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, (u8) operand_size);
             }
         }
 

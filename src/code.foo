@@ -452,7 +452,7 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    apparently, small structs are also stuck into registers when passed as parameters
+    avoid using reference semantics for structs of sizes 3, 5, 6, and 7 (we don't for sizes 1, 2, 4 and 8)
     reference semantics for return values (I don't think we ever supported this before)
     pointer arithmetic, requires multiplication of the integer being added/subtracted
     floating point things
