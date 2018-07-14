@@ -8186,6 +8186,8 @@ struct Reg_Allocator_Frame {
 typedef struct Reg_Allocator {
     Reg_Allocator_Frame *head;
 
+    bool touched_registers[ALLOCATABLE_REGISTER_COUNT];
+
     struct {
         u64 size;
         X64_Address address;
@@ -8257,6 +8259,7 @@ Register register_allocate(Reg_Allocator *allocator, Register_Kind kind, bool do
 
         if (!allocator->head->states[reg].allocated) {
             allocator->head->states[reg].allocated = true;
+            allocator->touched_registers[reg] = true;
             return reg;
         }
     }
@@ -8277,6 +8280,8 @@ void register_allocate_specific(Context *context, Reg_Allocator *allocator, Regi
     }
 
     allocator->head->states[reg].allocated = true;
+
+    allocator->touched_registers[reg] = true;
 }
 
 bool register_is_allocated(Reg_Allocator *allocator, Register reg) {
@@ -9468,7 +9473,7 @@ void build_machinecode(Context *context) {
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         u8* name = string_table_access(context->string_table, func->name);
-        printf("; --- fn %s ---\n", name);
+        printf(";\n; --- fn %s ---\n;\n", name);
         #endif
 
         // Lay out stack
@@ -9478,6 +9483,7 @@ void build_machinecode(Context *context) {
             reg_allocator.var_mem_infos = (void*) arena_alloc(&context->stack, alloc_count * sizeof(*reg_allocator.var_mem_infos));
         }
         mem_clear((u8*) reg_allocator.var_mem_infos, sizeof(*reg_allocator.var_mem_infos) * reg_allocator.allocated_var_mem_infos);
+        mem_clear((u8*) reg_allocator.touched_registers, sizeof(reg_allocator.touched_registers));
 
         reg_allocator.max_callee_param_count = 0;
 
@@ -9569,13 +9575,33 @@ void build_machinecode(Context *context) {
         }
         buf_clear(context->jump_fixups);
 
-        // Compute actual stack size, fix stack accesses
+        // Prolog, epilog, fix stack acceses
+        u32 preserved_registers = 0;
+        for (u32 i = 0; i < NONVOLATILE_REGISTER_COUNT; i += 1) {
+            Register reg = NONVOLATILE_REGISTERS[i];
+            if (reg_allocator.touched_registers[reg]) {
+                preserved_registers += 1;
+            }
+        }
+
+        X64_Address preserved_reg_address = {0};
+        if (preserved_registers > 0) {
+            preserved_reg_address = register_allocator_allocate_temporary_stack_space(&reg_allocator, preserved_registers*POINTER_SIZE, POINTER_SIZE);
+        }
+
         u64 stack_space_for_params = 0;
         if (reg_allocator.max_callee_param_count > 0) {
             stack_space_for_params = POINTER_SIZE * max(reg_allocator.max_callee_param_count, 4);
         }
         u64 total_stack_bytes = ((u64) reg_allocator.max_stack_size) + stack_space_for_params;
         total_stack_bytes = ((total_stack_bytes + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
+
+
+        if (preserved_registers > 0) {
+            assert(preserved_reg_address.base == RSP_OFFSET_LOCALS);
+            preserved_reg_address.base = RSP;
+            preserved_reg_address.immediate_offset += stack_space_for_params;
+        }
 
         buf_foreach (Stack_Access_Fixup, fixup, context->stack_access_fixups) {
             i32* target = (i32*) (context->seg_text + fixup->text_location);
@@ -9586,10 +9612,33 @@ void build_machinecode(Context *context) {
                 case STACK_ACCESS_FIXUP_LOCAL_SECTION: offset = stack_space_for_params; break;
                 default: assert(false);
             }
-
             *target += offset;
         }
         buf_clear(context->stack_access_fixups);
+
+        // Build epilog
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("; (epilog)\n");
+        #endif
+
+        X64_Address restore_address = preserved_reg_address;
+        for (u32 i = 0; i < NONVOLATILE_REGISTER_COUNT; i += 1) {
+            Register reg = NONVOLATILE_REGISTERS[i];
+            if (reg_allocator.touched_registers[reg]) {
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, restore_address, reg, POINTER_SIZE);
+                restore_address.immediate_offset += POINTER_SIZE;
+            }
+        }
+
+        if (total_stack_bytes > 0) {
+            instruction_add_or_sub_imm(context, true, RSP, total_stack_bytes, POINTER_SIZE);
+        }
+
+        if (!func->signature.has_return) {
+            instruction_xor(context, RAX, RAX, POINTER_SIZE);
+        }
+
+        instruction_ret(context);
 
         // Build and prefix prolog
         buf_clear(prolog);
@@ -9602,6 +9651,15 @@ void build_machinecode(Context *context) {
 
             if (total_stack_bytes > 0) {
                 instruction_add_or_sub_imm(context, false, RSP, total_stack_bytes, POINTER_SIZE);
+            }
+
+            X64_Address save_address = preserved_reg_address;
+            for (u32 i = 0; i < NONVOLATILE_REGISTER_COUNT; i += 1) {
+                Register reg = NONVOLATILE_REGISTERS[i];
+                if (reg_allocator.touched_registers[reg]) {
+                    instruction_mov_reg_mem(context, MOVE_TO_MEM, save_address, reg, POINTER_SIZE);
+                    save_address.immediate_offset += POINTER_SIZE;
+                }
             }
         }
         prolog = context->seg_text;
@@ -9620,20 +9678,6 @@ void build_machinecode(Context *context) {
             fixup->text_location += prolog_length;
         }
 
-        // Build epilog
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("; (epilog)\n");
-        #endif
-
-        if (total_stack_bytes > 0) {
-            instruction_add_or_sub_imm(context, true, RSP, total_stack_bytes, POINTER_SIZE);
-        }
-
-        if (!func->signature.has_return) {
-            instruction_xor(context, RAX, RAX, POINTER_SIZE);
-        }
-
-        instruction_ret(context);
     }
 
     buf_free(prolog);
@@ -10389,10 +10433,10 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
     i64 start_time, middle_time, end_time;
     start_time = perf_time();
 
-    printf("    Compiling %s to %s\n", source_path, exe_path);
+    printf("Compiling %s to %s\n", source_path, exe_path);
     if (build_file_to_executable(source_path, exe_path)) {
         middle_time = perf_time();
-        printf("    Running %s:\n", exe_path);
+        printf("Running %s:\n", exe_path);
         run_executable(exe_path);
         end_time = perf_time();
     } else {

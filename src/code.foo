@@ -452,7 +452,6 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    store/restore nonvolatile registers we modify (requires generation the prolog after we write out the function)
     pointer arithmetic, requires multiplication of the integer being added/subtracted
     floating point things
     implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
