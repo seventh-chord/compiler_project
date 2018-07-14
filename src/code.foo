@@ -452,12 +452,13 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    pointer arithmetic, requires multiplication of the integer being added/subtracted
+    pointer arithmetic, subtraction (with division)
     floating point things
     implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
     fix empty structs - do we even want to allow this?
 
 Language features
+    comparing pointer as if they were integers (doable in C, and potentially usefull...)
     real constants
     function pointers
     complete type_info_of_{value, type}

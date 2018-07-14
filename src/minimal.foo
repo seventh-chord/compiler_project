@@ -205,3 +205,12 @@ fn big_bummer() {
     let a = (1 + (1 + (1 + (1 + the_stage_will_collapse()))));
     assert(a == 6, "Big bummer\n");
 }
+
+
+fn pointer_arithmetic() {
+    let array: [10]u32;
+    let a = &array[0];
+    let b = 9 + a;
+
+    let distance = b - a;
+}

@@ -1217,6 +1217,7 @@ typedef enum Type_Kind {
 enum { POINTER_SIZE = 8 };
 Type_Kind DEFAULT_INT_TYPE   = TYPE_I64;
 Type_Kind DEFAULT_FLOAT_TYPE = TYPE_F32;
+Type_Kind POINTER_DIFF_TYPE  = TYPE_I64;
 
 u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_VOID] = "void",
@@ -5796,8 +5797,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     valid_types = true;
 
                 // Special-case pointer-pointer arithmetic
-                } else switch (expr->binary.op) {
-                    case BINARY_ADD: {
+                } else {
+                    if (expr->binary.op == BINARY_ADD || expr->binary.op == BINARY_SUB) {
                         if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_U64) {
                             expr->type = expr->binary.left->type;
                             valid_types = true;
@@ -5806,20 +5807,14 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                             expr->type = expr->binary.right->type;
                             valid_types = true;
                         }
-                    } break;
+                    }
 
-                    case BINARY_SUB: {
-                        if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_U64) {
-                            expr->type = expr->binary.left->type;
+                    if (expr->binary.op == BINARY_SUB) {
+                        if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_POINTER) {
+                            expr->type = &info->context->primitive_types[POINTER_DIFF_TYPE];
                             valid_types = true;
                         }
-                    } break;
-
-                    case BINARY_MUL: {} break;
-                    case BINARY_DIV: {} break;
-                    case BINARY_MOD: {} break;
-
-                    default: assert(false);
+                    }
                 }
             }
 
@@ -7822,7 +7817,9 @@ void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size
     #endif
 }
 
-void instruction_imul_pointer_imm(Context *context, Register reg, i64 mul_by) {
+void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
+    // We use imul here, but it is fine because mul and imul give the same result except for beyond the 64th bit
+
     if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
         encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x6b, reg, reg);
         str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &mul_by));
@@ -8289,7 +8286,6 @@ bool register_is_allocated(Reg_Allocator *allocator, Register reg) {
 }
 
 
-
 void machinecode_immediate_to_place(Context *context, X64_Place place, u64 immediate, u8 bytes) {
     switch (place.kind) {
         case PLACE_REGISTER: instruction_mov_imm_reg(context, place.reg, immediate, bytes); break;
@@ -8396,117 +8392,6 @@ void machinecode_lea(Context *context, Reg_Allocator *reg_allocator, X64_Address
         instruction_lea(context, address, reg);
         machinecode_move(context, reg_allocator, x64_place_reg(reg), place, POINTER_SIZE);
         register_allocator_leave_frame(context, reg_allocator);
-    }
-}
-
-void machinecode_binary(Context *context, Reg_Allocator *reg_allocator, Binary_Op op, Type_Kind primitive, X64_Place src, X64_Place dst) {
-    if (primitive_is_float(primitive)) unimplemented();
-
-    switch (op) {
-        case BINARY_ADD:
-        case BINARY_SUB:
-        {
-            register_allocator_enter_frame(context, reg_allocator);
-
-            Register tmp_reg = REGISTER_NONE;
-            if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
-                tmp_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
-                instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, tmp_reg, primitive_size_of(primitive));
-                src = x64_place_reg(tmp_reg);
-            }
-
-            assert(src.kind == PLACE_REGISTER || dst.kind == PLACE_REGISTER);
-
-            Simple_Binary_Info info = {0};
-            info.kind = op;
-            info.op_size = primitive_size_of(primitive);
-
-            if (src.kind == PLACE_ADDRESS) {
-                info.a = dst.reg;
-                info.b_is_address = true;
-                info.b.address = src.address;
-                info.direction = SIMPLE_BINARY_A_IS_DST;
-            } else if (dst.kind == PLACE_ADDRESS) {
-                info.a = src.reg;
-                info.b_is_address = true;
-                info.b.address = dst.address;
-                info.direction = SIMPLE_BINARY_B_IS_DST;
-            } else {
-                info.a = src.reg;
-                info.b_is_address = false;
-                info.b.reg = dst.reg;
-                info.direction = SIMPLE_BINARY_B_IS_DST;
-            }
-            instruction_simple_binary(context, info);
-
-            register_allocator_leave_frame(context, reg_allocator);
-        } break;
-
-        // NB remember that we need to clear RDX, there are instructions for that!
-        case BINARY_DIV: unimplemented(); break;
-        case BINARY_MOD: unimplemented(); break;
-
-        case BINARY_MUL:
-        {
-            u8 op_size = primitive_size_of(primitive);
-            bool dst_is_not_rax = !(dst.kind == PLACE_REGISTER && dst.reg == RAX);
-
-            register_allocator_enter_frame(context, reg_allocator);
-
-            if (dst_is_not_rax) {
-                register_allocate_specific(context, reg_allocator, RAX);
-                machinecode_move(context, reg_allocator, dst, x64_place_reg(RAX), op_size);
-            }
-
-            if (op_size > 1 && !(src.kind == PLACE_REGISTER && src.reg == RDX)) {
-                register_allocate_specific(context, reg_allocator, RDX); // We will clobber RDX
-            }
-
-            instruction_multiply(context, src, primitive_is_signed(primitive), op_size);
-
-            if (dst_is_not_rax) {
-                machinecode_move(context, reg_allocator, x64_place_reg(RAX), dst, op_size);
-            }
-
-            register_allocator_leave_frame(context, reg_allocator);
-        } break;
-
-        case BINARY_EQ:
-        case BINARY_NEQ:
-        case BINARY_GT:
-        case BINARY_GTEQ:
-        case BINARY_LT:
-        case BINARY_LTEQ:
-        {
-            register_allocator_enter_frame(context, reg_allocator);
-
-            Register tmp_reg = REGISTER_NONE;
-            if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
-                tmp_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
-                instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, tmp_reg, primitive_size_of(primitive));
-                src = x64_place_reg(tmp_reg);
-            }
-
-            u8 inner_size = primitive_size_of(primitive);
-            Condition condition = find_condition_for_op_and_type(op, primitive);
-
-            if (src.kind == PLACE_REGISTER && dst.kind == PLACE_REGISTER) {
-                instruction_cmp_reg_reg(context, dst.reg, src.reg, inner_size);
-            } else if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_REGISTER) {
-                instruction_cmp_reg_mem(context, src.address, dst.reg, inner_size);
-                condition = condition_not(condition);
-            } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_ADDRESS) {
-                instruction_cmp_reg_mem(context, dst.address, src.reg, inner_size);
-            } else {
-                assert(false);
-            }
-
-            instruction_setcc(context, condition, dst);
-
-            register_allocator_leave_frame(context, reg_allocator);
-        } break;
-
-        default: assert(false);
     }
 }
 
@@ -8626,7 +8511,7 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
                     place.address.scale = (u8) step;
                 } else {
                     place.address.scale = 1;
-                    instruction_imul_pointer_imm(context, place.address.index, step);
+                    instruction_mul_pointer_imm(context, place.address.index, step);
                 }
             }
 
@@ -8787,11 +8672,131 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             register_allocator_enter_frame(context, reg_allocator);
 
             Register right_reg = register_allocate(reg_allocator, reg_kind, false);
-            X64_Place right_place = { .kind = PLACE_REGISTER, .reg = right_reg };
-            machinecode_for_expr(context, func, expr->binary.right, reg_allocator, right_place);
+            machinecode_for_expr(context, func, expr->binary.right, reg_allocator, x64_place_reg(right_reg));
 
-            Type_Kind primitive = primitive_of(expr->binary.left->type);
-            machinecode_binary(context, reg_allocator, expr->binary.op, primitive, right_place, left_place);
+            switch (expr->binary.op) {
+                case BINARY_ADD:
+                case BINARY_SUB:
+                {
+                    Type *type = expr->type;
+                    if (primitive_is_float(type->kind)) unimplemented();
+
+                    register_allocator_enter_frame(context, reg_allocator);
+
+                    Register flushed_left_place_to_reg = REGISTER_NONE;
+                    X64_Place real_left_place = left_place;
+
+                    if (expr->type->kind == TYPE_POINTER && expr->binary.op == BINARY_ADD) {
+                        u64 pointer_scale = type_size_of(expr->type->pointer_to);
+
+                        if (expr->binary.right->type->kind == TYPE_POINTER) {
+                            if (left_place.kind == PLACE_ADDRESS) {
+                                flushed_left_place_to_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                                instruction_mov_reg_mem(context, MOVE_FROM_MEM, left_place.address, flushed_left_place_to_reg, POINTER_SIZE);
+                                left_place = x64_place_reg(flushed_left_place_to_reg);
+                            }
+
+                            assert(left_place.kind == PLACE_REGISTER);
+                            instruction_mul_pointer_imm(context, left_place.reg, pointer_scale);
+                        } else if (expr->binary.left->type->kind == TYPE_POINTER) {
+                            instruction_mul_pointer_imm(context, right_reg, pointer_scale);
+                        } else {
+                            assert(false);
+                        }
+                    }
+
+                    Simple_Binary_Info info = {0};
+                    info.kind = expr->binary.op;
+                    info.op_size = primitive_size_of(type->kind);
+
+                    if (left_place.kind == PLACE_ADDRESS) {
+                        info.a = right_reg;
+                        info.b_is_address = true;
+                        info.b.address = left_place.address;
+                        info.direction = SIMPLE_BINARY_B_IS_DST;
+                    } else {
+                        info.a = right_reg;
+                        info.b_is_address = false;
+                        info.b.reg = left_place.reg;
+                        info.direction = SIMPLE_BINARY_B_IS_DST;
+                    }
+                    instruction_simple_binary(context, info);
+
+                    if (expr->type->kind == TYPE_POINTER && expr->binary.op == BINARY_SUB) {
+                        u64 pointer_scale = type_size_of(expr->type->pointer_to);
+                        // TODO instruction div
+                        unimplemented();
+                    }
+
+                    if (flushed_left_place_to_reg != REGISTER_NONE) {
+                        machinecode_move(context, reg_allocator, left_place, real_left_place, info.op_size);
+                    }
+
+                    register_allocator_leave_frame(context, reg_allocator);
+                } break;
+
+                // NB remember that we need to clear RDX, there are instructions for that!
+                case BINARY_DIV: unimplemented(); break;
+                case BINARY_MOD: unimplemented(); break;
+
+                case BINARY_MUL:
+                {
+                    Type_Kind primitive = expr->type->kind;
+                    if (primitive_is_float(primitive)) unimplemented();
+
+                    u8 op_size = primitive_size_of(primitive);
+                    bool dst_is_not_rax = !(left_place.kind == PLACE_REGISTER && left_place.reg == RAX);
+
+                    register_allocator_enter_frame(context, reg_allocator);
+
+                    if (dst_is_not_rax) {
+                        register_allocate_specific(context, reg_allocator, RAX);
+                        machinecode_move(context, reg_allocator, left_place, x64_place_reg(RAX), op_size);
+                    }
+
+                    if (op_size > 1 && right_reg != RDX) {
+                        register_allocate_specific(context, reg_allocator, RDX); // We will clobber RDX
+                    }
+
+                    instruction_multiply(context, x64_place_reg(right_reg), primitive_is_signed(primitive), op_size);
+
+                    if (dst_is_not_rax) {
+                        machinecode_move(context, reg_allocator, x64_place_reg(RAX), left_place, op_size);
+                    }
+
+                    register_allocator_leave_frame(context, reg_allocator);
+                } break;
+
+                case BINARY_EQ:
+                case BINARY_NEQ:
+                case BINARY_GT:
+                case BINARY_GTEQ:
+                case BINARY_LT:
+                case BINARY_LTEQ:
+                {
+                    Type_Kind primitive = primitive_of(expr->binary.left->type);
+                    if (primitive_is_float(primitive)) unimplemented();
+
+                    register_allocator_enter_frame(context, reg_allocator);
+
+                    u8 inner_size = primitive_size_of(primitive);
+                    Condition condition = find_condition_for_op_and_type(expr->binary.op, primitive);
+
+                    if (left_place.kind == PLACE_REGISTER) {
+                        instruction_cmp_reg_reg(context, left_place.reg, right_reg, inner_size);
+                    } else if (left_place.kind == PLACE_ADDRESS) {
+                        instruction_cmp_reg_mem(context, left_place.address, right_reg, inner_size);
+                    } else {
+                        assert(false);
+                    }
+
+                    instruction_setcc(context, condition, left_place);
+
+                    register_allocator_leave_frame(context, reg_allocator);
+                } break;
+
+                default: assert(false);
+            }
 
             register_allocator_leave_frame(context, reg_allocator);
 
