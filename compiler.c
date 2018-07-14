@@ -7818,23 +7818,60 @@ void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size
 }
 
 void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
-    // We use imul here, but it is fine because mul and imul give the same result except for beyond the 64th bit
+    if (mul_by == 0) {
+        return;
+    } else if ((mul_by & (mul_by - 1)) == 0) {
+        // Optimize by using a shift
+        assert(mul_by > 0);
 
-    if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
-        encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x6b, reg, reg);
-        str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &mul_by));
-    } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
-        encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x69, reg, reg);
-        str_push_integer(&context->seg_text, sizeof(i32), *((u64*) &mul_by));
+        u8 shift_by = 0;
+        u64 v = mul_by;
+        while ((v >>= 1) != 0) shift_by += 1;
+
+        encode_instruction_reg_reg(context, REX_BASE | REX_W, 0xc1, reg, REGISTER_OPCODE_4);
+        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("shl %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
+        #endif
     } else {
-        assert(false); // NB the immediate operand to the imul instruction can at most be a i32
+        // We use imul here, but it is fine because mul and imul give the same result except for beyond the 64th bit
+
+        if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
+            encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x6b, reg, reg);
+            str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &mul_by));
+        } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
+            encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x69, reg, reg);
+            str_push_integer(&context->seg_text, sizeof(i32), *((u64*) &mul_by));
+        } else {
+            assert(false); // NB the immediate operand to the imul instruction can at most be a i32
+        }
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        u8 *reg_name = register_name(reg, POINTER_SIZE);
+        printf("imul %s, %s, %i\n", reg_name, reg_name, mul_by);
+        #endif
+    }
+}
+
+/*
+void instruction_idiv_pointer_imm(Context *context, Register reg, i64 div_by) {
+    if (div_by <= I8_MAX && div_by >= I8_MIN) {
+        encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x6b, reg, reg);
+        str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &div_by));
+    } else if (div_by <= I32_MAX && div_by >= I32_MIN) {
+        encode_instruction_reg_reg(context, REX_BASE | REX_W, 0x69, reg, reg);
+        str_push_integer(&context->seg_text, sizeof(i32), *((u64*) &div_by));
+    } else {
+        assert(false); // NB the immediate operand to the idiv instruction can at most be a i32
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8 *reg_name = register_name(reg, POINTER_SIZE);
-    printf("imul %s, %s, %i\n", reg_name, reg_name, mul_by);
+    printf("idiv %s, %s, %i\n", reg_name, reg_name, div_by);
     #endif
 }
+*/
 
 void instruction_negative(Context *context, bool unary, X64_Place place, u8 op_size) {
     u8 opcode = 0xf7;
@@ -8686,10 +8723,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     Register flushed_left_place_to_reg = REGISTER_NONE;
                     X64_Place real_left_place = left_place;
 
-                    if (expr->type->kind == TYPE_POINTER && expr->binary.op == BINARY_ADD) {
+                    if (expr->type->kind == TYPE_POINTER) {
                         u64 pointer_scale = type_size_of(expr->type->pointer_to);
 
-                        if (expr->binary.right->type->kind == TYPE_POINTER) {
+                        if (expr->binary.left->type->kind != TYPE_POINTER) {
                             if (left_place.kind == PLACE_ADDRESS) {
                                 flushed_left_place_to_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
                                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, left_place.address, flushed_left_place_to_reg, POINTER_SIZE);
@@ -8698,10 +8735,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                             assert(left_place.kind == PLACE_REGISTER);
                             instruction_mul_pointer_imm(context, left_place.reg, pointer_scale);
-                        } else if (expr->binary.left->type->kind == TYPE_POINTER) {
+                        }
+                        
+                        if (expr->binary.right->type->kind != TYPE_POINTER) {
                             instruction_mul_pointer_imm(context, right_reg, pointer_scale);
-                        } else {
-                            assert(false);
                         }
                     }
 
@@ -8722,10 +8759,12 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     }
                     instruction_simple_binary(context, info);
 
-                    if (expr->type->kind == TYPE_POINTER && expr->binary.op == BINARY_SUB) {
-                        u64 pointer_scale = type_size_of(expr->type->pointer_to);
-                        // TODO instruction div
+                    if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_POINTER) {
+                        assert(expr->binary.op == BINARY_SUB);
+                        u64 pointer_scale = type_size_of(expr->binary.left->type->pointer_to);
+
                         unimplemented();
+                        // TODO instruction div
                     }
 
                     if (flushed_left_place_to_reg != REGISTER_NONE) {
