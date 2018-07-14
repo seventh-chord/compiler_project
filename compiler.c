@@ -255,30 +255,47 @@ i64 perf_time() {
 void* alloc(u64 size) {
     return HeapAlloc(process_heap, 0, size);
 }
-void* realloc(void* mem, u64 size) {
+void* realloc(void *mem, u64 size) {
     return HeapReAlloc(process_heap, 0, mem, size);
 }
-bool free(void* mem) {
+bool free(void *mem) {
     return HeapFree(process_heap, 0, mem);
 }
 
-void mem_copy(u8* from, u8* to, u64 count) {
-    while (count >= 8) {
-        *((u64*) to) = *((u64*) from);
-        from += 8;
-        to += 8;
-        count -= 8;
-    }
+void mem_copy(u8 *from, u8 *to, u64 count) {
+    if (from < to) {
+        u8 *from_end = from + count;
+        u8 *to_end = to + count;
 
-    while (count >= 1) {
-        *to = *from;
-        from += 1;
-        to += 1;
-        count -= 1;
+        while (from_end != from && (from_end - from) > 8) {
+            from_end -= 8;
+            to_end -= 8;
+            *((u64*) to_end) = *((u64*) from_end);
+        }
+
+        while (from_end != from) {
+            from_end -= 1;
+            to_end -= 1;
+            *to_end = *from_end;
+        }
+    } else {
+        while (count >= 8) {
+            *((u64*) to) = *((u64*) from);
+            from += 8;
+            to += 8;
+            count -= 8;
+        }
+
+        while (count >= 1) {
+            *to = *from;
+            from += 1;
+            to += 1;
+            count -= 1;
+        }
     }
 }
 
-void mem_clear(u8* ptr, u64 count) {
+void mem_clear(u8 *ptr, u64 count) {
     while (count >= 8) {
         *((u64*) ptr) = 0;
         ptr += 8;
@@ -292,7 +309,7 @@ void mem_clear(u8* ptr, u64 count) {
     }
 }
 
-void mem_fill(u8* ptr, u8 value, u64 count) {
+void mem_fill(u8 *ptr, u8 value, u64 count) {
     u64 big_value = ((u64) value) | (((u64) value) << 8);
     big_value = big_value | (big_value << 16);
     big_value = big_value | (big_value << 32);
@@ -396,7 +413,7 @@ void *_buf_grow(void *buf, u64 new_len, u64 element_size) {
     Buf_Header *new_header;
 
     if (buf == null) {
-        u64 new_capacity = max(64, new_len);
+        u64 new_capacity = max(512, new_len);
         u64 new_bytes = new_capacity*element_size + BUF_HEADER_SIZE;
 
         new_header = (Buf_Header*) alloc(new_bytes);
@@ -462,6 +479,20 @@ void str_push_integer(u8 **buf, u8 bytes, u64 value) {
         value = value >> 8;
     }
     *buf_length += bytes;
+}
+
+// Moves items to the right of the given index 'length' bytes over, creating a gap for inserting new data in the buffer
+u8 *str_make_space(u8 **buf, u64 at_index, u64 length) {
+    u64 old_length = _buf_header(*buf)->length;
+
+    _buf_fit(*buf, length);
+    _buf_header(*buf)->length += length;
+
+    u8 *source = (*buf) + at_index;
+    u8 *target = source + length;
+    mem_copy(source, target, old_length - at_index);
+
+    return source;
 }
 
 // NB only works on u8* buffers!
@@ -7331,32 +7362,6 @@ typedef struct X64_Place {
 
 #define PRINT_GENERATED_INSTRUCTIONS
 
-#ifdef PRINT_GENERATED_INSTRUCTIONS
-void dump_instruction_bytes(Context *context) {
-    static u64 last_length = 0;
-    u64 new_length = buf_length(context->seg_text);
-
-    u64 pad = 8;
-
-    for (u64 i = last_length; i < new_length; i += 1) {
-        u8 byte = context->seg_text[i];
-        printf("%b ", byte);
-
-        pad -= 1;
-    }
-
-    if (pad < 60) {
-        u8 *spaces = "                                                            | ";
-        printf(spaces + 60 - (pad*3));
-    } else {
-        printf("| ");
-    }
-
-    last_length = new_length;
-}
-#endif
-
-
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
 
@@ -7542,7 +7547,6 @@ void instruction_int3(Context *context) {
     buf_push(context->seg_text, 0xcc);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("int 3\n");
     #endif
 }
@@ -7551,7 +7555,6 @@ void instruction_nop(Context *context) {
     buf_push(context->seg_text, 0x90);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("nop\n");
     #endif
 }
@@ -7560,7 +7563,6 @@ void instruction_ret(Context *context) {
     buf_push(context->seg_text, 0xc3);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("ret\n");
     #endif
 }
@@ -7571,7 +7573,6 @@ u64 instruction_jmp_i32(Context *context) {
     str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("jmp ??\n");
     #endif
 
@@ -7584,7 +7585,6 @@ u64 instruction_jmp_i8(Context *context) {
     buf_push(context->seg_text, 0x00);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("jmp ??\n");
     #endif
 
@@ -7598,7 +7598,6 @@ u64 instruction_jrcxz(Context *context) {
     buf_push(context->seg_text, 0x00);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("jrcxz ??\n");
     #endif
 
@@ -7626,7 +7625,6 @@ u64 instruction_jcc(Context *context, Condition condition) {
     str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("j%s ??\n", CONDITION_POSTFIXES[condition]);
     #endif
 
@@ -7654,7 +7652,6 @@ void instruction_setcc(Context *context, Condition condition, X64_Place place) {
             encode_instruction_reg_reg(context, REX_BASE, opcode, place.reg, REGISTER_OPCODE_0);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
-            dump_instruction_bytes(context);
             printf("set%s %s\n", CONDITION_POSTFIXES[condition], register_name(place.reg, 1));
             #endif
         } break;
@@ -7663,7 +7660,6 @@ void instruction_setcc(Context *context, Condition condition, X64_Place place) {
             encode_instruction_reg_mem(context, REX_BASE, opcode, place.address, REGISTER_OPCODE_0);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
-            dump_instruction_bytes(context);
             printf("set%s ", CONDITION_POSTFIXES[condition]);
             print_x64_address(place.address);
             printf("\n");
@@ -7691,7 +7687,6 @@ void instruction_cmp_reg_reg(Context *context, Register left, Register right, u8
     encode_instruction_reg_reg(context, rex, opcode, left, right);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("cmp %s, %s\n", register_name(left, op_size), register_name(right, op_size));
     #endif
 }
@@ -7711,7 +7706,6 @@ void instruction_cmp_reg_mem(Context *context, X64_Address left, Register right,
     encode_instruction_reg_mem(context, rex, opcode, left, right);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("cmp ");
     print_x64_address(left);
     printf(", %s\n", register_name(right, op_size));
@@ -7750,7 +7744,6 @@ void instruction_cmp_imm(Context *context, X64_Place place, u64 imm, u8 op_size)
     str_push_integer(&context->seg_text, imm_size, imm);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("cmp ");
     if (place.kind == PLACE_REGISTER) {
         printf("%s", register_name(place.reg, op_size));
@@ -7806,7 +7799,6 @@ void instruction_call(Context* context, bool builtin, u32 func_index) {
         name = string_table_access(context->string_table, name_index);
     }
 
-    dump_instruction_bytes(context);
     printf("call %s\n", name);
     #endif
 }
@@ -7826,7 +7818,6 @@ void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size
     encode_instruction_reg_reg(context, rex, opcode, reg, inc? REGISTER_OPCODE_0 : REGISTER_OPCODE_1);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("%s %s\n", inc? "inc" : "dec", register_name(reg, op_size));
     #endif
 }
@@ -7843,7 +7834,6 @@ void instruction_imul_pointer_imm(Context *context, Register reg, i64 mul_by) {
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     u8 *reg_name = register_name(reg, POINTER_SIZE);
     printf("imul %s, %s, %i\n", reg_name, reg_name, mul_by);
     #endif
@@ -7868,7 +7858,6 @@ void instruction_negative(Context *context, bool unary, X64_Place place, u8 op_s
             encode_instruction_reg_reg(context, rex, opcode, place.reg, reg);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
-            dump_instruction_bytes(context);
             printf("%s %s\n", unary? "not" : "neg", register_name(place.reg, op_size));
             #endif
         } break;
@@ -7877,7 +7866,6 @@ void instruction_negative(Context *context, bool unary, X64_Place place, u8 op_s
             encode_instruction_reg_mem(context, rex, opcode, place.address, reg);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
-            dump_instruction_bytes(context);
             printf("%s ", unary? "not" : "neg");
             print_x64_address(place.address);
             printf("\n");
@@ -7904,8 +7892,39 @@ void instruction_xor(Context *context, Register left, Register right, u8 op_size
     encode_instruction_reg_reg(context, rex, opcode, left, right);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("xor %s, %s\n", register_name(left, op_size), register_name(right, op_size));
+    #endif
+}
+
+void instruction_add_or_sub_imm(Context *context, bool add, Register reg, u64 value, u8 op_size) {
+    u8 rex = REX_BASE;
+    u8 opcode = 0x81;
+    u8 imm_size = op_size;
+    Register opcode_extension = add? REGISTER_OPCODE_0 : REGISTER_OPCODE_5;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: {
+            rex |= REX_W;
+
+            assert(value < I32_MAX);
+            imm_size = 4; 
+        } break;
+        default: assert(false);
+    }
+
+    if (value < I8_MAX && op_size > 1) {
+        opcode = 0x83;
+        imm_size = 1;
+    }
+
+    encode_instruction_reg_reg(context, rex, opcode, reg, opcode_extension);
+    str_push_integer(&context->seg_text, imm_size, value);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("%s %s, %u\n", add? "add" : "sub", register_name(reg, op_size), value);
     #endif
 }
 
@@ -7913,7 +7932,6 @@ void instruction_lea(Context *context, X64_Address mem, Register reg) {
     encode_instruction_reg_mem(context, REX_BASE | REX_W, 0x8d, mem, reg);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("lea %s, ", register_name(reg, POINTER_SIZE));
     print_x64_address(mem);
     printf("\n");
@@ -7941,7 +7959,6 @@ void instruction_mov_reg_mem(Context *context, Mov_Mode mode, X64_Address mem, R
     encode_instruction_reg_mem(context, rex, opcode, mem, reg);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     if (mode == MOVE_FROM_MEM) {
         printf("mov %s, ", register_name(reg, op_size));
         print_x64_address(mem);
@@ -7969,7 +7986,6 @@ void instruction_mov_reg_reg(Context *context, Register src, Register dst, u8 op
     encode_instruction_reg_reg(context, rex, opcode, dst, src);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("mov %s, %s\n", register_name(dst, op_size), register_name(src, op_size));
     #endif
 }
@@ -8005,7 +8021,6 @@ void instruction_mov_imm_mem(Context *context, X64_Address mem, u64 immediate, u
     str_push_integer(&context->seg_text, imm_size, immediate);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("mov%u ", (u64) op_size*8);
     print_x64_address(mem);
     printf(", %x\n", immediate);
@@ -8041,7 +8056,6 @@ void instruction_mov_imm_reg(Context *context, Register reg, u64 immediate, u8 o
     str_push_integer(&context->seg_text, op_size, immediate);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     printf("mov %s, %x\n", register_name(reg, op_size), (u64) immediate);
     #endif
 }
@@ -8095,7 +8109,6 @@ void instruction_simple_binary(Context *context, Simple_Binary_Info info) {
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
     u8 *name;
     switch (info.kind) {
         case SIMPLE_BINARY_ADD: name = "add"; break;
@@ -8145,8 +8158,6 @@ void instruction_multiply(Context *context, X64_Place mul_by, bool is_signed, u8
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    dump_instruction_bytes(context);
-
     printf(is_signed? "imul " : "mul ");
     if (mul_by.kind == PLACE_REGISTER) {
         printf("%s\n", register_name(mul_by.reg, op_size));
@@ -8326,7 +8337,6 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
             encode_instruction_reg_reg(context, rex_w? (REX_BASE | REX_W) : REX_BASE, opcode, reg, reg);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
-            dump_instruction_bytes(context);
             printf("%s %s, %s\n", sign_extend? "movsx" : "movzx", register_name(reg, to_size), register_name(reg, from_size));
             #endif
         }
@@ -9369,6 +9379,8 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
 
 void build_machinecode(Context *context) {
+    arena_stack_push(&context->stack);
+
     // Builtins
     u32 runtime_builtin_text_starts[RUNTIME_BUILTIN_COUNT] = {0};
 
@@ -9437,6 +9449,8 @@ void build_machinecode(Context *context) {
     // Normal functions
     Reg_Allocator reg_allocator = {0};
 
+    u8 *prolog = null; // stretchy-buffer
+
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
     if (main_func_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
@@ -9447,6 +9461,9 @@ void build_machinecode(Context *context) {
     buf_foreach (Func, func, context->funcs) {
         if (func->kind != FUNC_KIND_NORMAL) continue;
 
+        u64 previous_call_fixup_count = buf_length(context->call_fixups);
+        u64 previous_fixup_count = buf_length(context->fixups);
+
         func->body.text_start = buf_length(context->seg_text);
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
@@ -9456,10 +9473,9 @@ void build_machinecode(Context *context) {
 
         // Lay out stack
         if (reg_allocator.allocated_var_mem_infos < func->body.var_count) {
-            // TODO this leaks memory. We should allocate on 'context->stack', but it probably doesn't really matter in this case
             u32 alloc_count = func->body.var_count * 2;
             reg_allocator.allocated_var_mem_infos = alloc_count;
-            reg_allocator.var_mem_infos = (void*) arena_alloc(&context->arena, alloc_count * sizeof(*reg_allocator.var_mem_infos));
+            reg_allocator.var_mem_infos = (void*) arena_alloc(&context->stack, alloc_count * sizeof(*reg_allocator.var_mem_infos));
         }
         mem_clear((u8*) reg_allocator.var_mem_infos, sizeof(*reg_allocator.var_mem_infos) * reg_allocator.allocated_var_mem_infos);
 
@@ -9503,21 +9519,7 @@ void build_machinecode(Context *context) {
         reg_allocator.max_stack_size = next_stack_offset;
         if (reg_allocator.head != null) reg_allocator.head->stack_size = next_stack_offset;
 
-        u64 insert_stack_size_at_index;
-        {
-            buf_push(context->seg_text, 0x48);
-            buf_push(context->seg_text, 0x81);
-            buf_push(context->seg_text, 0xec);
-            insert_stack_size_at_index = buf_length(context->seg_text);
-            str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
-
-            #ifdef PRINT_GENERATED_INSTRUCTIONS
-            dump_instruction_bytes(context);
-            printf("sub rsp, ??? (We fill in stack size after generating all code!)\n");
-            #endif
-        }
-        
-        // TODO calling convention -- Preserve non-volatile registers! Also, we need to allocate stack space for that!
+        u64 insert_prolog_at_index = buf_length(context->seg_text);
 
         // Copy parameters onto stack
         bool skip_first_param_reg = false;
@@ -9567,25 +9569,13 @@ void build_machinecode(Context *context) {
         }
         buf_clear(context->jump_fixups);
 
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("; (epilog)\n");
-        #endif
-
-        if (!func->signature.has_return) {
-            instruction_xor(context, RAX, RAX, POINTER_SIZE);
-        }
-
-        // Reset stack and fix up stack accesses
+        // Compute actual stack size, fix stack accesses
         u64 stack_space_for_params = 0;
         if (reg_allocator.max_callee_param_count > 0) {
             stack_space_for_params = POINTER_SIZE * max(reg_allocator.max_callee_param_count, 4);
         }
         u64 total_stack_bytes = ((u64) reg_allocator.max_stack_size) + stack_space_for_params;
         total_stack_bytes = ((total_stack_bytes + 7) & (~0x0f)) + 8; // Aligns so last nibble is 8
-
-        i32 *insert_stack_size_here = (i32*) (&context->seg_text[insert_stack_size_at_index]);
-        assert(total_stack_bytes < I32_MAX);
-        *insert_stack_size_here = total_stack_bytes;
 
         buf_foreach (Stack_Access_Fixup, fixup, context->stack_access_fixups) {
             i32* target = (i32*) (context->seg_text + fixup->text_location);
@@ -9601,18 +9591,52 @@ void build_machinecode(Context *context) {
         }
         buf_clear(context->stack_access_fixups);
 
-        buf_push(context->seg_text, 0x48);
-        buf_push(context->seg_text, 0x81);
-        buf_push(context->seg_text, 0xc4);
-        str_push_integer(&context->seg_text, sizeof(i32), total_stack_bytes);
+        // Build and prefix prolog
+        buf_clear(prolog);
+        u8 *text = context->seg_text;
+        context->seg_text = prolog;
+        {
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            printf("; (prolog, actually inserted at start of function)\n");
+            #endif
+
+            if (total_stack_bytes > 0) {
+                instruction_add_or_sub_imm(context, false, RSP, total_stack_bytes, POINTER_SIZE);
+            }
+        }
+        prolog = context->seg_text;
+        context->seg_text = text;
+
+        u64 prolog_length = buf_length(prolog);
+        u8 *insert_prolog_here = str_make_space(&context->seg_text, insert_prolog_at_index, prolog_length);
+        mem_copy(prolog, insert_prolog_here, prolog_length);
+
+        for (u64 i = previous_call_fixup_count; i < buf_length(context->call_fixups); i += 1) {
+            Call_Fixup *fixup = &context->call_fixups[i];
+            fixup->text_location += prolog_length;
+        }
+        for (u64 i = previous_fixup_count; i < buf_length(context->fixups); i += 1) {
+            Fixup *fixup = &context->fixups[i];
+            fixup->text_location += prolog_length;
+        }
+
+        // Build epilog
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        dump_instruction_bytes(context);
-        printf("add rsp, %x\n", total_stack_bytes);
+        printf("; (epilog)\n");
         #endif
 
-        // Return to caller
+        if (total_stack_bytes > 0) {
+            instruction_add_or_sub_imm(context, true, RSP, total_stack_bytes, POINTER_SIZE);
+        }
+
+        if (!func->signature.has_return) {
+            instruction_xor(context, RAX, RAX, POINTER_SIZE);
+        }
+
         instruction_ret(context);
     }
+
+    buf_free(prolog);
 
     // Call fixups
     buf_foreach (Call_Fixup, fixup, context->call_fixups) {
@@ -9633,6 +9657,8 @@ void build_machinecode(Context *context) {
         *target = jump_by;
     }
     buf_free(context->call_fixups);
+
+    arena_stack_push(&context->stack);
 }
 
 typedef struct COFF_Header {
@@ -9813,13 +9839,14 @@ bool parse_library(Context* context, Library_Import* import) {
 
     read_result = read_entire_file(path, &file, &file_length);
     if (read_result == IO_NOT_FOUND) {
-        // TODO TODO TODO This is a really big hack. We should check %LIB%
-        // TODO TODO TODO This is a really big hack. We should check %LIB%
-        // TODO TODO TODO This is a really big hack. We should check %LIB%
-        // TODO TODO TODO This is a really big hack. We should check %LIB%
+        // TODO TODO TODO This is a really big hack.
+        // We should check the LIB environment variable and load static libraries from there.
+        // However, if that is not set we should try to figure out a different way of locating
+        // so that we can run the compiler without having to properly configure environment
+        // variables (through the msdev scripts or otherwise) first.
 
-        //u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64";
-        u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.10240.0/um/x64";
+        u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64";
+        //u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.10240.0/um/x64";
 
         path = path_join(&context->arena, system_lib_folder, raw_lib_name);
         read_result = read_entire_file(path, &file, &file_length);

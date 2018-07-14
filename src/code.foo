@@ -452,11 +452,11 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
+    store/restore nonvolatile registers we modify (requires generation the prolog after we write out the function)
     pointer arithmetic, requires multiplication of the integer being added/subtracted
     floating point things
     implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
     fix empty structs - do we even want to allow this?
-    store/restore nonvolatile registers we modify (requires generation the prolog after we write out the function)
 
 Language features
     real constants
@@ -482,7 +482,7 @@ Compiler functionality
     enabling subsystem windows (over subsystem console)
     debug info
     growing the stack? __chkstk
-    static libraries, or at least good errors when trying to use a static .lib instead of a import .lib
+    static libraries (currently we only support dynamic libraries) (Although both static and dynamic libraries have a .lib file on windows, I think explicitly stating whether we expect to load a file as static or dynamic in code is good, as it serves to avoid confusion)
     proper error message when 'fn main' is missing
 
 Optimized code-gen
