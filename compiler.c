@@ -225,8 +225,8 @@ enum Type_Kind (u8) { // We rely on this enum being one byte large!
 }
 
 // NB Don't change the definition of this struct. It's exact definition is depended
-// upon in 'machinecode_for_expr', when generating code for 'EXPR_STRING_LITERAL'.
-// To the best of my knowledge, that is the only place it is depended upon though.
+// upon in 'machinecode_for_expr', when generating code for 'EXPR_STRING_LITERAL' and
+// 'EXPR_SUBSCRIPT'.
 struct String {
     data: *u8;
     length: i64;
@@ -1228,9 +1228,10 @@ typedef enum Type_Kind {
 } Type_Kind;
 
 enum { POINTER_SIZE = 8 };
-Type_Kind DEFAULT_INT_TYPE   = TYPE_I64;
-Type_Kind DEFAULT_FLOAT_TYPE = TYPE_F32;
-Type_Kind POINTER_DIFF_TYPE  = TYPE_I64;
+Type_Kind TYPE_DEFAULT_INT   = TYPE_I64;
+Type_Kind TYPE_CHAR          = TYPE_U8;
+Type_Kind TYPE_DEFAULT_FLOAT = TYPE_F32;
+Type_Kind TYPE_POINTER_DIFF  = TYPE_I64;
 
 u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_VOID] = "void",
@@ -1838,7 +1839,7 @@ void init_primitive_types(Context* context) {
     #undef init_primitives
 
     context->void_pointer_type = get_pointer_type(context, &context->primitive_types[TYPE_VOID]);
-    context->char_type         = &context->primitive_types[TYPE_U8];
+    context->char_type         = &context->primitive_types[TYPE_CHAR];
 }
 
 void init_builtin_func_names(Context* context) {
@@ -3777,7 +3778,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
             expr->pos = start_pos;
             expr->kind = EXPR_ENUM_LENGTH;
             expr->enum_length_of = type;
-            expr->type = &context->primitive_types[DEFAULT_INT_TYPE];
+            expr->type = &context->primitive_types[TYPE_DEFAULT_INT];
 
             *length = t - t_start;
             return expr;
@@ -5637,7 +5638,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                         // Handles 'pointer + integer' and similar cases
                         expr->type = &info->context->primitive_types[TYPE_U64];
                     } else {
-                        expr->type = &info->context->primitive_types[DEFAULT_INT_TYPE];
+                        expr->type = &info->context->primitive_types[TYPE_DEFAULT_INT];
                     }
 
                     u64 mask = size_mask(primitive_size_of(expr->type->kind));
@@ -5657,7 +5658,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     if (primitive_is_float(to_primitive)) {
                         expr->type = solidify_to;
                     } else {
-                        expr->type = &info->context->primitive_types[DEFAULT_FLOAT_TYPE];
+                        expr->type = &info->context->primitive_types[TYPE_DEFAULT_FLOAT];
                     }
 
                     switch (expr->type->kind) {
@@ -5893,7 +5894,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
                     if (expr->binary.op == BINARY_SUB) {
                         if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_POINTER) {
-                            expr->type = &info->context->primitive_types[POINTER_DIFF_TYPE];
+                            expr->type = &info->context->primitive_types[TYPE_POINTER_DIFF];
                             valid_types = true;
                         }
                     }
@@ -6097,7 +6098,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
         case EXPR_SUBSCRIPT: {
             if (typecheck_expr(info, expr->subscript.array, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
-            if (typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[DEFAULT_INT_TYPE]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[TYPE_DEFAULT_INT]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
             if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE) {
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
@@ -6791,7 +6792,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     length = max(value + 1, length);
                 }
 
-                assert(expr->type->kind == DEFAULT_INT_TYPE);
+                assert(expr->type->kind == TYPE_DEFAULT_INT);
                 mem_copy((u8*) &length, result_into, type_size);
 
                 return EVAL_OK;
@@ -7461,6 +7462,10 @@ void print_x64_address(X64_Address address) {
     }
 
     printf("]");
+}
+
+inline bool x64_address_uses_reg(X64_Address address, Register reg) {
+    return address.base == reg || address.index == reg;
 }
 
 void encode_instruction_reg_mem(Context *context, u8 rex, u32 opcode, X64_Address mem, Register reg) {
@@ -8145,7 +8150,7 @@ void instruction_mov_imm_mem(Context *context, X64_Address mem, u64 immediate, u
     str_push_integer(&context->seg_text, imm_size, immediate);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov%u ", (u64) op_size*8);
+    printf("mov ", (u64) op_size*8);
     print_x64_address(mem);
     printf(", %x\n", immediate);
     #endif
@@ -8494,16 +8499,34 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
         }
     } else {
         // TODO special case small moves by simply inserting some sequential moves
+        assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
 
         register_allocator_enter_frame(context, reg_allocator);
-        register_allocate_specific(context, reg_allocator, RAX);
-        register_allocate_specific(context, reg_allocator, RDX);
-        register_allocate_specific(context, reg_allocator, RCX);
-        register_allocate_specific(context, reg_allocator, RBX);
 
-        assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
-        instruction_lea(context, src.address, RAX);
-        instruction_lea(context, dst.address, RDX);
+        if (!(x64_address_uses_reg(src.address, RAX) || x64_address_uses_reg(dst.address, RAX))) {
+            register_allocate_specific(context, reg_allocator, RAX);
+        }
+        if (!(x64_address_uses_reg(src.address, RDX) || x64_address_uses_reg(dst.address, RDX))) {
+            register_allocate_specific(context, reg_allocator, RDX);
+        }
+        if (!(x64_address_uses_reg(src.address, RCX) || x64_address_uses_reg(dst.address, RCX))) {
+            register_allocate_specific(context, reg_allocator, RCX);
+        }
+        if (!(x64_address_uses_reg(src.address, RBX) || x64_address_uses_reg(dst.address, RBX))) {
+            register_allocate_specific(context, reg_allocator, RBX);
+        }
+
+        if (x64_address_uses_reg(src.address, RDX) && x64_address_uses_reg(dst.address, RAX)) {
+            unimplemented();
+            // TODO this would essentially require us to swap rax and rax, but that is complicated by the fact that
+            // the registers can be used as either the base or the index
+        } else if (x64_address_uses_reg(dst.address, RAX)) {
+            instruction_lea(context, dst.address, RDX);
+            instruction_lea(context, src.address, RAX);
+        } else {
+            instruction_lea(context, src.address, RAX);
+            instruction_lea(context, dst.address, RDX);
+        }
 
         instruction_mov_imm_reg(context, RCX, size, POINTER_SIZE);
 
@@ -8600,51 +8623,62 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
         case EXPR_SUBSCRIPT: {
             X64_Place place = machinecode_for_assignable_expr(context, func, expr->subscript.array, reg_allocator, reserve_rax);
             assert(place.kind == PLACE_ADDRESS);
+            X64_Address address = place.address;
 
             Type *array_type = expr->subscript.array->type;
-            Type *child_type;
-            if (array_type->kind == TYPE_POINTER) {
-                assert(array_type->pointer_to->kind == TYPE_ARRAY);
-                child_type = array_type->pointer_to->array.of;
+            Type *child_type = expr->type;
 
+            if (array_type->kind == TYPE_POINTER && array_type->pointer_to->kind == TYPE_ARRAY) {
                 Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax);
-                instruction_mov_reg_mem(context, MOVE_FROM_MEM, place.address, address_reg, POINTER_SIZE);
-                place.address = (X64_Address) { .base = address_reg };
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, address, address_reg, POINTER_SIZE);
+                address = (X64_Address) { .base = address_reg };
+            } else if (array_type->kind == TYPE_ARRAY) {
+                // No special handling required.
+            } else if (array_type == context->string_type) {
+                Register address_reg;
+                if (address.base >= RAX || address.base <= R15) {
+                    address_reg = address.base;
+                } else if (address.index >= RAX || address.index <= R15) {
+                    address_reg = address.base;
+                } else {
+                    address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax);
+                }
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, address, address_reg, POINTER_SIZE);
+                address = (X64_Address) { .base = address_reg };
             } else {
-                assert(array_type->kind == TYPE_ARRAY);
-                child_type = array_type->array.of;
+                assert(false);
             }
             u64 step = type_size_of(child_type);
 
             if (expr->subscript.index->kind == EXPR_LITERAL) {
                 u64 offset = expr->subscript.index->literal.masked_value * step;
-                assert((((i64) place.address.immediate_offset) + ((i64) offset)) <= I32_MAX);
-                place.address.immediate_offset += offset;
+                assert((((i64) address.immediate_offset) + ((i64) offset)) <= I32_MAX);
+                address.immediate_offset += offset;
             } else {
-                if (place.address.index != REGISTER_NONE) {
-                    Register new_base = place.address.index;
-                    instruction_lea(context, place.address, new_base);
-                    place.address = (X64_Address) {0};
-                    place.address.base = new_base;
+                if (address.index != REGISTER_NONE) {
+                    Register new_base = address.index;
+                    instruction_lea(context, address, new_base);
+                    address = (X64_Address) {0};
+                    address.base = new_base;
                 }
-                assert(place.address.index == REGISTER_NONE);
+                assert(address.index == REGISTER_NONE);
 
                 Register offset_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax);
 
                 X64_Place offset_place = x64_place_reg(offset_reg);
                 machinecode_for_expr(context, func, expr->subscript.index, reg_allocator, offset_place);
 
-                place.address.index = offset_reg;
+                address.index = offset_reg;
 
                 if (step == 1 || step == 2 || step == 4 || step == 8) {
-                    place.address.scale = (u8) step;
+                    address.scale = (u8) step;
                 } else {
-                    place.address.scale = 1;
-                    instruction_mul_pointer_imm(context, place.address.index, step);
+                    address.scale = 1;
+                    instruction_mul_pointer_imm(context, address.index, step);
                 }
             }
 
-            return place;
+            return x64_place_address(address);
         } break;
 
         case EXPR_MEMBER_ACCESS: {
@@ -9056,22 +9090,24 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 instruction_lea(context, return_into, INPUT_REGISTERS[0]);
             }
 
-            for (u32 p = skip_first_param_reg? 1 : 0; p < callee->signature.param_count; p += 1) {
+            for (u32 p = 0; p < callee->signature.param_count; p += 1) {
                 Type *param_type = callee->signature.params[p].type;
 
                 X64_Place target_place;
-                if (p < INPUT_REGISTER_COUNT) {
+
+                u32 r = skip_first_param_reg? (p + 1) : p;
+                if (r < INPUT_REGISTER_COUNT) {
                     Register reg;
                     if (primitive_is_float(param_type->kind)) {
-                        reg = XMM0 + p;
+                        reg = XMM0 + r;
                     } else {
-                        reg = INPUT_REGISTERS[p];
+                        reg = INPUT_REGISTERS[r];
                     }
 
                     used_volatile_registers[p] = true;
                     target_place = x64_place_reg(reg);
                 } else {
-                    target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = p*POINTER_SIZE } };
+                    target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = r*POINTER_SIZE } };
                 }
 
                 if (callee->signature.params[p].reference_semantics) {
@@ -9172,7 +9208,20 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 return;
             }
 
-            unimplemented();
+            // NB The reason we don't allow using the subscript operator on straight pointers (e.g. *u8) is because that would create
+            // confusing semantics for pointers to arrays. Should the stride an array access to a *[3]u8 should be 1 or 3?
+            // Because we disallow indexing straight pointers the answer is simple: its 1.
+
+            register_allocator_enter_frame(context, reg_allocator);
+
+            if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
+                X64_Place source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
+                machinecode_move(context, reg_allocator, source, place, type_size_of(expr->type));
+            } else {
+                unimplemented(); // TODO
+            }
+
+            register_allocator_leave_frame(context, reg_allocator);
         } break;
 
         case EXPR_MEMBER_ACCESS: {
@@ -9185,9 +9234,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             u64 member_size = type_size_of(expr->type);
 
             if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                X64_Place dst = place;
-                X64_Place src = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
-                machinecode_move(context, reg_allocator, src, dst, member_size);
+                X64_Place source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
+                machinecode_move(context, reg_allocator, source, place, member_size);
             } else {
                 Expr *parent = expr->member_access.parent;
 
@@ -9272,7 +9320,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 length = max(value + 1, length);
             }
 
-            machinecode_immediate_to_place(context, place, length, primitive_size_of(DEFAULT_INT_TYPE));
+            machinecode_immediate_to_place(context, place, length, primitive_size_of(TYPE_DEFAULT_INT));
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
@@ -9293,14 +9341,14 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
         Expr *left  = expr->binary.left;
         Expr *right = expr->binary.right;
         assert(left->type->kind == right->type->kind);
-        Type_Kind primitive = left->type->kind;
+        Type_Kind primitive = primitive_of(left->type);
         u8 primitive_size = primitive_size_of(primitive);
 
         condition = find_condition_for_op_and_type(expr->binary.op, left->type->kind);
 
         if (primitive_is_float(primitive)) {
             unimplemented(); // TODO what are the floating point instructions for comparasions?
-        } else if (primitive_is_integer(primitive)) {
+        } else if (primitive_is_integer(primitive) || primitive == TYPE_POINTER) {
             register_allocator_enter_frame(context, reg_allocator);
 
             // TODO We need to special case when both the lhs and the rhs are simple stack loads, so that we 
@@ -9401,7 +9449,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
             bool needs_temporary =
                 primitive_is_compound(type->kind) &&
-                !(right->kind == EXPR_VARIABLE);
+                !(right->kind == EXPR_VARIABLE || right->kind == EXPR_STRING_LITERAL);
 
             if (needs_temporary) {
                 u64 size = type_size_of(type);
@@ -9648,10 +9696,22 @@ void build_machinecode(Context *context) {
         reg_allocator.max_callee_param_count = 0;
 
         // Parameters
+        u32 effective_param_count = func->signature.param_count;
+
+        u32 input_offset = 0;
+        if (func->signature.return_by_reference) {
+            reg_allocator.return_value_address = (X64_Address) { .base = RSP_OFFSET_INPUTS, .immediate_offset = 0 };
+            input_offset += POINTER_SIZE;
+            effective_param_count += 1;
+        } else {
+            reg_allocator.return_value_address = (X64_Address) {0};
+        }
+
         for (u32 p = 0; p < func->signature.param_count; p += 1) {
             u32 var_index = func->signature.params[p].var_index;
 
-            X64_Address address = { .base = RSP_OFFSET_INPUTS, .immediate_offset = var_index * POINTER_SIZE };
+            X64_Address address = { .base = RSP_OFFSET_INPUTS, .immediate_offset = input_offset };
+            input_offset += POINTER_SIZE;
 
             reg_allocator.var_mem_infos[var_index].size = POINTER_SIZE;
             reg_allocator.var_mem_infos[var_index].address = address;
@@ -9673,14 +9733,6 @@ void build_machinecode(Context *context) {
             reg_allocator.var_mem_infos[v].address = address;
         }
 
-        if (func->signature.return_by_reference) {
-            next_stack_offset = (i32) round_to_next(next_stack_offset, POINTER_SIZE);
-            reg_allocator.return_value_address = (X64_Address) { .base = RSP_OFFSET_LOCALS, .immediate_offset = next_stack_offset };
-            next_stack_offset += POINTER_SIZE;
-        } else {
-            reg_allocator.return_value_address = (X64_Address) {0};
-        }
-
         reg_allocator.max_stack_size = next_stack_offset;
         if (reg_allocator.head != null) reg_allocator.head->stack_size = next_stack_offset;
 
@@ -9697,12 +9749,14 @@ void build_machinecode(Context *context) {
             instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
         }
 
-        for (u32 p = skip_first_param_reg? 1: 0; p < min(func->signature.param_count, INPUT_REGISTER_COUNT); p += 1) {
+        for (u32 p = 0; p < min(func->signature.param_count, INPUT_REGISTER_COUNT); p += 1) {
             u32 var_index = func->signature.params[p].var_index;
             X64_Address address = reg_allocator.var_mem_infos[var_index].address;
 
+            u32 r = skip_first_param_reg? (p + 1) : p;
+
             if (func->signature.params[p].reference_semantics) {
-                Register reg = INPUT_REGISTERS[p];
+                Register reg = INPUT_REGISTERS[r];
                 instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
             } else {
                 u64 operand_size = type_size_of(func->signature.params[p].type);
@@ -9714,7 +9768,7 @@ void build_machinecode(Context *context) {
                     if (primitive_is_float(operand_primitive)) {
                         unimplemented(); // TODO floating point parameters
                     } else {
-                        Register reg = INPUT_REGISTERS[p];
+                        Register reg = INPUT_REGISTERS[r];
                         instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, (u8) operand_size);
                     }
                 }

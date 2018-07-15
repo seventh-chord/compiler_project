@@ -37,7 +37,7 @@ fn main() {
 
     assert(enum_length(Type_Kind) == i64(Type_Kind::ENUM) + 1, "There are not enough types!");
 
-    //print(get_second_word("Hello there dude"));
+    print(get_second_word("This Whoa\n sentence will not be printed!"));
 
     assert(true, "This should NOT assert");
     assert(false, "This should assert");
@@ -224,13 +224,11 @@ fn empty_structs_should_work(e: Empty) {
 }
 
 
-/*
 fn get_second_word(string: String) -> String {
     let result: String;
 
     let i = 0;
     for (i < string.length) {
-        result.length += 1;
         if (string[i] == ' ') {
             if (result.data == null) {
                 result.data = string.data + i + 1;
@@ -238,10 +236,11 @@ fn get_second_word(string: String) -> String {
             } else {
                 break;
             }
+        } else {
+            result.length += 1;
         }
         i += 1;
     }
 
     return result;
 }
-*/
