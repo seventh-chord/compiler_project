@@ -469,7 +469,6 @@ Language features
     uninitialized (zeroed) global variables in .bss
     unions
     more operators      <<   >>   |   &   ~   ||   &&    /=    *=
-    character literals
     variable shadowing
     taking the address of temporaries
     a defer statement

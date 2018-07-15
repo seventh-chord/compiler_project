@@ -229,7 +229,7 @@ enum Type_Kind (u8) { // We rely on this enum being one byte large!
 // To the best of my knowledge, that is the only place it is depended upon though.
 struct String {
     data: *u8;
-    length: u64;
+    length: i64;
 }
 
 );
@@ -1087,6 +1087,7 @@ typedef struct Token {
         TOKEN_IDENTIFIER,
         TOKEN_LITERAL_INT,
         TOKEN_LITERAL_FLOAT,
+        TOKEN_LITERAL_CHAR,
         TOKEN_STRING,
 
         TOKEN_KEYWORD_FN,
@@ -1113,6 +1114,7 @@ typedef struct Token {
 
         u64 literal_int;
         f64 literal_float;
+        u8 literal_char;
 
         struct {
             u8* bytes; // null-terminated
@@ -1480,6 +1482,7 @@ struct Expr { // 'typedef'd earlier!
                 EXPR_LITERAL_POINTER,
                 EXPR_LITERAL_BOOL,
                 EXPR_LITERAL_FLOAT, // 'value' is the bitpattern of a 'f64'
+                EXPR_LITERAL_CHAR,
             } kind;
         } literal;
 
@@ -1759,7 +1762,7 @@ typedef struct Context {
     // AST & intermediate representation
     Func* funcs;
     Type primitive_types[TYPE_KIND_COUNT];
-    Type *void_pointer_type, *string_type, *type_info_type;
+    Type *void_pointer_type, *string_type, *type_info_type, *char_type;
     Type **user_types;
 
     // These are only for temporary use, we copy to arena buffers & clear
@@ -1835,6 +1838,7 @@ void init_primitive_types(Context* context) {
     #undef init_primitives
 
     context->void_pointer_type = get_pointer_type(context, &context->primitive_types[TYPE_VOID]);
+    context->char_type         = &context->primitive_types[TYPE_U8];
 }
 
 void init_builtin_func_names(Context* context) {
@@ -2215,8 +2219,9 @@ void print_token(u8* string_table, Token* t) {
             printf("\"%z\"", t->string.length, t->string.bytes);
         } break;
 
-        case TOKEN_LITERAL_INT:   printf("%u", t->literal_int); break;
-        case TOKEN_LITERAL_FLOAT: printf("%f", t->literal_float); break;
+        case TOKEN_LITERAL_INT:   printf("%u", t->literal_int);     break;
+        case TOKEN_LITERAL_FLOAT: printf("%f", t->literal_float);   break;
+        case TOKEN_LITERAL_CHAR:  printf("'%c'", t->literal_char);  break;
 
         default: {
             printf(TOKEN_NAMES[t->kind]);
@@ -2251,6 +2256,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 case EXPR_LITERAL_INTEGER: {
                     printf("%u", expr->literal.masked_value);
                 } break;
+
                 case EXPR_LITERAL_POINTER: {
                     if (expr->literal.masked_value == 0) {
                         printf("null");
@@ -2258,10 +2264,20 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                         printf("%x", expr->literal.masked_value);
                     }
                 } break;
+
                 case EXPR_LITERAL_BOOL: {
                     assert(expr->literal.masked_value == true || expr->literal.masked_value == false);
                     printf(expr->literal.masked_value? "true" : "false");
                 } break;
+
+                case EXPR_LITERAL_FLOAT: {
+                    unimplemented(); // TODO why is this not implemented yet??
+                } break;
+
+                case EXPR_LITERAL_CHAR: {
+                    printf("'%c'", expr->literal.masked_value);
+                } break;
+
                 default: assert(false);
             }
         } break;
@@ -2528,6 +2544,19 @@ u32 find_func(Context* context, u32 name) {
         }
     }
     return U32_MAX;
+}
+
+u8 resolve_escaped_char(u8 c) {
+    switch (c) {
+        case 'n':  return 0x0a;
+        case 'r':  return 0x0d;
+        case 't':  return 0x09;
+        case '0':  return 0x00;
+        case '\\': return '\\';
+        case '"':  return '"';
+        case '\'': return '\'';
+        default:   return 0xff;
+    }
 }
 
 bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
@@ -3227,6 +3256,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
 
                 case TOKEN_LITERAL_INT:
                 case TOKEN_LITERAL_FLOAT:
+                case TOKEN_LITERAL_CHAR:
                 case TOKEN_KEYWORD_NULL:
                 case TOKEN_KEYWORD_TRUE:
                 case TOKEN_KEYWORD_FALSE:
@@ -3245,6 +3275,11 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
                         case TOKEN_LITERAL_FLOAT: {
                             expr->literal.raw_value = *((u64*) &t->literal_float);
                             expr->literal.kind = EXPR_LITERAL_FLOAT;
+                        } break;
+
+                        case TOKEN_LITERAL_CHAR: {
+                            expr->literal.raw_value = (u64) t->literal_char;
+                            expr->literal.kind = EXPR_LITERAL_CHAR;
                         } break;
 
                         case TOKEN_KEYWORD_NULL: {
@@ -4631,22 +4666,16 @@ bool build_ast(Context* context, u8* file_name) {
 
     bool valid = true;
 
-    valid &= lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text));
+    assert(lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text)));
 
-    context->string_type = null;
     u32 string_type_name_index = string_table_intern_cstr(&context->string_table, "String");
-    buf_foreach (Type*, user_type, context->user_types) {
-        if ((*user_type)->kind == TYPE_STRUCT && (*user_type)->structure.name == string_type_name_index) {
-            context->string_type = *user_type;
-        }
-    }
-    assert(context->string_type != null);
+    context->string_type = parse_user_type_name(context, string_type_name_index);
+    assert(context->string_type != null && context->string_type->kind == TYPE_STRUCT);
 
     u32 type_kind_name_index = string_table_intern_cstr(&context->string_table, "Type_Kind");
     context->type_info_type = parse_user_type_name(context, type_kind_name_index);
-    assert(context->type_info_type != null);
-    assert(context->type_info_type->kind == TYPE_ENUM);
-    assert(context->type_info_type->enumeration.name == type_kind_name_index);
+    assert(context->type_info_type != null && context->type_info_type->kind == TYPE_ENUM);
+
 
     valid &= lex_and_parse_text(context, file_name, file, file_length);
 
@@ -5082,15 +5111,10 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                     collapsed_length -= 1;
 
                     u8 escaped = start[i];
-                    u8 resolved = U8_MAX;
-                    switch (escaped) {
-                        case 'n': resolved = 0x0a; i += 1; break;
-                        case 'r': resolved = 0x0d; i += 1; break;
-                        case 't': resolved = 0x09; i += 1; break;
-                        case '0': resolved = 0x00; i += 1; break;
-                    }
+                    u8 resolved = resolve_escaped_char(start[i]);
+                    i += 1;
 
-                    if (resolved == U8_MAX) {
+                    if (resolved == 0xff) {
                         print_file_pos(&file_pos);
                         printf("Invalid escape sequence: '\\%c'\n", escaped);
                         valid = false;
@@ -5116,6 +5140,40 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                     .pos = file_pos,
                 }));
             }
+        } break;
+
+        case '\'': {
+            if (i + 2 > file_length || (file[i + 1] == '\\' && i + 3 < file_length)) {
+                print_file_pos(&file_pos);
+                printf("Encountered end of file inside charater literal\n");
+                valid = false;
+                break;
+            }
+
+            u8 c;
+            if (file[i + 1] == '\\') {
+                c = resolve_escaped_char(file[i + 2]);
+                if (c == 0xff) {
+                    print_file_pos(&file_pos);
+                    printf("Invalid escape sequence: '\\%c'\n", file[i + 2]);
+                    valid = false;
+                    break;
+                }
+                i += 3;
+            } else {
+                c = file[i + 1];
+                i += 2;
+            }
+
+            if (file[i] != '\'') {
+                print_file_pos(&file_pos);
+                printf("Expected closing tick ', but got %c\n", file[i]);
+                valid = false;
+                break;
+            }
+            i += 1;
+
+            buf_push(tokens, ((Token) { TOKEN_LITERAL_CHAR, .pos = file_pos, .literal_char = c  }));
         } break;
 
         case ',': {
@@ -5565,6 +5623,11 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     expr->type = &info->context->primitive_types[TYPE_BOOL];
                 } break;
 
+                case EXPR_LITERAL_CHAR: {
+                    expr->type = info->context->char_type;
+                    expr->literal.masked_value = expr->literal.raw_value & 0xff;
+                } break;
+
                 case EXPR_LITERAL_INTEGER: {
                     strong = false;
 
@@ -5818,11 +5881,11 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 // Special-case pointer-pointer arithmetic
                 } else {
                     if (expr->binary.op == BINARY_ADD || expr->binary.op == BINARY_SUB) {
-                        if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_U64) {
+                        if (expr->binary.left->type->kind == TYPE_POINTER && (expr->binary.right->type->kind == TYPE_U64 || expr->binary.right->type->kind == TYPE_I64)) {
                             expr->type = expr->binary.left->type;
                             valid_types = true;
                         }
-                        if (expr->binary.left->type->kind == TYPE_U64 && expr->binary.right->type->kind == TYPE_POINTER) {
+                        if ((expr->binary.left->type->kind == TYPE_U64 || expr->binary.left->type->kind == TYPE_I64) && expr->binary.right->type->kind == TYPE_POINTER) {
                             expr->type = expr->binary.right->type;
                             valid_types = true;
                         }
@@ -6045,6 +6108,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 expr->type = array_type->array.of;
             } else if (array_type->kind == TYPE_POINTER && array_type->pointer_to->kind == TYPE_ARRAY) {
                 expr->type = array_type->pointer_to->array.of;
+            } else if (array_type == info->context->string_type) {
+                expr->type = info->context->char_type;
             } else {
                 print_file_pos(&expr->pos);
                 printf("Can't index a ");

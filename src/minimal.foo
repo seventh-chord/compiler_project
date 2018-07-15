@@ -26,7 +26,7 @@ fn main() {
     print("In Marco Polos descriptions the Kahn discovered...\n");
 
     let three = other(1, 2);
-    let b = three == 3;
+    let b = u32('0') + three == u32('3');
     assert(b, "Math is broken");
 
     wont_work_for_now();
@@ -225,16 +225,16 @@ fn empty_structs_should_work(e: Empty) {
 
 
 /*
-fn get_second_word(s: String) -> String {
-    let slice: String;
+fn get_second_word(string: String) -> String {
+    let result: String;
 
     let i = 0;
-    for (i < s.length) {
-        slice.length += 1;
-        if (s[i] == ' ') {
-            if (slice.data == null) {
-                slice.data = s.data + i + 1;
-                slice.length = 0;
+    for (i < string.length) {
+        result.length += 1;
+        if (string[i] == ' ') {
+            if (result.data == null) {
+                result.data = string.data + i + 1;
+                result.length = 0;
             } else {
                 break;
             }
@@ -242,6 +242,6 @@ fn get_second_word(s: String) -> String {
         i += 1;
     }
 
-    return slice;
+    return result;
 }
 */
