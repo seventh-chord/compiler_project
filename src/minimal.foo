@@ -216,4 +216,15 @@ fn pointer_arithmetic() {
 
     let distance = b - a;
     assert(distance == 9, "Hmm, thats not how division works\n");
+
+    empty_structs_should_work({});
+}
+
+struct Empty {}
+
+fn empty_structs_should_work(e: Empty) {
+    let q = e;
+    let r = &q;
+
+    let n = r - r;
 }

@@ -238,9 +238,12 @@ void program_entry() {
 }
 
 u64 round_to_next(u64 value, u64 step) {
-    value += step - 1;
-    value /= step;
-    value *= step;
+    if (step > 0) {
+        value += step - 1;
+        value /= step;
+        value *= step;
+    }
+
     return value;
 }
 
@@ -6970,7 +6973,7 @@ bool typecheck(Context* context) {
                 valid = false;
             } else if (primitive_is_compound((*type)->kind)) {
                 u32 size = type_size_of(*type);
-                if (size == 1 || size == 2 || size == 4 || size == 8) {
+                if (size == 0 || size == 1 || size == 2 || size == 4 || size == 8) {
                     // Just squish the value into a register
                 } else {
                     func->signature.params[p].reference_semantics = true;
@@ -7856,6 +7859,7 @@ void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
 
 void instruction_idiv_pointer_imm(Context *context, Register reg, i64 div_by) {
     if (div_by == 0) {
+        panic("Atempted to generate idiv by 0\n");
         return;
     } else if ((div_by & (div_by - 1)) == 0) {
         // Optimize by using a shift
@@ -7873,6 +7877,8 @@ void instruction_idiv_pointer_imm(Context *context, Register reg, i64 div_by) {
         #endif
     } else {
         unimplemented(); // TODO actually call idiv
+        // We probably don't want to actually call idiv, because that is slow. Instead, we should do the same
+        // trick as other compilers do (use godbolt to see it) involving a SAR and a IMUL
     }
 }
 
@@ -8385,7 +8391,9 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
 }
 
 void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place src, X64_Place dst, u64 size) {
-    if (size == 1 || size == 2 || size == 4 || size == 8) {
+    if (size == 0) {
+        return;
+    } else if (size == 1 || size == 2 || size == 4 || size == 8) {
         if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
             register_allocator_enter_frame(context, reg_allocator);
 
@@ -8631,6 +8639,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             u64 size = type_size_of(expr->type);
             u64 align = type_align_of(expr->type);
 
+            if (size == 0) return;
+
             X64_Place real_place = place;
             bool return_to_real_place = false;
 
@@ -8772,7 +8782,9 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                             left_place = x64_place_reg(flushed_left_place_to_reg);
                         }
 
-                        instruction_idiv_pointer_imm(context, left_place.reg, pointer_scale);
+                        if (pointer_scale > 0) {
+                            instruction_idiv_pointer_imm(context, left_place.reg, pointer_scale);
+                        }
                     }
 
                     if (flushed_left_place_to_reg != REGISTER_NONE) {
@@ -8979,12 +8991,15 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 if (callee->signature.params[p].reference_semantics) {
                     u64 size = type_size_of(param_type);
                     u64 align = type_align_of(param_type);
-                    X64_Address tmp_address = register_allocator_allocate_temporary_stack_space(reg_allocator, size, align);
-                    X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
 
-                    machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, tmp_place);
-                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
-                    machinecode_lea(context, reg_allocator, tmp_address, target_place);
+                    if (size > 0) {
+                        X64_Address tmp_address = register_allocator_allocate_temporary_stack_space(reg_allocator, size, align);
+                        X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
+
+                        machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, tmp_place);
+                        if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
+                        machinecode_lea(context, reg_allocator, tmp_address, target_place);
+                    }
                 } else {
                     if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
                     machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
@@ -9556,14 +9571,13 @@ void build_machinecode(Context *context) {
 
             u64 size = type_size_of(func->body.vars[v].type);
             u64 align = type_align_of(func->body.vars[v].type);
-            next_stack_offset = (i32) round_to_next(next_stack_offset, align);
 
+            next_stack_offset = (i32) round_to_next(next_stack_offset, align);
             X64_Address address = { .base = RSP_OFFSET_LOCALS, .immediate_offset = next_stack_offset };
+            next_stack_offset += size;
 
             reg_allocator.var_mem_infos[v].size = size;
             reg_allocator.var_mem_infos[v].address = address;
-
-            next_stack_offset += size;
         }
 
         if (func->signature.return_by_reference) {
@@ -9599,14 +9613,17 @@ void build_machinecode(Context *context) {
                 instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
             } else {
                 u64 operand_size = type_size_of(func->signature.params[p].type);
-                Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
-                assert(operand_size == 1 || operand_size == 2 || operand_size == 4 || operand_size == 8);
 
-                if (primitive_is_float(operand_primitive)) {
-                    unimplemented(); // TODO floating point parameters
-                } else {
-                    Register reg = INPUT_REGISTERS[p];
-                    instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, (u8) operand_size);
+                if (operand_size > 0) {
+                    assert(operand_size == 1 || operand_size == 2 || operand_size == 4 || operand_size == 8);
+
+                    Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
+                    if (primitive_is_float(operand_primitive)) {
+                        unimplemented(); // TODO floating point parameters
+                    } else {
+                        Register reg = INPUT_REGISTERS[p];
+                        instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, (u8) operand_size);
+                    }
                 }
             }
         }
