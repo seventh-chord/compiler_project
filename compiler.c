@@ -8497,8 +8497,30 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
         } else {
             assert(false);
         }
+    } else if (size <= 32) { // TODO Try tweaking this once we have a really big program, to see how it affects perf and instruction count
+        assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
+
+        register_allocator_enter_frame(context, reg_allocator);
+        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+
+        u64 bytes = size;
+        while (bytes > 0) {
+            u8 op_size;
+            if (bytes >= 1) op_size = 1;
+            if (bytes >= 2) op_size = 2;
+            if (bytes >= 4) op_size = 4;
+            if (bytes >= 8) op_size = 8;
+            bytes -= op_size;
+
+            instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, reg, op_size);
+            instruction_mov_reg_mem(context, MOVE_TO_MEM,   dst.address, reg, op_size);
+
+            src.address.immediate_offset += op_size;
+            dst.address.immediate_offset += op_size;
+        }
+
+        register_allocator_leave_frame(context, reg_allocator);
     } else {
-        // TODO special case small moves by simply inserting some sequential moves
         assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
 
         register_allocator_enter_frame(context, reg_allocator);
