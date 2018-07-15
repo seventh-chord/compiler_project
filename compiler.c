@@ -3735,7 +3735,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
             expr->pos = start_pos;
             expr->kind = EXPR_ENUM_LENGTH;
             expr->enum_length_of = type;
-            expr->type = &context->primitive_types[TYPE_U64];
+            expr->type = &context->primitive_types[DEFAULT_INT_TYPE];
 
             *length = t - t_start;
             return expr;
@@ -6710,7 +6710,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     length = max(value + 1, length);
                 }
 
-                assert(expr->type->kind == TYPE_U64);
+                assert(expr->type->kind == DEFAULT_INT_TYPE);
                 mem_copy((u8*) &length, result_into, type_size);
 
                 return EVAL_OK;
@@ -9072,7 +9072,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 assert(inner_place.kind == PLACE_REGISTER);
                 Register inner_reg = inner_place.reg;
 
-                machinecode_cast(context, inner_reg, expr->cast_from->type->kind, expr->type->kind);
+                machinecode_cast(context, inner_reg, primitive_of(expr->cast_from->type), primitive_of(expr->type));
                 machinecode_move(context, reg_allocator, inner_place, place, primitive_size_of(expr->type->kind));
 
                 register_allocator_leave_frame(context, reg_allocator);
@@ -9178,8 +9178,15 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_ENUM_LENGTH: {
             if (place.kind == PLACE_NOWHERE) return;
+            assert(expr->enum_length_of->kind == TYPE_ENUM);
 
-            unimplemented();
+            u64 length = 0;
+            for (u32 m = 0; m < expr->enum_length_of->enumeration.member_count; m += 1) {
+                u64 value = expr->enum_length_of->enumeration.members[m].value;
+                length = max(value + 1, length);
+            }
+
+            machinecode_immediate_to_place(context, place, length, primitive_size_of(DEFAULT_INT_TYPE));
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
