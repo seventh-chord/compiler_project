@@ -8954,24 +8954,26 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 case BINARY_LTEQ:
                 {
                     Type_Kind primitive = primitive_of(expr->binary.left->type);
-                    if (primitive_is_float(primitive)) unimplemented();
-
-                    register_allocator_enter_frame(context, reg_allocator);
-
-                    u8 inner_size = primitive_size_of(primitive);
-                    Condition condition = find_condition_for_op_and_type(expr->binary.op, primitive);
-
-                    if (left_place.kind == PLACE_REGISTER) {
-                        instruction_cmp_reg_reg(context, left_place.reg, right_reg, inner_size);
-                    } else if (left_place.kind == PLACE_ADDRESS) {
-                        instruction_cmp_reg_mem(context, left_place.address, right_reg, inner_size);
+                    if (primitive_is_float(primitive)) {
+                        unimplemented();
                     } else {
-                        assert(false);
+                        register_allocator_enter_frame(context, reg_allocator);
+
+                        u8 inner_size = primitive_size_of(primitive);
+                        Condition condition = find_condition_for_op_and_type(expr->binary.op, primitive);
+
+                        if (left_place.kind == PLACE_REGISTER) {
+                            instruction_cmp_reg_reg(context, left_place.reg, right_reg, inner_size);
+                        } else if (left_place.kind == PLACE_ADDRESS) {
+                            instruction_cmp_reg_mem(context, left_place.address, right_reg, inner_size);
+                        } else {
+                            assert(false);
+                        }
+
+                        instruction_setcc(context, condition, left_place);
+
+                        register_allocator_leave_frame(context, reg_allocator);
                     }
-
-                    instruction_setcc(context, condition, left_place);
-
-                    register_allocator_leave_frame(context, reg_allocator);
                 } break;
 
                 default: assert(false);
@@ -9348,7 +9350,7 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
 
         if (primitive_is_float(primitive)) {
             unimplemented(); // TODO what are the floating point instructions for comparasions?
-        } else if (primitive_is_integer(primitive) || primitive == TYPE_POINTER) {
+        } else {
             register_allocator_enter_frame(context, reg_allocator);
 
             // TODO We need to special case when both the lhs and the rhs are simple stack loads, so that we 
@@ -9367,8 +9369,6 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
             instruction_cmp_reg_reg(context, left_reg, right_reg, primitive_size);
 
             register_allocator_leave_frame(context, reg_allocator);
-        } else {
-            assert(false); // NB We don't support comparasion operators on compound literals, see the typechecker
         }
     } else {
         while (expr->kind == EXPR_UNARY && expr->unary.op == UNARY_NOT) {

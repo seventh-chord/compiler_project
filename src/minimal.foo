@@ -200,6 +200,10 @@ fn the_stage_will_collapse() -> i64 {
 fn big_bummer() {
     let a = (1 + (1 + (1 + (1 + the_stage_will_collapse()))));
     assert(a == 6, "Big bummer\n");
+
+    let q = true;
+    let r = false;
+    if (q == r) { assert(false, "Bigger bummer\n"); }
 }
 
 
