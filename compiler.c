@@ -224,6 +224,14 @@ enum Type_Kind (u8) { // We rely on this enum being one byte large!
     ENUM    = 19,
 }
 
+// NB Don't change the definition of this struct. It's exact definition is depended
+// upon in 'machinecode_for_expr', when generating code for 'EXPR_STRING_LITERAL'.
+// To the best of my knowledge, that is the only place it is depended upon though.
+struct String {
+    data: *u8;
+    length: u64;
+}
+
 );
 #undef PRELOAD_QUOTE
 
@@ -1827,7 +1835,6 @@ void init_primitive_types(Context* context) {
     #undef init_primitives
 
     context->void_pointer_type = get_pointer_type(context, &context->primitive_types[TYPE_VOID]);
-    context->string_type = get_pointer_type(context, &context->primitive_types[TYPE_U8]);
 }
 
 void init_builtin_func_names(Context* context) {
@@ -4625,6 +4632,15 @@ bool build_ast(Context* context, u8* file_name) {
     bool valid = true;
 
     valid &= lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text));
+
+    context->string_type = null;
+    u32 string_type_name_index = string_table_intern_cstr(&context->string_table, "String");
+    buf_foreach (Type*, user_type, context->user_types) {
+        if ((*user_type)->kind == TYPE_STRUCT && (*user_type)->structure.name == string_type_name_index) {
+            context->string_type = *user_type;
+        }
+    }
+    assert(context->string_type != null);
 
     u32 type_kind_name_index = string_table_intern_cstr(&context->string_table, "Type_Kind");
     context->type_info_type = parse_user_type_name(context, type_kind_name_index);
@@ -8616,13 +8632,18 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_STRING_LITERAL: {
             if (place.kind == PLACE_NOWHERE) return;
+            assert(place.kind == PLACE_ADDRESS);
+            X64_Address place_address = place.address;
 
-            u64 data_offset = add_exe_data(context, expr->string.bytes, expr->string.length + 1, 1);
+            u64 length = expr->string.length;
+            u64 data_offset = add_exe_data(context, expr->string.bytes, length + 1, 1);
 
             assert(data_offset < I32_MAX);
             X64_Address data_address = { .base = RIP_OFFSET_DATA, .immediate_offset = data_offset };
 
-            machinecode_lea(context, reg_allocator, data_address, place);
+            machinecode_lea(context, reg_allocator, data_address, x64_place_address(place_address));
+            place_address.immediate_offset += POINTER_SIZE;
+            instruction_mov_imm_mem(context, place_address, length, POINTER_SIZE);
         } break;
 
         case EXPR_COMPOUND: {

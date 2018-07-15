@@ -5,23 +5,13 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-fn c_string_length(string: *u8) -> i64 {
-    let length = 0;
-    for (*string != 0) {
-        string += 1;
-        length += 1;
-    }
-    return length;
-}
-
-fn print(string: *u8) {
-    let length = c_string_length(string);
+fn print(string: String) {
     let written: u32;
     let stdout_handle = GetStdHandle(u32(-11));
-    WriteFile(stdout_handle, string, u32(length), &written, null);
+    WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
 }
 
-fn assert(condition: bool, message: *u8) {
+fn assert(condition: bool, message: String) {
     if (!condition) {
         print("Assertion failed: ");
         print(message);
@@ -46,6 +36,8 @@ fn main() {
     big_bummer();
 
     assert(enum_length(Type_Kind) == i64(Type_Kind::ENUM) + 1, "There are not enough types!");
+
+    //print(get_second_word("Hello there dude"));
 
     assert(true, "This should NOT assert");
     assert(false, "This should assert");
@@ -230,3 +222,26 @@ fn empty_structs_should_work(e: Empty) {
 
     let n = r - r;
 }
+
+
+/*
+fn get_second_word(s: String) -> String {
+    let slice: String;
+
+    let i = 0;
+    for (i < s.length) {
+        slice.length += 1;
+        if (s[i] == ' ') {
+            if (slice.data == null) {
+                slice.data = s.data + i + 1;
+                slice.length = 0;
+            } else {
+                break;
+            }
+        }
+        i += 1;
+    }
+
+    return slice;
+}
+*/

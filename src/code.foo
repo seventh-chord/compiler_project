@@ -456,7 +456,6 @@ Current TODO
     BINARY_DIV, BINARY_MOD
     subscripts
     enum_member_name
-    implement missing rhs functionality (a lot of things though, mostly grindy work, nothing very hard)
 
 Language features
     allow inserting debug interrupts (int 3) either via as a builtin function or as a keyword
@@ -465,7 +464,7 @@ Language features
     function pointers
     complete type_info_of_{value, type}
     size_of, align_of
-    slices, make strings slices
+    slices
     a 'any' type
     uninitialized (zeroed) global variables in .bss
     unions
