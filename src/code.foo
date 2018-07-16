@@ -452,7 +452,6 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    subscripts
     BINARY_DIV, BINARY_MOD
     enum_member_name
     floating point

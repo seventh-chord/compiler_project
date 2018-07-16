@@ -1910,25 +1910,25 @@ bool type_can_assign(Type* a, Type* b) {
         Type_Kind a_primitive = a->kind;
         Type_Kind b_primitive = b->kind;
 
-        if (a_primitive != b_primitive) {
+        if (a->kind != b->kind) {
             return false;
         }
 
-        switch (a_primitive) {
-            case TYPE_POINTER: {
-                a = a->pointer_to;
-                b = b->pointer_to;
-                if (a->kind == TYPE_ARRAY) a = a->array.of;
-                if (b->kind == TYPE_ARRAY) b = b->array.of;
-            } break;
+        if (a->kind == TYPE_ARRAY) {
+            if (a->array.length != b->array.length) return false;
+            a = a->array.of;
+            b = b->array.of;
+        } else if (a->kind == TYPE_POINTER) {
+            a = a->pointer_to;
+            b = b->pointer_to;
 
-            case TYPE_ARRAY: {
-                if (a->array.length != b->array.length) return false;
+            if (a->kind == TYPE_ARRAY && b->kind != TYPE_ARRAY) {
                 a = a->array.of;
+            } else if (a->kind != TYPE_ARRAY && b->kind == TYPE_ARRAY) {
                 b = b->array.of;
-            } break;
-
-            default: return true;
+            }
+        } else {
+            return true;
         }
     }
 
