@@ -21,8 +21,8 @@ fn assert(condition: bool, message: String) {
 }
 
 fn main() {
+    division();
     a_raise();
-
     pointer_arithmetic();
 
     print("In Marco Polos descriptions the Kahn discovered...\n");
@@ -272,4 +272,21 @@ fn a_raise() {
 
 fn dumb_function(p: *[3]u32) -> *[3]u32 {
     return p;
+}
+
+fn division() {
+    let n = 5;
+    let m = 16;
+
+    /*
+    let o = m / n;
+    let p = m % n;
+
+    assert(o == 3, "Division is broken");
+    assert(p == 1, "Modulus is broken");
+    */
+
+    assert(m / n == 3, "Something here is broken");
+    assert(m % n == 1, "Something here is also broken");
+    assert(m * n == 80, "Something here is really broken");
 }
