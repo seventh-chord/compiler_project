@@ -452,10 +452,10 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    floating point
-    BINARY_DIV, BINARY_MOD
     subscripts
+    BINARY_DIV, BINARY_MOD
     enum_member_name
+    floating point
 
 Language features
     allow inserting debug interrupts (int 3) either via as a builtin function or as a keyword

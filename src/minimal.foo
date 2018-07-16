@@ -21,6 +21,8 @@ fn assert(condition: bool, message: String) {
 }
 
 fn main() {
+    a_raise();
+
     pointer_arithmetic();
 
     print("In Marco Polos descriptions the Kahn discovered...\n");
@@ -121,48 +123,47 @@ fn wont_work_for_now() {
 
     big_a(a(), a());
 
-    /*
-    let array: [3]i64;
+    let array = [3]i64 { -3, -4, -5 };
     let pointer = &array;
-    c = pointer[0];
-    */
+    c = pointer[1];
+    assert(c == -4, "Hmm not good");
 }
 
 struct Another_Town { a, b: i64; }
 
 fn build(town: Another_Town) {
-    assert(town.a == town.b, "Broken? Yeah\n");
+    assert(town.a == town.b, "Broken? Yeah");
 
     town.a = 1;
 
     let t: Type_Kind;
 
     t = type_info_of_value(town);
-    assert(t == Type_Kind::STRUCT, "Darn this is no good\n");
+    assert(t == Type_Kind::STRUCT, "Darn this is no good");
 
     t = type_info_of_type(Another_Town);
-    assert(t == Type_Kind::STRUCT, "At least this works as intended\n");
+    assert(t == Type_Kind::STRUCT, "At least this works as intended");
 }
 
 
 fn more_breakage_incomming() {
     let capacity = Cloud { 5, 10 }.capacity;
-    assert(capacity == 10, "It didn't work after all :(\n");
+    assert(capacity == 10, "It didn't work after all :(");
 
     capacity = modernize().capacity;
-    assert(capacity == 20, "I really hope this doesn't assert\n");
+    assert(capacity == 20, "I really hope this doesn't assert");
 
     let other_cloud: Cloud;
     upgrade(&other_cloud);
-    assert(other_cloud.capacity == 1, "My cloud didn't grow\n");
+    assert(other_cloud.capacity == 1, "My cloud didn't grow");
     let newer_capacity = upgrade_by_value(other_cloud).capacity;
-    assert(newer_capacity == 2, "Didn't grow again, darn\n");
-    assert(other_cloud.capacity == 1, "Still works here though\n");
+    assert(newer_capacity == 2, "Didn't grow again, darn");
+    assert(other_cloud.capacity == 1, "Still works here though");
 
     let new_capacity = upgrade(&other_cloud).capacity;
-    assert(new_capacity == 2, "All the cloud rained away\n");
+    assert(new_capacity == 2, "All the cloud rained away");
 
-    assert(will_it_crash_though().a == 1, "It did crash, though!\n");
+    assert(will_it_crash_though().a == 1, "It did crash, though!");
 }
 
 fn upgrade(cloud: *Cloud) -> *Cloud {
@@ -199,11 +200,11 @@ fn the_stage_will_collapse() -> i64 {
 }
 fn big_bummer() {
     let a = (1 + (1 + (1 + (1 + the_stage_will_collapse()))));
-    assert(a == 6, "Big bummer\n");
+    assert(a == 6, "Big bummer");
 
     let q = true;
     let r = false;
-    if (q == r) { assert(false, "Bigger bummer\n"); }
+    if (q == r) { assert(false, "Bigger bummer"); }
 }
 
 
@@ -213,7 +214,7 @@ fn pointer_arithmetic() {
     let b = 9 + a;
 
     let distance = b - a;
-    assert(distance == 9, "Hmm, thats not how division works\n");
+    assert(distance == 9, "Hmm, thats not how division works");
 
     empty_structs_should_work({});
 }
@@ -247,4 +248,28 @@ fn get_second_word(string: String) -> String {
     }
 
     return result;
+
+}
+
+fn a_raise() {
+    let i = [3]u8 { 4, 5, 6 } [1];
+    assert(i == 5,   "'i' is bad");
+
+    let j = "WHAT??"[3];
+    assert(j == 'T', "'j' is bad");
+
+    let k = get_second_word("some random sentence")[2];
+    assert(k == 'n', "'k' is bad");
+
+    let la = [3]u32 { 4, 9, 7 };
+    let lp = &la;
+    let l = la[2];
+    assert(l == 7, "'l' is bad");
+
+    let m = dumb_function(lp)[1];
+    assert(m == 9, "'m' is bad");
+}
+
+fn dumb_function(p: *[3]u32) -> *[3]u32 {
+    return p;
 }
