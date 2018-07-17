@@ -451,9 +451,6 @@ fn float_test(a, b: f32) {
 
 
 /*
-Current TODO
-    floating point
-
 Language features
     allow inserting debug interrupts (int 3) either via as a builtin function or as a keyword
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
@@ -472,6 +469,7 @@ Language features
     figure out how to do no parentheses in loops/conditionals
     maybe a better parser for floats? The current one is pretty accurate for f32 at least though
     structure definitions inside functiosn
+    casts from/to bool
 
 Compiler functionality
     stack unwinding - so we can produce a stack trace on e.g. assert

@@ -21,6 +21,7 @@ fn assert(condition: bool, message: String) {
 }
 
 fn main() {
+    floating_away();
     division();
     a_raise();
     pointer_arithmetic();
@@ -303,3 +304,33 @@ fn who_are_you(x: u32) {
     print(enum_member_name(cast(Type_Kind, 30)));
     print("!\n");
 }
+
+fn floating_away() {
+    let c: f32;
+    let a = 4.0;
+    let b = 2.0;
+
+    /*
+    c = a + b;
+    c = a - b;
+    c = a * b;
+    c = a / b;
+
+    c = -c;
+    */
+
+    /*
+    assert(c == 2.0, "Oops we sank\n");
+    assert(c > 1.0, "Oops we sank again\n");
+    assert(c < 3.0, "Oops we sank a third time\n");
+
+    let d = flow(1, 1.0, 1, 1.0);
+    assert(d == 4.0, "Oops we sank\n");
+    */
+}
+
+/*
+fn flow(a: i32, b: f32, c: i32, d: f32) -> f32 {
+    return f32(a) + b + f32(c) + d;
+}
+*/
