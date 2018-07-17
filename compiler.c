@@ -2336,10 +2336,20 @@ void print_expr(Context* context, Func* func, Expr* expr) {
         } break;
 
         case EXPR_CAST: {
-            print_type(context, expr->type);
-            printf("(");
-            print_expr(context, func, expr->cast_from);
-            printf(")");
+            Type_Kind primitive = expr->type->kind;
+
+            if (primitive_is_integer(primitive)) {
+                print_type(context, expr->type);
+                printf("(");
+                print_expr(context, func, expr->cast_from);
+                printf(")");
+            } else {
+                printf("cast(");
+                print_type(context, expr->type);
+                printf(", ");
+                print_expr(context, func, expr->cast_from);
+                printf(")");
+            }
         } break;
 
         case EXPR_SUBSCRIPT: {
@@ -7224,16 +7234,25 @@ void build_enum_member_name_table(Context* context, Type* type) {
 
     u32 type_name_length;
     u8* type_name = string_table_access_and_get_length(context->string_table, type->enumeration.name, &type_name_length);
-    u64 invalid_string_offset = add_exe_data(context, "<unknown ", 9, 1);
-    add_exe_data(context, type_name, type_name_length, 1);
-    add_exe_data(context, ">\0", 2, 1);
+
+    u64 invalid_string_offset = buf_length(context->seg_data);
+    u64 invalid_string_length = type_name_length + 10;
+    buf_push(context->seg_data, invalid_string_length & 0xff);
+    buf_push(context->seg_data, (invalid_string_length >> 8) & 0xff);
+    str_push_str(&context->seg_data, "<unknown ", 9);
+    str_push_str(&context->seg_data, type_name, type_name_length);
+    str_push_str(&context->seg_data, ">\0", 2);
 
     for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
         u64 value = type->enumeration.members[m].value;
         u32 name_length = 0;
         u8* name = string_table_access_and_get_length(context->string_table, type->enumeration.members[m].name, &name_length);
 
-        u64 string_offset = add_exe_data(context, name, name_length + 1, 1);
+        assert(name_length <= U16_MAX);
+        u64 string_offset = buf_length(context->seg_data);
+        buf_push(context->seg_data, name_length & 0xff);
+        buf_push(context->seg_data, (name_length >> 8) & 0xff);
+        str_push_str(&context->seg_data, name, name_length + 1);
 
         u16 relative_offset = string_offset - table_offset - value*sizeof(u16);
         assert(relative_offset < U16_MAX);
@@ -7688,31 +7707,39 @@ u64 instruction_jrcxz(Context *context) {
     return buf_length(context->seg_text) - 1;
 }
 
-u64 instruction_jcc(Context *context, Condition condition) {
+u64 instruction_jcc(Context *context, Condition condition, u8 op_size) {
     u8 opcode;
     switch (condition) {
-        case COND_E:  opcode = 0x84; break;
-        case COND_NE: opcode = 0x85; break;
-        case COND_G:  opcode = 0x8f; break;
-        case COND_GE: opcode = 0x8d; break;
-        case COND_L:  opcode = 0x8c; break;
-        case COND_LE: opcode = 0x8e; break;
-        case COND_A:  opcode = 0x87; break;
-        case COND_AE: opcode = 0x83; break;
-        case COND_B:  opcode = 0x82; break;
-        case COND_BE: opcode = 0x86; break;
+        case COND_E:  opcode = 0x04; break;
+        case COND_NE: opcode = 0x05; break;
+        case COND_G:  opcode = 0x0f; break;
+        case COND_GE: opcode = 0x0d; break;
+        case COND_L:  opcode = 0x0c; break;
+        case COND_LE: opcode = 0x0e; break;
+        case COND_A:  opcode = 0x07; break;
+        case COND_AE: opcode = 0x03; break;
+        case COND_B:  opcode = 0x02; break;
+        case COND_BE: opcode = 0x06; break;
         default: assert(false);
     }
 
-    buf_push(context->seg_text, 0x0f);
+    if (op_size == 4) {
+        buf_push(context->seg_text, 0x0f);
+        opcode |= 0x80;
+    } else if (op_size == 1) {
+        opcode |= 0x70;
+    } else {
+        assert(false);
+    }
+
     buf_push(context->seg_text, opcode);
-    str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
+    str_push_integer(&context->seg_text, op_size, op_size == 4? 0xdeadbeef : 0);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("j%s ??\n", CONDITION_POSTFIXES[condition]);
     #endif
 
-    return buf_length(context->seg_text) - sizeof(i32);
+    return buf_length(context->seg_text) - op_size;
 }
 
 void instruction_setcc(Context *context, Condition condition, X64_Place place) {
@@ -8096,6 +8123,55 @@ void instruction_mov_reg_mem(Context *context, Mov_Mode mode, X64_Address mem, R
         printf("mov ");
         print_x64_address(mem);
         printf(", %s\n", register_name(reg, op_size));
+    }
+    #endif
+}
+
+void instruction_movzx(Context *context, X64_Place src, Register dst, u8 src_size, u8 dst_size) {
+    u32 opcode;
+    u8 rex = REX_BASE;
+
+    if (src_size == 1 && dst_size == 2) {
+        opcode = 0xb60f;
+        buf_push(context->seg_text, WORD_OPERAND_PREFIX);
+    } else if (src_size == 1 && dst_size == 4) {
+        opcode = 0xb60f;
+    } else if (src_size == 1 && dst_size == 8) {
+        opcode = 0xb60f;
+        rex |= REX_W;
+    } else if (src_size == 2 && dst_size == 4) {
+        opcode = 0xb70f;
+    } else if (src_size == 2 && dst_size == 8) {
+        opcode = 0xb70f;
+        rex |= REX_W;
+    } else {
+        assert(false);
+    }
+
+    if (src.kind == PLACE_ADDRESS) {
+        encode_instruction_reg_mem(context, rex, opcode, src.address, dst);
+    } else if (src.kind == PLACE_REGISTER) {
+        encode_instruction_reg_reg(context, rex, opcode, src.reg, dst);
+    } else {
+        assert(false);
+    }
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (src.kind == PLACE_ADDRESS) {
+        printf("movzx %s, ", register_name(dst, dst_size));
+        if (src_size == 1) {
+            printf("word ptr ");
+        } else if (src_size == 2) {
+            printf("word ptr ");
+        } else {
+            assert(false);
+        }
+        print_x64_address(src.address);
+        printf("\n");
+    } else if (src.kind == PLACE_REGISTER) {
+        printf("movzx %s, %s\n", register_name(dst, dst_size), register_name(src.reg, src_size));
+    } else {
+        assert(false);
     }
     #endif
 }
@@ -9306,7 +9382,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 Register inner_reg = inner_place.reg;
 
                 machinecode_cast(context, inner_reg, primitive_of(expr->cast_from->type), primitive_of(expr->type));
-                machinecode_move(context, reg_allocator, inner_place, place, primitive_size_of(expr->type->kind));
+                machinecode_move(context, reg_allocator, inner_place, place, primitive_size_of(primitive_of(expr->type)));
 
                 register_allocator_leave_frame(context, reg_allocator);
             }
@@ -9486,8 +9562,53 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 return;
             }
 
-            unimplemented(); // Maybe wait until we have proper strings until we do this...
-            // expr->enum_member
+            Type *enum_type = expr->enum_member->type;
+            assert(enum_type->kind == TYPE_ENUM);
+
+            u8 op_size = primitive_size_of(enum_type->enumeration.value_primitive);
+
+            if (enum_type->enumeration.name_table_data_offset == U64_MAX) {
+                build_enum_member_name_table(context, enum_type);
+            }
+
+            register_allocator_enter_frame(context, reg_allocator);
+
+            Register member_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+            machinecode_for_expr(context, func, expr->enum_member, reg_allocator, x64_place_reg(member_reg));
+
+            Register pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+
+            {
+                instruction_cmp_imm(context, x64_place_reg(member_reg), enum_type->enumeration.name_table_entries, op_size);
+                u64 jge_location = instruction_jcc(context, COND_GE, 1);
+                u64 jge_from = buf_length(context->seg_text);
+                instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = enum_type->enumeration.name_table_data_offset }, pointer_reg);
+                if (op_size == 1 || op_size == 2) {
+                    instruction_movzx(context, x64_place_reg(member_reg), member_reg, op_size, POINTER_SIZE);
+                }
+                instruction_lea(context, (X64_Address) { .base = pointer_reg, .index = member_reg, .scale = 2 }, pointer_reg);
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, (X64_Address) { .base = pointer_reg }, member_reg, 2);
+                machinecode_cast(context, member_reg, TYPE_U16, TYPE_U64);
+                instruction_simple_binary(context, (Simple_Binary_Info) { .kind = SIMPLE_BINARY_ADD, .a = pointer_reg, .b = member_reg, .op_size = POINTER_SIZE });
+                u64 jmp_location = instruction_jmp_i8(context);
+                u64 jge_to = buf_length(context->seg_text);
+                u64 jmp_from = jge_to;
+                instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = enum_type->enumeration.name_table_invalid_offset }, pointer_reg);
+                u64 jmp_to = buf_length(context->seg_text);
+                instruction_movzx(context, x64_place_address((X64_Address) { .base = pointer_reg }), member_reg, 2, POINTER_SIZE);
+                instruction_add_or_sub_imm(context, true, pointer_reg, 2, POINTER_SIZE);
+
+                assert(place.kind == PLACE_ADDRESS);
+                X64_Address address = place.address;
+                instruction_mov_reg_mem(context, MOVE_TO_MEM, address, pointer_reg, POINTER_SIZE);
+                address.immediate_offset += POINTER_SIZE;
+                instruction_mov_reg_mem(context, MOVE_TO_MEM, address, member_reg, POINTER_SIZE);
+
+                *((i8*) (context->seg_text + jge_location)) = jge_to - jge_from;
+                *((i8*) (context->seg_text + jmp_location)) = jmp_to - jmp_from;
+            }
+
+            register_allocator_leave_frame(context, reg_allocator);
         } break;
     }
 }
@@ -9544,7 +9665,7 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
         condition = condition_not(condition);
     }
 
-    u64 jump_distance_text_location = instruction_jcc(context, condition);
+    u64 jump_distance_text_location = instruction_jcc(context, condition, 4);
     u64 jump_from = buf_length(context->seg_text);
 
     Jump_Fixup fixup = {0};

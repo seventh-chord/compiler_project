@@ -452,7 +452,6 @@ fn float_test(a, b: f32) {
 
 /*
 Current TODO
-    enum_member_name
     floating point
 
 Language features

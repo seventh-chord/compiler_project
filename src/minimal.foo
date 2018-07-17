@@ -41,6 +41,8 @@ fn main() {
 
     print(get_second_word("This Whoa\n sentence will not be printed!"));
 
+    who_are_you(3);
+
     assert(true, "This should NOT assert");
     assert(false, "This should assert");
 }
@@ -289,4 +291,15 @@ fn division() {
     assert(m / n == 3, "Something here is broken");
     assert(m % n == 1, "Something here is also broken");
     assert(m * n == 80, "Something here is really broken");
+}
+
+fn who_are_you(x: u32) {
+    let t = type_info_of_value(x);
+    print("x is a ");
+    print(enum_member_name(t));
+    print(", but whoa, that is a ");
+    print(enum_member_name(cast(Type_Kind, 3)));
+    print(" and another ");
+    print(enum_member_name(cast(Type_Kind, 30)));
+    print("!\n");
 }
