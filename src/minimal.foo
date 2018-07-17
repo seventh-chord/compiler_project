@@ -306,18 +306,16 @@ fn who_are_you(x: u32) {
 }
 
 fn floating_away() {
-    let c: f32;
     let a = 4.0;
     let b = 2.0;
+    let c: f32;
 
     c = a + b;
-    /*
     c = a - b;
     c = a * b;
     c = a / b;
 
     c = -c;
-    */
 
     /*
     assert(c == 2.0, "Oops we sank\n");

@@ -1036,7 +1036,7 @@ typedef struct File_Pos {
     u32 line;
 } File_Pos;
 
-enum { KEYWORD_COUNT = 15 };
+enum { KEYWORD_COUNT = 16 };
 
 typedef struct Token {
     enum {
@@ -1099,6 +1099,7 @@ typedef struct Token {
         TOKEN_KEYWORD_RETURN,
         TOKEN_KEYWORD_CONTINUE,
         TOKEN_KEYWORD_BREAK,
+        TOKEN_KEYWORD_DEBUG_BREAK,
         TOKEN_KEYWORD_STRUCT,
         TOKEN_KEYWORD_ENUM,
         TOKEN_KEYWORD_UNION,
@@ -1178,6 +1179,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_KEYWORD_RETURN]       = "return",
     [TOKEN_KEYWORD_CONTINUE]     = "continue",
     [TOKEN_KEYWORD_BREAK]        = "break",
+    [TOKEN_KEYWORD_DEBUG_BREAK]  = "debug_break",
     [TOKEN_KEYWORD_STRUCT]       = "struct",
     [TOKEN_KEYWORD_ENUM]         = "enum",
     [TOKEN_KEYWORD_UNION]        = "union",
@@ -1555,6 +1557,8 @@ struct Stmt {
         STMT_RETURN,
         STMT_BREAK,
         STMT_CONTINUE,
+
+        STMT_DEBUG_BREAK,
     } kind;
 
     union {
@@ -1858,21 +1862,22 @@ void init_keyword_names(Context* context) {
     context->keyword_token_table[i][1] = string_table_intern_cstr(&context->string_table, name); \
     i += 1;
 
-    add_keyword(TOKEN_KEYWORD_FN,       "fn");
-    add_keyword(TOKEN_KEYWORD_EXTERN,   "extern");
-    add_keyword(TOKEN_KEYWORD_LET,      "let");
-    add_keyword(TOKEN_KEYWORD_IF,       "if");
-    add_keyword(TOKEN_KEYWORD_ELSE,     "else");
-    add_keyword(TOKEN_KEYWORD_FOR,      "for");
-    add_keyword(TOKEN_KEYWORD_RETURN,   "return");
-    add_keyword(TOKEN_KEYWORD_CONTINUE, "continue");
-    add_keyword(TOKEN_KEYWORD_BREAK,    "break");
-    add_keyword(TOKEN_KEYWORD_STRUCT,   "struct");
-    add_keyword(TOKEN_KEYWORD_ENUM,     "enum");
-    add_keyword(TOKEN_KEYWORD_UNION,    "union");
-    add_keyword(TOKEN_KEYWORD_NULL,     "null");
-    add_keyword(TOKEN_KEYWORD_TRUE,     "true");
-    add_keyword(TOKEN_KEYWORD_FALSE,    "false");
+    add_keyword(TOKEN_KEYWORD_FN,          "fn");
+    add_keyword(TOKEN_KEYWORD_EXTERN,      "extern");
+    add_keyword(TOKEN_KEYWORD_LET,         "let");
+    add_keyword(TOKEN_KEYWORD_IF,          "if");
+    add_keyword(TOKEN_KEYWORD_ELSE,        "else");
+    add_keyword(TOKEN_KEYWORD_FOR,         "for");
+    add_keyword(TOKEN_KEYWORD_RETURN,      "return");
+    add_keyword(TOKEN_KEYWORD_CONTINUE,    "continue");
+    add_keyword(TOKEN_KEYWORD_BREAK,       "break");
+    add_keyword(TOKEN_KEYWORD_DEBUG_BREAK, "debug_break");
+    add_keyword(TOKEN_KEYWORD_STRUCT,      "struct");
+    add_keyword(TOKEN_KEYWORD_ENUM,        "enum");
+    add_keyword(TOKEN_KEYWORD_UNION,       "union");
+    add_keyword(TOKEN_KEYWORD_NULL,        "null");
+    add_keyword(TOKEN_KEYWORD_TRUE,        "true");
+    add_keyword(TOKEN_KEYWORD_FALSE,       "false");
 
     #undef add_keyword
 }
@@ -2520,6 +2525,8 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
 
         case STMT_CONTINUE: printf("continue;"); break;
         case STMT_BREAK:    printf("break;"); break;
+
+        case STMT_DEBUG_BREAK: printf("debug_break;"); break;
 
         case STMT_END: printf("<end>"); break;
 
@@ -4152,7 +4159,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                 stmt->kind = STMT_BREAK;
                 t += 1;
 
-                if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after variable declaration")) {
+                if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after break")) {
                     *length = t - t_first_stmt_start;
                     return null;
                 }
@@ -4163,7 +4170,18 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                 stmt->kind = STMT_CONTINUE;
                 t += 1;
 
-                if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after variable declaration")) {
+                if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after continue")) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+                t += 1;
+            } break;
+
+            case TOKEN_KEYWORD_DEBUG_BREAK: {
+                stmt->kind = STMT_DEBUG_BREAK;
+                t += 1;
+
+                if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after debug_break")) {
                     *length = t - t_first_stmt_start;
                     return null;
                 }
@@ -6474,6 +6492,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case STMT_CONTINUE:
         case STMT_BREAK:
+        case STMT_DEBUG_BREAK:
         {} break; // Any fancy logic goes in 'check_control_flow'
 
         default: assert(false);
@@ -6901,6 +6920,10 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
                     has_skipped_out = true;
                 }
             } break;
+
+            case STMT_DEBUG_BREAK: {} break;
+
+            default: assert(false);
         }
     }
 
@@ -7514,6 +7537,10 @@ void print_x64_place(X64_Place place, u8 op_size) {
 
 inline bool x64_address_uses_reg(X64_Address address, Register reg) {
     return address.base == reg || address.index == reg;
+}
+
+inline bool x64_address_cmp(X64_Address a, X64_Address b) {
+    return a.base == b.base && a.index == b.index && a.scale == b.scale && a.immediate_offset == b.immediate_offset;
 }
 
 void encode_instruction_modrm_reg_mem(Context *context, u8 rex, u32 opcode, X64_Address mem, Register reg) {
@@ -8372,6 +8399,12 @@ enum {
     FLOAT_DIV,
     FLOAT_MOV,
     FLOAT_MOV_REVERSE,
+
+    // NB There is no scalar version of XOR (because XOR is for integers, and non-packed integer math is not in sse)
+    // As a result, there is also no single/double-precision version of this instruction.
+    // TODO this XOR instruction should be generated with a separate function from the addss-style instructions!
+    FLOAT_XOR_PACKED,
+
     FLOAT_INSTRUCTION_COUNT,
 };
 
@@ -8382,6 +8415,7 @@ u32 FLOAT_SINGLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = 0x5e0ff3,
     [FLOAT_MOV] = 0x100ff3,
     [FLOAT_MOV_REVERSE] = 0x110ff3,
+    [FLOAT_XOR_PACKED] = 0xef0f66,
 };
 u32 FLOAT_DOUBLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_ADD] = 0x580ff2,
@@ -8390,6 +8424,7 @@ u32 FLOAT_DOUBLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = 0x5e0ff2,
     [FLOAT_MOV] = 0x100ff2,
     [FLOAT_MOV_REVERSE] = 0x110ff2,
+    [FLOAT_XOR_PACKED] = 0xef0f66,
 };
 u8 *FLOAT_SINGLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_ADD] = "addss",
@@ -8398,6 +8433,7 @@ u8 *FLOAT_SINGLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = "divss",
     [FLOAT_MOV] = "movss",
     [FLOAT_MOV_REVERSE] = "movss",
+    [FLOAT_XOR_PACKED] = "pxor",
 };
 u8 *FLOAT_DOUBLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_ADD] = "addsd",
@@ -8406,6 +8442,7 @@ u8 *FLOAT_DOUBLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = "divsd",
     [FLOAT_MOV] = "movsd",
     [FLOAT_MOV_REVERSE] = "movsd",
+    [FLOAT_XOR_PACKED] = "pxor",
 };
 
 void instruction_float(Context *context, int instruction, Register dst, X64_Place src, bool single) {
@@ -8470,6 +8507,8 @@ typedef struct Reg_Allocator {
 
     i32 max_stack_size;
     u32 max_callee_param_count;
+
+    u64 negate_f32_data_offset, negate_f64_data_offset; // Used for negating floating point numbers
 } Reg_Allocator;
 
 void register_allocator_enter_frame(Context *context, Reg_Allocator *allocator) {
@@ -8620,6 +8659,13 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
 }
 
 void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place src, X64_Place dst, u64 size) {
+    assert(src.kind != PLACE_NOWHERE && dst.kind != PLACE_NOWHERE);
+
+    if (src.kind == dst.kind) {
+        if (src.kind == PLACE_REGISTER && src.reg == dst.reg) return;
+        if (src.kind == PLACE_ADDRESS && x64_address_cmp(src.address, dst.address)) return;
+    }
+
     if (size == 0) {
         return;
     } else if (size == 1 || size == 2 || size == 4 || size == 8) {
@@ -9201,11 +9247,58 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place);
 
                     Type_Kind primitive = expr->type->kind;
-                    if (expr->unary.op == UNARY_NOT && primitive == TYPE_BOOL) {
+                    if (primitive == TYPE_BOOL) {
+                        assert(expr->unary.op == UNARY_NOT);
                         assert(primitive_size_of(primitive) == 1);
 
                         instruction_cmp_imm(context, place, 0, 1);
                         instruction_setcc(context, COND_E, place);
+                    } else if (primitive == TYPE_F32 || primitive == TYPE_F64) {
+                        assert(expr->unary.op == UNARY_NEG);
+                        bool single = primitive == TYPE_F32;
+
+                        Register reg;
+                        if (place.kind == PLACE_ADDRESS) {
+                            register_allocator_enter_frame(context, reg_allocator);
+                            reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                            instruction_float(context, FLOAT_MOV, reg, place, single);
+                        } else {
+                            reg = place.reg;
+                        }
+
+                        // xor values with '-0.0', which flips the sign bit. We have to load '-0.0' from memory because
+                        // sse doesn't allow immediate operands.
+                        // Also, because sse only has a vector xor, no scalar xor, we have to have a bunch of negative zeros
+                        // to xor with.
+                        // TODO storing the negation bit patterns in seg_text, between functions, would be cleaner
+                        u64 offset;
+                        if (single) {
+                            if (reg_allocator->negate_f32_data_offset == U64_MAX) {
+                                reg_allocator->negate_f32_data_offset = add_exe_data(context, null, 0, 16);
+                                u32 negative_zero = 0x80000000;
+                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
+                            }
+                            offset = reg_allocator->negate_f32_data_offset;
+                        } else {
+                            if (reg_allocator->negate_f64_data_offset == U64_MAX) {
+                                reg_allocator->negate_f64_data_offset = add_exe_data(context, null, 0, 16);
+                                u64 negative_zero = 0x8000000000000000;
+                                str_push_integer(&context->seg_data, sizeof(f64), negative_zero);
+                                str_push_integer(&context->seg_data, sizeof(f64), negative_zero);
+                            }
+                            offset = reg_allocator->negate_f64_data_offset;
+                        }
+
+                        X64_Address negate_address = { .base = RIP_OFFSET_DATA, .immediate_offset = offset };
+                        instruction_float(context, FLOAT_XOR_PACKED, reg, x64_place_address(negate_address), single);
+
+                        if (place.kind == PLACE_ADDRESS) {
+                            instruction_float(context, FLOAT_MOV_REVERSE, reg, place, single);
+                            register_allocator_leave_frame(context, reg_allocator);
+                        }
                     } else {
                         bool unary = expr->unary.op == UNARY_NOT;
                         instruction_negative(context, unary, place, primitive_size_of(primitive));
@@ -9873,6 +9966,10 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
             fixup.jump_to = JUMP_TO_START_OF_LOOP;
             buf_push(context->jump_fixups, fixup);
         } break;
+
+        case STMT_DEBUG_BREAK: {
+            instruction_int3(context);
+        } break;
     }
 
     register_allocator_leave_frame(context, reg_allocator);
@@ -9949,6 +10046,8 @@ void build_machinecode(Context *context) {
 
     // Normal functions
     Reg_Allocator reg_allocator = {0};
+    reg_allocator.negate_f32_data_offset = U64_MAX;
+    reg_allocator.negate_f64_data_offset = U64_MAX;
 
     u8 *prolog = null; // stretchy-buffer
 
