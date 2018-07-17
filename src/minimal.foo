@@ -310,8 +310,8 @@ fn floating_away() {
     let a = 4.0;
     let b = 2.0;
 
-    /*
     c = a + b;
+    /*
     c = a - b;
     c = a * b;
     c = a / b;

@@ -7329,7 +7329,7 @@ typedef enum Register_Kind {
 } Register_Kind;
 
 inline bool is_gpr(Register reg) { return reg >= RAX && reg <= R15; }
-inline bool is_xmm(Register reg) { return reg >= XMM1 && reg <= XMM15; }
+inline bool is_xmm(Register reg) { return reg >= XMM0 && reg <= XMM15; }
 
 u8 REGISTER_INDICES[REGISTER_COUNT] = {
     [RAX] = 0,  [RCX] = 1,  [RDX] = 2,  [RBX] = 3,
@@ -8409,6 +8409,9 @@ u8 *FLOAT_DOUBLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
 };
 
 void instruction_float(Context *context, int instruction, Register dst, X64_Place src, bool single) {
+    assert(is_xmm(dst));
+    if (src.kind == PLACE_REGISTER) assert(is_xmm(src.reg));
+
     u32 opcode = single? FLOAT_SINGLE_OPCODES[instruction] : FLOAT_DOUBLE_OPCODES[instruction];
     encode_instruction_modrm(context, REX_BASE, opcode, src, dst);
 
@@ -8629,11 +8632,25 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
 
             register_allocator_leave_frame(context, reg_allocator);
         } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_ADDRESS) {
-            instruction_mov_reg_mem(context, MOVE_TO_MEM, dst.address, src.reg, (u8) size);
+            if (is_gpr(src.reg)) {
+                instruction_mov_reg_mem(context, MOVE_TO_MEM, dst.address, src.reg, (u8) size);
+            } else {
+                assert(size == 4 || size == 8);
+                instruction_float(context, FLOAT_MOV_REVERSE, src.reg, dst, size == 4);
+            }
         } else if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_REGISTER) {
-            instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, dst.reg, (u8) size);
+            if (is_gpr(dst.reg)) {
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, dst.reg, (u8) size);
+            } else {
+                assert(size == 4 || size == 8);
+                instruction_float(context, FLOAT_MOV, dst.reg, src, size == 4);
+            }
         } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_REGISTER) {
-            instruction_mov_reg_reg(context, src.reg, dst.reg, (u8) size);
+            if (is_gpr(dst.reg)) {
+                instruction_mov_reg_reg(context, src.reg, dst.reg, (u8) size);
+            } else if (is_xmm(dst.reg)) {
+                instruction_float(context, FLOAT_MOV, dst.reg, src, size == 4);
+            }
         } else {
             assert(false);
         }
