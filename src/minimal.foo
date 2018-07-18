@@ -322,6 +322,9 @@ fn floating_away() {
 
     assert(c == --c, "Slightly funky, but come on\n");
 
+    let x = 0.0 / 0.0;
+    assert(!(x == x), "Nan nan nan nan nan nan nan nan nan nan, batman!\n");
+
     /*
     if (c == -2.0) {}
     if (c >= -3.0) {}

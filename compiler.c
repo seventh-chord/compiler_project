@@ -1636,7 +1636,7 @@ u8* CONDITION_POSTFIXES[COND_COUNT] = {
     [COND_A]   = "a",
     [COND_AE]  = "ae",
     [COND_B]   = "b",
-    [COND_LE]  = "be",
+    [COND_BE]  = "be",
 };
 
 Condition condition_not(Condition c) {
@@ -9180,35 +9180,71 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     assert(false);
                 }
 
-                int instruction;
-                switch (expr->binary.op) {
-                    case BINARY_ADD:  instruction = FLOAT_ADD; break;
-                    case BINARY_SUB:  instruction = FLOAT_SUB; break;
-                    case BINARY_MUL:  instruction = FLOAT_MUL; break;
-                    case BINARY_DIV:  instruction = FLOAT_DIV; break;
-                    case BINARY_MOD:  assert(false); break;
-                    case BINARY_EQ:   instruction = FLOAT_CMPEQ; break;
-                    case BINARY_NEQ:  instruction = FLOAT_CMPNEQ; break;
-                    case BINARY_GT:   instruction = FLOAT_COMI; break;
-                    case BINARY_GTEQ: instruction = FLOAT_COMI; break;
-                    case BINARY_LT:   instruction = FLOAT_COMI; break;
-                    case BINARY_LTEQ: instruction = FLOAT_COMI; break;
-                    default: assert(false);
-                }
-
-                instruction_float(context, instruction, left_reg, right_place, single);
-
                 if (BINARY_OP_COMPARATIVE[expr->binary.op]) {
+                    // In some cases we use nonobvious sequences of instructions for floating point
+                    // comparasions.
+                    // We use CMPEQ and CMPNEQ for == and != because they properly handle comparasions
+                    // of NaNs.
+                    // We avoid setb and setbe, because they look for CF=1, and CF=1 is also set when
+                    // CMOI/COMI encounters a NaN. By using seta and setae instead we always evaluate
+                    // to false when we encounter a NaN (Look at the truth-tables for setcc and COMI/COMI).
+
+                    Condition cond;
+                    bool invert = false;
+                    int instruction;
+
+                    switch (expr->binary.op) {
+                        case BINARY_EQ:   instruction = FLOAT_CMPEQ;  break;
+                        case BINARY_NEQ:  instruction = FLOAT_CMPNEQ; break;
+                        case BINARY_GT:   instruction = FLOAT_COMI;   cond = COND_A;  break;
+                        case BINARY_GTEQ: instruction = FLOAT_COMI;   cond = COND_AE; break;
+                        case BINARY_LT:   instruction = FLOAT_COMI;   cond = COND_A;  invert = true; break;
+                        case BINARY_LTEQ: instruction = FLOAT_COMI;   cond = COND_AE; invert = true; break;
+                        default: assert(false);
+                    }
+
+                    if (invert) {
+                        if (right_place.kind == PLACE_REGISTER) {
+                            instruction_float(context, instruction, right_place.reg, x64_place_reg(left_reg), single);
+                        } else if (right_place.kind == PLACE_ADDRESS) {
+                            Register temp_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                            instruction_float(context, instruction, temp_reg, x64_place_reg(left_reg), single);
+                            left_reg = temp_reg;
+                        } else {
+                            assert(false);
+                        }
+                    } else {
+                        instruction_float(context, instruction, left_reg, right_place, single);
+                    }
+
                     if (expr->binary.op == BINARY_EQ || expr->binary.op == BINARY_NEQ) {
                         instruction_float_movd(context, MOVE_TO_MEM, left_reg, place, single);
                         instruction_integer_imm(context, INTEGER_AND, place, 1, 1);
                     } else {
-                        Condition cond = find_condition_for_op_and_type(expr->binary.op, false);
+                        switch (expr->binary.op) {
+                            case BINARY_GT:   cond = COND_A;  invert = false; break;
+                            case BINARY_GTEQ: cond = COND_AE; invert = false; break;
+                            case BINARY_LT:   cond = COND_AE; invert = true;  break;
+                            case BINARY_LTEQ: cond = COND_A;  invert = true;  break;
+                        }
+
                         instruction_setcc(context, cond, place);
                     }
 
                     assert(return_left_to_place);
                     return_left_to_place = false;
+                } else {
+                    int instruction;
+                    switch (expr->binary.op) {
+                        case BINARY_ADD:  instruction = FLOAT_ADD; break;
+                        case BINARY_SUB:  instruction = FLOAT_SUB; break;
+                        case BINARY_MUL:  instruction = FLOAT_MUL; break;
+                        case BINARY_DIV:  instruction = FLOAT_DIV; break;
+                        case BINARY_MOD:  assert(false); break;
+                        default: assert(false);
+                    }
+
+                    instruction_float(context, instruction, left_reg, right_place, single);
                 }
 
                 register_allocator_leave_frame(context, reg_allocator);
