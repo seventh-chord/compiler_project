@@ -225,8 +225,8 @@ enum Type_Kind (u8) { // We rely on this enum being one byte large!
 }
 
 // NB Don't change the definition of this struct. It's exact definition is depended
-// upon in 'machinecode_for_expr', when generating code for 'EXPR_STRING_LITERAL' and
-// 'EXPR_SUBSCRIPT'.
+// upon in 'machinecode_for_expr', when generating code for 'EXPR_STRING_LITERAL',
+// 'EXPR_SUBSCRIPT' and 'EXPR_ENUM_MEMBER_NAME'.
 struct String {
     data: *u8;
     length: i64;
@@ -1882,8 +1882,8 @@ void init_keyword_names(Context* context) {
     #undef add_keyword
 }
 
-Condition find_condition_for_op_and_type(Binary_Op op, Type_Kind type) {
-    if (primitive_is_signed(type)) {
+Condition find_condition_for_op_and_type(Binary_Op op, bool is_signed) {
+    if (is_signed) {
         switch (op) {
             case BINARY_EQ:   return COND_E;
             case BINARY_NEQ:  return COND_NE;
@@ -1899,8 +1899,8 @@ Condition find_condition_for_op_and_type(Binary_Op op, Type_Kind type) {
             case BINARY_NEQ:  return COND_NE;
             case BINARY_GT:   return COND_A;
             case BINARY_GTEQ: return COND_AE;
-            case BINARY_LT:   return COND_L;
-            case BINARY_LTEQ: return COND_LE;
+            case BINARY_LT:   return COND_B;
+            case BINARY_LTEQ: return COND_BE;
             default: assert(false);
         }
     }
@@ -5686,6 +5686,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
                     if (primitive_is_float(to_primitive)) {
                         expr->type = solidify_to;
+                        strong = true;
                     } else {
                         expr->type = &info->context->primitive_types[TYPE_DEFAULT_FLOAT];
                     }
@@ -6325,7 +6326,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
             if (!type_can_assign(right_type, left_type)) {
                 print_file_pos(&stmt->pos);
-                printf("Types on left and right side of assignment don't match: ");
+                printf("Types in assignment don't match: ");
                 print_type(info->context, left_type);
                 printf(" vs ");
                 print_type(info->context, right_type);
@@ -8099,6 +8100,27 @@ void instruction_mov_reg_mem(Context *context, Move_Mode mode, X64_Address mem, 
     #endif
 }
 
+void instruction_mov_reg_reg(Context *context, Register src, Register dst, u8 op_size) {
+    assert(is_gpr(src) && is_gpr(dst));
+
+    u8 opcode = 0x89;
+    u8 rex = REX_BASE;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_modrm(context, rex, opcode, x64_place_reg(dst), src);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov %s, %s\n", register_name(dst, op_size), register_name(src, op_size));
+    #endif
+}
+
 void instruction_movzx(Context *context, X64_Place src, Register dst, u8 src_size, u8 dst_size) {
     assert(is_gpr(dst));
 
@@ -8128,27 +8150,6 @@ void instruction_movzx(Context *context, X64_Place src, Register dst, u8 src_siz
     printf("movzx %s, ", register_name(dst, dst_size));
     print_x64_place(src, src_size);
     printf("\n");
-    #endif
-}
-
-void instruction_mov_reg_reg(Context *context, Register src, Register dst, u8 op_size) {
-    assert(is_gpr(src) && is_gpr(dst));
-
-    u8 opcode = 0x89;
-    u8 rex = REX_BASE;
-
-    switch (op_size) {
-        case 1: opcode -= 1; break;
-        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
-        case 4: break;
-        case 8: rex |= REX_W; break;
-        default: assert(false);
-    }
-
-    encode_instruction_modrm(context, rex, opcode, x64_place_reg(dst), src);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov %s, %s\n", register_name(dst, op_size), register_name(src, op_size));
     #endif
 }
 
@@ -8226,10 +8227,20 @@ void instruction_mov_imm_reg(Context *context, Register reg, u64 immediate, u8 o
 
 enum {
     INTEGER_ADD,
+    INTEGER_AND,
     INTEGER_SUB,
     INTEGER_XOR,
-    //INTEGER_AND,
-    //INTEGER_OR,
+    INTEGER_OR,
+
+    INTEGER_INSTRUCTION_COUNT,
+};
+
+u8 *INTEGER_INSTRUCTION_NAMES[INTEGER_INSTRUCTION_COUNT] = {
+    [INTEGER_ADD] = "add",
+    [INTEGER_AND] = "and",
+    [INTEGER_SUB] = "sub",
+    [INTEGER_XOR] = "xor",
+    [INTEGER_OR]  = "or",
 };
 
 void instruction_integer(Context *context, int instruction, Move_Mode mode, Register reg, X64_Place place, u8 op_size) {
@@ -8239,6 +8250,8 @@ void instruction_integer(Context *context, int instruction, Move_Mode mode, Regi
     u8 opcode;
     switch (instruction) {
         case INTEGER_ADD: opcode = (mode == MOVE_FROM_MEM)? 0x03 : 0x01; break;
+        case INTEGER_AND: opcode = (mode == MOVE_FROM_MEM)? 0x23 : 0x21; break;
+        case INTEGER_OR:  opcode = (mode == MOVE_FROM_MEM)? 0x0b : 0x09; break;
         case INTEGER_SUB: opcode = (mode == MOVE_FROM_MEM)? 0x2b : 0x29; break;
         case INTEGER_XOR: opcode = (mode == MOVE_FROM_MEM)? 0x33 : 0x31; break;
         default: assert(false);
@@ -8257,13 +8270,7 @@ void instruction_integer(Context *context, int instruction, Move_Mode mode, Regi
     encode_instruction_modrm(context, rex, opcode, place, reg);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    switch (instruction) {
-        case INTEGER_ADD: printf("add "); break;
-        case INTEGER_SUB: printf("sub "); break;
-        case INTEGER_XOR: printf("xor "); break;
-        default: assert(false);
-    }
-
+    printf("%s ", INTEGER_INSTRUCTION_NAMES[instruction]);
     if (mode == MOVE_FROM_MEM) {
         printf("%s, ", register_name(reg, op_size));
         print_x64_place(place, op_size);
@@ -8275,8 +8282,8 @@ void instruction_integer(Context *context, int instruction, Move_Mode mode, Regi
     #endif
 }
 
-void instruction_integer_imm(Context *context, int instruction, Register reg, u64 value, u8 op_size) {
-    assert(is_gpr(reg));
+void instruction_integer_imm(Context *context, int instruction, X64_Place place, u64 value, u8 op_size) {
+    if (place.kind == PLACE_REGISTER) assert(is_gpr(place.reg));
 
     u8 rex = REX_BASE;
     u8 opcode = 0x81;
@@ -8284,6 +8291,8 @@ void instruction_integer_imm(Context *context, int instruction, Register reg, u6
     Register opcode_extension;
     switch (instruction) {
         case INTEGER_ADD: opcode_extension = REGISTER_OPCODE_0; break;
+        case INTEGER_OR:  opcode_extension = REGISTER_OPCODE_1; break;
+        case INTEGER_AND: opcode_extension = REGISTER_OPCODE_4; break;
         case INTEGER_SUB: opcode_extension = REGISTER_OPCODE_5; break;
         case INTEGER_XOR: opcode_extension = REGISTER_OPCODE_6; break;
         default: assert(false);
@@ -8307,18 +8316,13 @@ void instruction_integer_imm(Context *context, int instruction, Register reg, u6
         imm_size = 1;
     }
 
-    encode_instruction_modrm(context, rex, opcode, x64_place_reg(reg), opcode_extension);
+    encode_instruction_modrm(context, rex, opcode, place, opcode_extension);
     str_push_integer(&context->seg_text, imm_size, value);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8 *name;
-    switch (instruction) {
-        case INTEGER_ADD: name = "add"; break;
-        case INTEGER_SUB: name = "sub"; break;
-        case INTEGER_XOR: name = "xor"; break;
-        default: assert(false);
-    }
-    printf("%s %s, %u\n", name, register_name(reg, op_size), value);
+    printf("%s ", INTEGER_INSTRUCTION_NAMES[instruction]);
+    print_x64_place(place, op_size);
+    printf(", %u\n", value);
     #endif
 }
 
@@ -8399,6 +8403,15 @@ enum {
     FLOAT_DIV,
     FLOAT_MOV,
     FLOAT_MOV_REVERSE,
+    
+    FLOAT_COMI, // Compares and sets flags, similar to cmp. NB different from CMPSS, which doesn't set flags
+    FLOAT_UCOMI, // Same as COMI, but doesn't raise exceptions for QNaNs.
+    // NB gcc and msvc use UCOMI for equality comparasions (== !=), but not for ordered comparasions (> < >= <=),
+    // meaning equality comparasions will process QNaNs (but return false), while ordered comparasions will fail
+    // on any NaNs.
+
+    FLOAT_CMPEQ,
+    FLOAT_CMPNEQ,
 
     // NB There is no scalar version of XOR (because XOR is for integers, and non-packed integer math is not in sse)
     // As a result, there is also no single/double-precision version of this instruction.
@@ -8415,6 +8428,10 @@ u32 FLOAT_SINGLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = 0x5e0ff3,
     [FLOAT_MOV] = 0x100ff3,
     [FLOAT_MOV_REVERSE] = 0x110ff3,
+    [FLOAT_COMI] = 0x2f0f,
+    [FLOAT_UCOMI] = 0x2e0f,
+    [FLOAT_CMPEQ] = 0xc20ff3,
+    [FLOAT_CMPNEQ] = 0xc20ff3,
     [FLOAT_XOR_PACKED] = 0xef0f66,
 };
 u32 FLOAT_DOUBLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
@@ -8424,6 +8441,10 @@ u32 FLOAT_DOUBLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = 0x5e0ff2,
     [FLOAT_MOV] = 0x100ff2,
     [FLOAT_MOV_REVERSE] = 0x110ff2,
+    [FLOAT_COMI] = 0x2f0f66,
+    [FLOAT_UCOMI] = 0x2e0f66,
+    [FLOAT_CMPEQ] = 0xc20ff2,
+    [FLOAT_CMPNEQ] = 0xc20ff2,
     [FLOAT_XOR_PACKED] = 0xef0f66,
 };
 u8 *FLOAT_SINGLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
@@ -8433,6 +8454,10 @@ u8 *FLOAT_SINGLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = "divss",
     [FLOAT_MOV] = "movss",
     [FLOAT_MOV_REVERSE] = "movss",
+    [FLOAT_COMI] = "comiss",
+    [FLOAT_UCOMI] = "ucomiss",
+    [FLOAT_CMPEQ] = "cmpeqss",
+    [FLOAT_CMPNEQ] = "cmpneqss",
     [FLOAT_XOR_PACKED] = "pxor",
 };
 u8 *FLOAT_DOUBLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
@@ -8442,7 +8467,15 @@ u8 *FLOAT_DOUBLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_DIV] = "divsd",
     [FLOAT_MOV] = "movsd",
     [FLOAT_MOV_REVERSE] = "movsd",
+    [FLOAT_COMI] = "comisd",
+    [FLOAT_UCOMI] = "ucomisd",
+    [FLOAT_CMPEQ] = "cmpeqsd",
+    [FLOAT_CMPNEQ] = "cmpneqsd",
     [FLOAT_XOR_PACKED] = "pxor",
+};
+u8 FLOAT_REQUIRED_IMMEDIATE[FLOAT_INSTRUCTION_COUNT] = {
+    [FLOAT_CMPEQ] = 0x08,
+    [FLOAT_CMPNEQ] = 0x0c,
 };
 
 void instruction_float(Context *context, int instruction, Register dst, X64_Place src, bool single) {
@@ -8451,6 +8484,11 @@ void instruction_float(Context *context, int instruction, Register dst, X64_Plac
 
     u32 opcode = single? FLOAT_SINGLE_OPCODES[instruction] : FLOAT_DOUBLE_OPCODES[instruction];
     encode_instruction_modrm(context, REX_BASE, opcode, src, dst);
+
+    u8 required_immediate = FLOAT_REQUIRED_IMMEDIATE[instruction];
+    if (required_immediate != 0) {
+        buf_push(context->seg_text, required_immediate);
+    }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8 *name = single? FLOAT_SINGLE_NAMES[instruction] : FLOAT_DOUBLE_NAMES[instruction];
@@ -8467,9 +8505,32 @@ void instruction_float(Context *context, int instruction, Register dst, X64_Plac
     #endif
 }
 
-/*
-PXOR xmm1, xmm2/mem128 
+// Moves between xmm registers and gpr registers or memory
+void instruction_float_movd(Context *context, Move_Mode mode, Register xmm, X64_Place gpr, bool single) {
+    assert(is_xmm(xmm));
+    if (gpr.kind == PLACE_REGISTER) assert(is_gpr(gpr.reg));
 
+    buf_push(context->seg_text, WORD_OPERAND_PREFIX);
+
+    u32 opcode = mode == MOVE_FROM_MEM? 0x6e0f : 0x7e0f;
+    u8 rex = single? (REX_BASE) : (REX_BASE | REX_W);
+    encode_instruction_modrm(context, rex, opcode, gpr, xmm);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    u8 op_size = single? 4 : 8;
+    if (mode == MOVE_FROM_MEM) {
+        printf("movd %s, ", register_name(xmm, op_size));
+        print_x64_place(gpr, op_size);
+        printf("\n");
+    } else {
+        printf("movd ");
+        print_x64_place(gpr, op_size);
+        printf(", %s\n", register_name(xmm, op_size));
+    }
+    #endif
+}
+
+/*
 CVTSS2SD xmm1, xmm2/mem32  F3 0F 5A /r       f32 to f64
 CVTSD2SS xmm1, xmm2/mem64  F2 0F 5A /r       f64 to f32
 CVTSS2SI reg32, xmm1/mem32 F3 0F 2D /r       f32 to i32/i64      (use REX.W)
@@ -8557,7 +8618,9 @@ X64_Address register_allocator_temp_stack_space(Reg_Allocator *allocator, u64 si
     return address;
 }
 
-Register register_allocate(Reg_Allocator *allocator, Register_Kind kind, bool dont_rax) {
+// Allocate a register, but don't mark it as allocated so we don' need to push/pop a frame.
+// Should only be used in leaf code.
+Register register_allocate_temp(Reg_Allocator *allocator, Register_Kind kind, bool dont_rax) {
     Register start, end;
     switch (kind) {
         case REGISTER_KIND_GPR: { start = RAX;  end = R15;   } break;
@@ -8569,14 +8632,20 @@ Register register_allocate(Reg_Allocator *allocator, Register_Kind kind, bool do
         if (reg == RAX && dont_rax) continue;
 
         if (!allocator->head->states[reg].allocated) {
-            allocator->head->states[reg].allocated = true;
             allocator->touched_registers[reg] = true;
             return reg;
         }
     }
 
-    panic("Out of registers to allocate\n");
+    // TODO flush another register and allocate that
+    panic("Out of registers\n");
     return REGISTER_NONE;
+}
+
+Register register_allocate(Reg_Allocator *allocator, Register_Kind kind, bool dont_rax) {
+    Register reg = register_allocate_temp(allocator, kind, dont_rax);
+    allocator->head->states[reg].allocated = true;
+    return reg;
 }
 
 void register_allocate_specific(Context *context, Reg_Allocator *allocator, Register reg) {
@@ -8599,64 +8668,6 @@ bool register_is_allocated(Reg_Allocator *allocator, Register reg) {
     return allocator->head->states[reg].allocated;
 }
 
-
-void machinecode_immediate_to_place(Context *context, X64_Place place, u64 immediate, u8 bytes) {
-    switch (place.kind) {
-        case PLACE_REGISTER: instruction_mov_imm_reg(context, place.reg, immediate, bytes); break;
-        case PLACE_ADDRESS:  instruction_mov_imm_mem(context, place.address, immediate, bytes); break;
-
-        case PLACE_NOWHERE: assert(false);
-        default: assert(false);
-    }
-}
-
-void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind to) {
-    u8 from_size = primitive_size_of(from);
-    u8 to_size = primitive_size_of(to);
-
-    if (from == TYPE_POINTER && to == TYPE_POINTER) {
-        // This is a no-op
-    } else if (primitive_is_float(from) || primitive_is_float(to)) {
-        unimplemented(); // TODO floating point casts
-    } else {
-        // Zero-extend or sign-extendto correct width, if needed
-        
-        bool word_prefix = false;
-        bool rex_w = false;
-        u32 opcode = 0;
-
-        bool sign_extend = primitive_is_signed(from);
-
-        #define CASE(a, b) if(from_size == a && to_size == b)
-        if (sign_extend) {
-            CASE(1, 2) { opcode = 0xbe0f; rex_w = false; word_prefix = true;  }
-            CASE(1, 4) { opcode = 0xbe0f; rex_w = false; word_prefix = false; }
-            CASE(1, 8) { opcode = 0xbe0f; rex_w = true;  word_prefix = false; }
-            CASE(2, 4) { opcode = 0xbf0f; rex_w = false; word_prefix = false; }
-            CASE(2, 8) { opcode = 0xbf0f; rex_w = true;  word_prefix = false; }
-            CASE(4, 8) { opcode = 0x63;   rex_w = true;  word_prefix = false; }
-        } else {
-            CASE(1, 2) { opcode = 0xb60f; rex_w = false; word_prefix = true;  }
-            CASE(1, 4) { opcode = 0xb60f; rex_w = false; word_prefix = false; }
-            CASE(1, 8) { opcode = 0xb60f; rex_w = true;  word_prefix = false; }
-            CASE(2, 4) { opcode = 0xb70f; rex_w = false; word_prefix = false; }
-            CASE(2, 8) { opcode = 0xb70f; rex_w = true;  word_prefix = false; }
-        }
-        #undef CASE
-
-        if (opcode != 0) {
-            if (word_prefix) {
-                buf_push(context->seg_text, WORD_OPERAND_PREFIX);
-            }
-
-            encode_instruction_modrm(context, rex_w? (REX_BASE | REX_W) : REX_BASE, opcode, x64_place_reg(reg), reg);
-
-            #ifdef PRINT_GENERATED_INSTRUCTIONS
-            printf("%s %s, %s\n", sign_extend? "movsx" : "movzx", register_name(reg, to_size), register_name(reg, from_size));
-            #endif
-        }
-    }
-}
 
 void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place src, X64_Place dst, u64 size) {
     assert(src.kind != PLACE_NOWHERE && dst.kind != PLACE_NOWHERE);
@@ -8692,9 +8703,13 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
                 instruction_float(context, FLOAT_MOV, dst.reg, src, size == 4);
             }
         } else if (src.kind == PLACE_REGISTER && dst.kind == PLACE_REGISTER) {
-            if (is_gpr(dst.reg)) {
+            if (is_gpr(src.reg) && is_gpr(dst.reg)) {
                 instruction_mov_reg_reg(context, src.reg, dst.reg, (u8) size);
-            } else if (is_xmm(dst.reg)) {
+            } else if (is_gpr(src.reg) && is_xmm(dst.reg)) {
+                instruction_float_movd(context, MOVE_FROM_MEM, dst.reg, src, size == 4);
+            } else if (is_xmm(src.reg) && is_gpr(dst.reg)) {
+                instruction_float_movd(context, MOVE_TO_MEM, src.reg, dst, size == 4);
+            } else if (is_xmm(src.reg) && is_xmm(dst.reg)) {
                 instruction_float(context, FLOAT_MOV, dst.reg, src, size == 4);
             }
         } else {
@@ -8757,6 +8772,77 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
 
         instruction_call(context, true, RUNTIME_BUILTIN_MEM_COPY);
         register_allocator_leave_frame(context, reg_allocator);
+    }
+}
+
+void machinecode_immediate_to_place(Context *context, Reg_Allocator *reg_allocator, X64_Place place, u64 immediate, u8 bytes) {
+    switch (place.kind) {
+        case PLACE_REGISTER: {
+            if (is_gpr(place.reg)) {
+                instruction_mov_imm_reg(context, place.reg, immediate, bytes);
+            } else if (is_xmm(place.reg)) {
+                Register temp_reg = register_allocate_temp(reg_allocator, REGISTER_KIND_GPR, false);
+                instruction_mov_imm_reg(context, temp_reg, immediate, bytes);
+                machinecode_move(context, reg_allocator, x64_place_reg(temp_reg), place, bytes);
+            } else {
+                assert(false);
+            }
+        } break;
+
+        case PLACE_ADDRESS: {
+            instruction_mov_imm_mem(context, place.address, immediate, bytes);
+        } break;
+
+        case PLACE_NOWHERE: assert(false);
+        default: assert(false);
+    }
+}
+
+void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind to) {
+    u8 from_size = primitive_size_of(from);
+    u8 to_size = primitive_size_of(to);
+
+    if (from == TYPE_POINTER && to == TYPE_POINTER) {
+        // This is a no-op
+    } else if (primitive_is_float(from) || primitive_is_float(to)) {
+        unimplemented(); // TODO floating point casts
+    } else {
+        // Zero-extend or sign-extendto correct width, if needed
+        
+        bool word_prefix = false;
+        bool rex_w = false;
+        u32 opcode = 0;
+
+        bool sign_extend = primitive_is_signed(from);
+
+        #define CASE(a, b) if(from_size == a && to_size == b)
+        if (sign_extend) {
+            CASE(1, 2) { opcode = 0xbe0f; rex_w = false; word_prefix = true;  }
+            CASE(1, 4) { opcode = 0xbe0f; rex_w = false; word_prefix = false; }
+            CASE(1, 8) { opcode = 0xbe0f; rex_w = true;  word_prefix = false; }
+            CASE(2, 4) { opcode = 0xbf0f; rex_w = false; word_prefix = false; }
+            CASE(2, 8) { opcode = 0xbf0f; rex_w = true;  word_prefix = false; }
+            CASE(4, 8) { opcode = 0x63;   rex_w = true;  word_prefix = false; }
+        } else {
+            CASE(1, 2) { opcode = 0xb60f; rex_w = false; word_prefix = true;  }
+            CASE(1, 4) { opcode = 0xb60f; rex_w = false; word_prefix = false; }
+            CASE(1, 8) { opcode = 0xb60f; rex_w = true;  word_prefix = false; }
+            CASE(2, 4) { opcode = 0xb70f; rex_w = false; word_prefix = false; }
+            CASE(2, 8) { opcode = 0xb70f; rex_w = true;  word_prefix = false; }
+        }
+        #undef CASE
+
+        if (opcode != 0) {
+            if (word_prefix) {
+                buf_push(context->seg_text, WORD_OPERAND_PREFIX);
+            }
+
+            encode_instruction_modrm(context, rex_w? (REX_BASE | REX_W) : REX_BASE, opcode, x64_place_reg(reg), reg);
+
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            printf("%s %s, %s\n", sign_extend? "movsx" : "movzx", register_name(reg, to_size), register_name(reg, from_size));
+            #endif
+        }
     }
 }
 
@@ -8965,7 +9051,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             u64 size = type_size_of(expr->type);
             assert(size <= 8);
-            machinecode_immediate_to_place(context, place, expr->literal.masked_value, (u8) size);
+            machinecode_immediate_to_place(context, reg_allocator, place, expr->literal.masked_value, (u8) size);
         } break;
 
         case EXPR_STRING_LITERAL: {
@@ -9062,36 +9148,28 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 return;
             }
 
-            Register_Kind reg_kind = primitive_is_float(primitive_of(expr->binary.left->type))? REGISTER_KIND_XMM : REGISTER_KIND_GPR;
-
-            Register left_reg = REGISTER_NONE;
-            if (place.kind == PLACE_ADDRESS) {
-                register_allocator_enter_frame(context, reg_allocator);
-                bool reserve_rax_for_rhs = machinecode_expr_needs_rax(expr->binary.right);
-                left_reg = register_allocate(reg_allocator, reg_kind, reserve_rax_for_rhs);
-            } else {
-                left_reg = place.reg;
-            }
-
-            machinecode_for_expr(context, func, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
-
-            register_allocator_enter_frame(context, reg_allocator);
-
-            bool reserve_rax_for_result = expr->binary.op == BINARY_MUL || expr->binary.op == BINARY_DIV || expr->binary.op == BINARY_MOD;
-            Register right_reg;
-            if (expr->binary.op == BINARY_DIV || expr->binary.op == BINARY_MOD) {
-                // NB NB This is a nasty hack to avoid allocating RDX, because it is used in addition with RAX when doing div/idiv
-                bool rdx_was_allocated = reg_allocator->head->states[RDX].allocated;
-                reg_allocator->head->states[RDX].allocated = true;
-                right_reg = register_allocate(reg_allocator, reg_kind, reserve_rax_for_result);
-                reg_allocator->head->states[RDX].allocated = rdx_was_allocated;
-            } else {
-                right_reg = register_allocate(reg_allocator, reg_kind, reserve_rax_for_result);
-            }
-
-            machinecode_for_expr(context, func, expr->binary.right, reg_allocator, x64_place_reg(right_reg));
-
             if (primitive_is_float(expr->binary.left->type->kind)) {
+                register_allocator_enter_frame(context, reg_allocator);
+
+                bool return_left_to_place = place.kind == PLACE_ADDRESS || (place.kind == PLACE_REGISTER && !is_xmm(place.reg));
+                Register left_reg;
+                if (return_left_to_place) {
+                    left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                } else {
+                    left_reg = place.reg;
+                }
+                machinecode_for_expr(context, func, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
+
+                register_allocator_enter_frame(context, reg_allocator);
+                X64_Place right_place;
+                if (expr->binary.right->flags & EXPR_FLAG_ASSIGNABLE) {
+                    right_place = machinecode_for_assignable_expr(context, func, expr->binary.right, reg_allocator, false);
+                } else {
+                    Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                    right_place = x64_place_reg(right_reg);
+                    machinecode_for_expr(context, func, expr->binary.right, reg_allocator, right_place);
+                }
+
                 Type_Kind primitive = expr->binary.left->type->kind;
                 bool single;
                 if (primitive == TYPE_F32) {
@@ -9109,17 +9187,64 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     case BINARY_MUL:  instruction = FLOAT_MUL; break;
                     case BINARY_DIV:  instruction = FLOAT_DIV; break;
                     case BINARY_MOD:  assert(false); break;
-                    case BINARY_EQ:   unimplemented(); break;
-                    case BINARY_NEQ:  unimplemented(); break;
-                    case BINARY_GT:   unimplemented(); break;
-                    case BINARY_GTEQ: unimplemented(); break;
-                    case BINARY_LT:   unimplemented(); break;
-                    case BINARY_LTEQ: unimplemented(); break;
+                    case BINARY_EQ:   instruction = FLOAT_CMPEQ; break;
+                    case BINARY_NEQ:  instruction = FLOAT_CMPNEQ; break;
+                    case BINARY_GT:   instruction = FLOAT_COMI; break;
+                    case BINARY_GTEQ: instruction = FLOAT_COMI; break;
+                    case BINARY_LT:   instruction = FLOAT_COMI; break;
+                    case BINARY_LTEQ: instruction = FLOAT_COMI; break;
                     default: assert(false);
                 }
 
-                instruction_float(context, instruction, left_reg, x64_place_reg(right_reg), single);
+                instruction_float(context, instruction, left_reg, right_place, single);
+
+                if (BINARY_OP_COMPARATIVE[expr->binary.op]) {
+                    if (expr->binary.op == BINARY_EQ || expr->binary.op == BINARY_NEQ) {
+                        instruction_float_movd(context, MOVE_TO_MEM, left_reg, place, single);
+                        instruction_integer_imm(context, INTEGER_AND, place, 1, 1);
+                    } else {
+                        Condition cond = find_condition_for_op_and_type(expr->binary.op, false);
+                        instruction_setcc(context, cond, place);
+                    }
+
+                    assert(return_left_to_place);
+                    return_left_to_place = false;
+                }
+
+                register_allocator_leave_frame(context, reg_allocator);
+
+                if (return_left_to_place) {
+                    machinecode_move(context, reg_allocator, x64_place_reg(left_reg), place, single? 4 : 8);
+                }
+                register_allocator_leave_frame(context, reg_allocator);
             } else {
+                Register left_reg = REGISTER_NONE;
+                if (place.kind == PLACE_ADDRESS) {
+                    register_allocator_enter_frame(context, reg_allocator);
+                    bool reserve_rax_for_rhs = machinecode_expr_needs_rax(expr->binary.right);
+                    left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax_for_rhs);
+                } else {
+                    left_reg = place.reg;
+                }
+
+                machinecode_for_expr(context, func, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
+
+                register_allocator_enter_frame(context, reg_allocator);
+
+                bool reserve_rax_for_result = expr->binary.op == BINARY_MUL || expr->binary.op == BINARY_DIV || expr->binary.op == BINARY_MOD;
+                Register right_reg;
+                if (expr->binary.op == BINARY_DIV || expr->binary.op == BINARY_MOD) {
+                    // NB NB This is a nasty hack to avoid allocating RDX, because it is used in addition with RAX when doing div/idiv
+                    bool rdx_was_allocated = reg_allocator->head->states[RDX].allocated;
+                    reg_allocator->head->states[RDX].allocated = true;
+                    right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax_for_result);
+                    reg_allocator->head->states[RDX].allocated = rdx_was_allocated;
+                } else {
+                    right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax_for_result);
+                }
+
+                machinecode_for_expr(context, func, expr->binary.right, reg_allocator, x64_place_reg(right_reg));
+
                 switch (expr->binary.op) {
                     case BINARY_ADD:
                     case BINARY_SUB:
@@ -9214,7 +9339,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         Type_Kind primitive = primitive_of(expr->binary.left->type);
 
                         u8 inner_size = primitive_size_of(primitive);
-                        Condition condition = find_condition_for_op_and_type(expr->binary.op, primitive);
+                        Condition condition = find_condition_for_op_and_type(expr->binary.op, primitive_is_signed(primitive));
 
                         instruction_cmp(context, x64_place_reg(left_reg), right_reg, inner_size);
                         instruction_setcc(context, condition, x64_place_reg(left_reg));
@@ -9222,15 +9347,15 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                     default: assert(false);
                 }
-            }
 
-            register_allocator_leave_frame(context, reg_allocator);
-
-            if (place.kind == PLACE_ADDRESS) {
-                u64 size = type_size_of(expr->type);
-                assert(size <= 8);
-                machinecode_move(context, reg_allocator, x64_place_reg(left_reg), place, (u8) size);
                 register_allocator_leave_frame(context, reg_allocator);
+
+                if (place.kind == PLACE_ADDRESS) {
+                    u64 size = type_size_of(expr->type);
+                    assert(size <= 8);
+                    machinecode_move(context, reg_allocator, x64_place_reg(left_reg), place, (u8) size);
+                    register_allocator_leave_frame(context, reg_allocator);
+                }
             }
         } break;
 
@@ -9633,21 +9758,21 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             u64 member_value = type->enumeration.members[member_index].value;
             u8 size = primitive_size_of(type->enumeration.value_primitive);
 
-            machinecode_immediate_to_place(context, place, member_value, size);
+            machinecode_immediate_to_place(context, reg_allocator, place, member_value, size);
         } break;
 
         case EXPR_TYPE_INFO_OF_TYPE: {
             if (place.kind == PLACE_NOWHERE) return;
 
             Type_Kind primitive = expr->type_info_of_type->kind;
-            machinecode_immediate_to_place(context, place, (u64) primitive, 1);
+            machinecode_immediate_to_place(context, reg_allocator, place, (u64) primitive, 1);
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
             if (place.kind == PLACE_NOWHERE) return;
 
             Type_Kind primitive = expr->type_info_of_value->type->kind;
-            machinecode_immediate_to_place(context, place, (u64) primitive, 1);
+            machinecode_immediate_to_place(context, reg_allocator, place, (u64) primitive, 1);
         } break;
 
         case EXPR_ENUM_LENGTH: {
@@ -9660,7 +9785,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 length = max(value + 1, length);
             }
 
-            machinecode_immediate_to_place(context, place, length, primitive_size_of(TYPE_DEFAULT_INT));
+            machinecode_immediate_to_place(context, reg_allocator, place, length, primitive_size_of(TYPE_DEFAULT_INT));
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
@@ -9703,7 +9828,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = enum_type->enumeration.name_table_invalid_offset }, pointer_reg);
                 u64 jmp_to = buf_length(context->seg_text);
                 instruction_movzx(context, x64_place_address((X64_Address) { .base = pointer_reg }), member_reg, 2, POINTER_SIZE);
-                instruction_integer_imm(context, INTEGER_ADD, pointer_reg, 2, POINTER_SIZE);
+                instruction_integer_imm(context, INTEGER_ADD, x64_place_reg(pointer_reg), 2, POINTER_SIZE);
 
                 assert(place.kind == PLACE_ADDRESS);
                 X64_Address address = place.address;
@@ -9729,7 +9854,7 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
         Type_Kind primitive = primitive_of(left->type);
         u8 primitive_size = primitive_size_of(primitive);
 
-        condition = find_condition_for_op_and_type(expr->binary.op, left->type->kind);
+        condition = find_condition_for_op_and_type(expr->binary.op, primitive_is_signed(left->type->kind));
 
         if (primitive_is_float(primitive)) {
             unimplemented(); // TODO what are the floating point instructions for comparasions?
@@ -9811,7 +9936,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
                     register_allocator_leave_frame(context, reg_allocator);
                 } else {
-                    machinecode_immediate_to_place(context, x64_place_address(address), 0, (u8) size);
+                    machinecode_immediate_to_place(context, reg_allocator, x64_place_address(address), 0, (u8) size);
                 }
             } else {
                 machinecode_for_expr(context, func, stmt->declaration.right, reg_allocator, x64_place_address(address));
@@ -10234,7 +10359,7 @@ void build_machinecode(Context *context) {
         }
 
         if (total_stack_bytes > 0) {
-            instruction_integer_imm(context, INTEGER_ADD, RSP, total_stack_bytes, POINTER_SIZE);
+            instruction_integer_imm(context, INTEGER_ADD, x64_place_reg(RSP), total_stack_bytes, POINTER_SIZE);
         }
 
         if (!func->signature.has_return) {
@@ -10253,7 +10378,7 @@ void build_machinecode(Context *context) {
             #endif
 
             if (total_stack_bytes > 0) {
-                instruction_integer_imm(context, INTEGER_SUB, RSP, total_stack_bytes, POINTER_SIZE);
+                instruction_integer_imm(context, INTEGER_SUB, x64_place_reg(RSP), total_stack_bytes, POINTER_SIZE);
             }
 
             X64_Address save_address = preserved_reg_address;

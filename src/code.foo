@@ -470,6 +470,7 @@ Language features
     maybe a better parser for floats? The current one is pretty accurate for f32 at least though
     structure definitions inside functiosn
     casts from/to bool
+    can we toggle fp exceptions? Should we expose that?
 
 Compiler functionality
     stack unwinding - so we can produce a stack trace on e.g. assert

@@ -316,12 +316,18 @@ fn floating_away() {
     c = a / b;
 
     c = -c;
+    assert(c == -2.0, "Oops we sank\n");
+    assert(c < -1.0, "Oops we sank again\n");
+    assert(c > -3.0, "Oops we sank a third time\n");
+
+    assert(c == --c, "Slightly funky, but come on\n");
 
     /*
-    assert(c == 2.0, "Oops we sank\n");
-    assert(c > 1.0, "Oops we sank again\n");
-    assert(c < 3.0, "Oops we sank a third time\n");
+    if (c == -2.0) {}
+    if (c >= -3.0) {}
+    */
 
+    /*
     let d = flow(1, 1.0, 1, 1.0);
     assert(d == 4.0, "Oops we sank\n");
     */
