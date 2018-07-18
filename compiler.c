@@ -9208,6 +9208,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                             instruction_float(context, instruction, right_place.reg, x64_place_reg(left_reg), single);
                         } else if (right_place.kind == PLACE_ADDRESS) {
                             Register temp_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                            instruction_float(context, FLOAT_MOV, temp_reg, right_place, single);
                             instruction_float(context, instruction, temp_reg, x64_place_reg(left_reg), single);
                             left_reg = temp_reg;
                         } else {
@@ -9221,13 +9222,6 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         instruction_float_movd(context, MOVE_TO_MEM, left_reg, place, single);
                         instruction_integer_imm(context, INTEGER_AND, place, 1, 1);
                     } else {
-                        switch (expr->binary.op) {
-                            case BINARY_GT:   cond = COND_A;  invert = false; break;
-                            case BINARY_GTEQ: cond = COND_AE; invert = false; break;
-                            case BINARY_LT:   cond = COND_AE; invert = true;  break;
-                            case BINARY_LTEQ: cond = COND_A;  invert = true;  break;
-                        }
-
                         instruction_setcc(context, cond, place);
                     }
 
