@@ -325,10 +325,26 @@ fn floating_away() {
     let x = 0.0 / 0.0;
     assert(!(x == x), "Nan nan nan nan nan nan nan nan nan nan, batman!\n");
 
-    /*
-    if (c == -2.0) {}
-    if (c >= -3.0) {}
-    */
+    c = -3.0;
+
+    if (c != -3.0) { assert(false, "False"); }
+    if (c == -2.0) { assert(false, "Pretty untrue"); }
+    if (c < -3.0)  { assert(false, "Very false"); }
+
+    let nan = 0.0 / 0.0;
+    if (nan == nan) { assert(false, "Nan-man"); }
+    if (nan != nan) {} else { assert(false, "Nan-nan-man"); }
+
+    for (nan == nan) {
+        assert(false, "Loops are hosed");
+    }
+
+    let i = 0;
+    for (nan != nan) {
+        i += 1;
+        break;
+    }
+    assert(i == 1, "Loops are hosed, but in a different way");
 
     /*
     let d = flow(1, 1.0, 1, 1.0);

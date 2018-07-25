@@ -178,7 +178,7 @@ AND         Bitwise AND.
 OR          Bitwise OR.
 XOR         Bitwise XOR.
 NOT         Bitwise NOT.
-More bitwise instructions in intel_introduction.pdf, 5.1.16 and 5.1.6
+More bitwise instructions, see intel introduction, 5.1.16 and 5.1.6
 
 SAR         Shift arithmetic right.
 SHR         Shift logical right.
@@ -192,3 +192,70 @@ RCL         Rotate through carry left.
 
 PREFETCHW   Prefetches data into cache, when we anticipate a write.
 CLFLUSH     Flushes and invalidates cache.
+
+
+
+# Some notes on floating point jumps
+
+For unordered values, == should always be false, and != should always be true
+
+UCOMISS truth table
+                 ZF      PF
+    Unordered    1       1
+    Equal        1       0
+
+Jump commands
+    je      ZF=1
+    jne     ZF=0
+    jp      PF=1
+    jnp     PF=0
+
+
+    a == b      ==>       ZF == 1 && PF == 0        ==>     !(ZF == 0 || PF == 1)
+    a != b      ==>     !(ZF == 1 && PF == 0)       ==>       ZF == 0 || PF == 1
+
+
+Using conditional jumps, we can only create 'jump if !(a || b)' directly, meaning we can only
+create the second variant of 'a == b'. Other variants have to be synthesized from more jumps:
+    
+
+Equality:
+    if xmm0 == xmm1 {
+        // foo
+    } else {
+        // bar
+    }
+
+    ==>
+
+        ucommis xmm0, xmm1
+        jne bar
+        jp bar
+    .foo
+        ; ...
+        jmp end
+    .bar
+        ; ...
+    .end
+
+
+
+Inequality:
+    if xmm0 != xmm1 {
+        // foo
+    } else {
+        // bar
+    }
+
+    ==>
+
+        ucommis xmm0, xmm1
+        jne foo
+        jp foo
+        jmp bar
+    .foo
+        ; ...
+        jmp end
+    .bar
+        ; ...
+    .end

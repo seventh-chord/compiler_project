@@ -1600,15 +1600,16 @@ struct Stmt {
 
 
 typedef enum Condition {
+    // Equality
     COND_E, COND_NE,
-
-    // Signed
+    // Signed integers
     COND_G, COND_GE,
     COND_L, COND_LE,
-
-    // Unsigned
+    // Unsignedi integers, floating point
     COND_A, COND_AE,
     COND_B, COND_BE,
+    // Parity
+    COND_P, COND_NP,
 
     COND_COUNT,
 } Condition;
@@ -1637,6 +1638,8 @@ u8* CONDITION_POSTFIXES[COND_COUNT] = {
     [COND_AE]  = "ae",
     [COND_B]   = "b",
     [COND_BE]  = "be",
+    [COND_P]   = "p",
+    [COND_NP]  = "np",
 };
 
 Condition condition_not(Condition c) {
@@ -1651,6 +1654,8 @@ Condition condition_not(Condition c) {
         case COND_AE: return COND_B;
         case COND_B:  return COND_AE;
         case COND_BE: return COND_A;
+        case COND_P:  return COND_NP;
+        case COND_NP: return COND_P;
         default: assert(false); return 0;
     }
 }
@@ -7787,6 +7792,8 @@ u64 instruction_jcc(Context *context, Condition condition, u8 op_size) {
         case COND_AE: opcode = 0x03; break;
         case COND_B:  opcode = 0x02; break;
         case COND_BE: opcode = 0x06; break;
+        case COND_P:  opcode = 0x0a; break;
+        case COND_NP: opcode = 0x0b; break;
         default: assert(false);
     }
 
@@ -7822,6 +7829,8 @@ void instruction_setcc(Context *context, Condition condition, X64_Place place) {
         case COND_AE: opcode = 0x930f; break;
         case COND_B:  opcode = 0x920f; break;
         case COND_BE: opcode = 0x960f; break;
+        case COND_P:  opcode = 0x9a0f; break;
+        case COND_NP: opcode = 0x9b0f; break;
         default: assert(false);
     }
 
@@ -9190,20 +9199,20 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     // to false when we encounter a NaN (Look at the truth-tables for setcc and COMI/COMI).
 
                     Condition cond;
-                    bool invert = false;
+                    bool swap_operands = false;
                     int instruction;
 
                     switch (expr->binary.op) {
                         case BINARY_EQ:   instruction = FLOAT_CMPEQ;  break;
                         case BINARY_NEQ:  instruction = FLOAT_CMPNEQ; break;
-                        case BINARY_GT:   instruction = FLOAT_COMI;   cond = COND_A;  break;
-                        case BINARY_GTEQ: instruction = FLOAT_COMI;   cond = COND_AE; break;
-                        case BINARY_LT:   instruction = FLOAT_COMI;   cond = COND_A;  invert = true; break;
-                        case BINARY_LTEQ: instruction = FLOAT_COMI;   cond = COND_AE; invert = true; break;
+                        case BINARY_GT:   instruction = FLOAT_COMI; cond = COND_A;  break;
+                        case BINARY_GTEQ: instruction = FLOAT_COMI; cond = COND_AE; break;
+                        case BINARY_LT:   instruction = FLOAT_COMI; cond = COND_A;  swap_operands = true; break;
+                        case BINARY_LTEQ: instruction = FLOAT_COMI; cond = COND_AE; swap_operands = true; break;
                         default: assert(false);
                     }
 
-                    if (invert) {
+                    if (swap_operands) {
                         if (right_place.kind == PLACE_REGISTER) {
                             instruction_float(context, instruction, right_place.reg, x64_place_reg(left_reg), single);
                         } else if (right_place.kind == PLACE_ADDRESS) {
@@ -9218,11 +9227,11 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         instruction_float(context, instruction, left_reg, right_place, single);
                     }
 
-                    if (expr->binary.op == BINARY_EQ || expr->binary.op == BINARY_NEQ) {
+                    if (instruction == FLOAT_COMI) {
+                        instruction_setcc(context, cond, place);
+                    } else {
                         instruction_float_movd(context, MOVE_TO_MEM, left_reg, place, single);
                         instruction_integer_imm(context, INTEGER_AND, place, 1, 1);
-                    } else {
-                        instruction_setcc(context, cond, place);
                     }
 
                     assert(return_left_to_place);
@@ -9875,8 +9884,25 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
     }
 }
 
-Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *expr, bool invert, Reg_Allocator *reg_allocator) { 
+
+typedef struct Negated_Jump_Info {
+    u64 first_from;
+    u64 first_text_location;
+
+    u64 second_from;
+    u64 second_text_location;
+} Negated_Jump_Info;
+
+Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator) { 
+    bool invert = true;
+    while (expr->kind == EXPR_UNARY && expr->unary.op == UNARY_NOT) {
+        invert = !invert;
+        expr = expr->unary.inner;
+    }
+
     Condition condition;
+    bool parity_check = false;
+
     if (expr->kind == EXPR_BINARY && BINARY_OP_COMPARATIVE[expr->binary.op]) {
         Expr *left  = expr->binary.left;
         Expr *right = expr->binary.right;
@@ -9884,22 +9910,66 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
         Type_Kind primitive = primitive_of(left->type);
         u8 primitive_size = primitive_size_of(primitive);
 
-        condition = find_condition_for_op_and_type(expr->binary.op, primitive_is_signed(left->type->kind));
 
         if (primitive_is_float(primitive)) {
-            unimplemented(); // TODO what are the floating point instructions for comparasions?
-        } else {
+            bool single;
+            if (primitive == TYPE_F32) {
+                single = true;
+            } else if (primitive == TYPE_F64) {
+                single = false;
+            } else {
+                assert(false);
+            }
+
             register_allocator_enter_frame(context, reg_allocator);
 
-            // TODO We need to special case when both the lhs and the rhs are simple stack loads, so that we 
-            // use one memory operand for the compare in that case.
-            // Also, do a similar check for when one of the sides is a literal
+            Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+            machinecode_for_expr(context, func, left, reg_allocator, x64_place_reg(left_reg));
+
+            Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+            machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
+
+            int instruction;
+            bool swap_operands = false;
+
+            switch (expr->binary.op) {
+                case BINARY_EQ:   instruction = FLOAT_UCOMI; condition = COND_E;  parity_check = true; break;
+                case BINARY_NEQ:  instruction = FLOAT_UCOMI; condition = COND_NE; parity_check = true; break;
+                case BINARY_GT:   instruction = FLOAT_COMI;  condition = COND_B;  swap_operands = true; break;
+                case BINARY_GTEQ: instruction = FLOAT_COMI;  condition = COND_BE; swap_operands = true; break;
+                case BINARY_LT:   instruction = FLOAT_COMI;  condition = COND_B;  break;
+                case BINARY_LTEQ: instruction = FLOAT_COMI;  condition = COND_BE; break;
+                default: assert(false);
+            }
+
+            if (condition == COND_B || condition == COND_BE) {
+                if (invert) {
+                    invert = false;
+                    condition = condition == COND_B? COND_BE : COND_B;
+                    swap_operands = !swap_operands;
+                }
+            }
+
+            if (swap_operands) {
+                instruction_float(context, instruction, right_reg, x64_place_reg(left_reg), single);
+            } else {
+                instruction_float(context, instruction, left_reg, x64_place_reg(right_reg), single);
+            }
+
+            register_allocator_leave_frame(context, reg_allocator);
+        } else {
+            condition = find_condition_for_op_and_type(expr->binary.op, primitive_is_signed(left->type->kind));
+
+            register_allocator_enter_frame(context, reg_allocator);
+
+            // TODO We need to special case when either the lhs and the rhs is a simple stack load, so that we 
+            // use memory operands for the compare instruction in that case. Also, do a similar check for when
+            // one of the sides is a literal
 
             bool reserve_rax_for_rhs = machinecode_expr_needs_rax(right);
 
             Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserve_rax_for_rhs);
-            X64_Place left_place = { .kind = PLACE_REGISTER, .reg = left_reg };
-            machinecode_for_expr(context, func, left, reg_allocator, left_place);
+            machinecode_for_expr(context, func, left, reg_allocator, x64_place_reg(left_reg));
 
             Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
             machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
@@ -9909,11 +9979,6 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
             register_allocator_leave_frame(context, reg_allocator);
         }
     } else {
-        while (expr->kind == EXPR_UNARY && expr->unary.op == UNARY_NOT) {
-            invert = !invert;
-            expr = expr->unary.inner;
-        }
-
         Type_Kind primitive = expr->type->kind;
         u8 primitive_size = primitive_size_of(primitive);
 
@@ -9927,13 +9992,42 @@ Jump_Fixup machinecode_for_conditional_jump(Context *context, Func *func, Expr *
         condition = condition_not(condition);
     }
 
-    u64 jump_distance_text_location = instruction_jcc(context, condition, 4);
-    u64 jump_from = buf_length(context->seg_text);
+    Negated_Jump_Info info = {0};
 
-    Jump_Fixup fixup = {0};
-    fixup.text_location = jump_distance_text_location;
-    fixup.jump_from = jump_from;
-    return fixup;
+    if (parity_check) {
+        if (condition == COND_E) {
+            // jne foo
+            // jp foo
+            // jmp target
+            // .foo
+
+            u64 first_text_location = instruction_jcc(context, COND_NE, sizeof(i8));
+            u64 first_from = buf_length(context->seg_text);
+            u64 second_text_location = instruction_jcc(context, COND_P, sizeof(i8));
+            u64 second_from = buf_length(context->seg_text);
+
+            info.first_text_location = instruction_jmp_i32(context);
+            info.first_from = buf_length(context->seg_text);
+
+            *((i8*) &context->seg_text[first_text_location])  = (i8) (info.first_from - first_from);
+            *((i8*) &context->seg_text[second_text_location]) = (i8) (info.first_from - second_from);
+        } else if (condition == COND_NE) {
+            // jne target
+            // jp target
+            info.first_text_location = instruction_jcc(context, COND_NE, sizeof(i32));
+            info.first_from = buf_length(context->seg_text);
+            info.second_text_location = instruction_jcc(context, COND_P, sizeof(i32));
+            info.second_from = buf_length(context->seg_text);
+        } else {
+            assert(false);
+        }
+    } else {
+        // jcc target
+        info.first_text_location = instruction_jcc(context, condition, sizeof(i32));
+        info.first_from = buf_length(context->seg_text);
+    }
+
+    return info;
 }
 
 void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocator *reg_allocator) {
@@ -10010,7 +10104,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
         } break;
 
         case STMT_IF: {
-            Jump_Fixup first_jump_fixup = machinecode_for_conditional_jump(context, func, stmt->conditional.condition, true, reg_allocator);
+            Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, func, stmt->conditional.condition, reg_allocator);
 
             for (Stmt *inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
                 machinecode_for_stmt(context, func, inner, reg_allocator);
@@ -10022,10 +10116,23 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 second_jump_from = buf_length(context->seg_text);
             }
 
-            i64 first_jump_by = ((i64) buf_length(context->seg_text)) - ((i64) first_jump_fixup.jump_from);
-            assert(first_jump_by <= I32_MAX && first_jump_by >= I32_MIN);
-            i32 *first_jump_text_location = (i32*) (&context->seg_text[first_jump_fixup.text_location]);
-            *first_jump_text_location = first_jump_by;
+            {
+                u64 jump_to = buf_length(context->seg_text);
+
+                if (jump_info.first_from != 0) {
+                    i64 first_jump_by = jump_to - jump_info.first_from;
+                    assert(first_jump_by <= I32_MAX && first_jump_by >= I32_MIN);
+                    i32 *first_jump_text_location = (i32*) (&context->seg_text[jump_info.first_text_location]);
+                    *first_jump_text_location = first_jump_by;
+                }
+
+                if (jump_info.second_from != 0) {
+                    i64 second_jump_by = jump_to - jump_info.second_from;
+                    assert(second_jump_by <= I32_MAX && second_jump_by >= I32_MIN);
+                    i32 *second_jump_text_location = (i32*) (&context->seg_text[jump_info.second_text_location]);
+                    *second_jump_text_location = second_jump_by;
+                }
+            }
 
             if (stmt->conditional.else_then != null) {
                 for (Stmt *inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
@@ -10043,9 +10150,14 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
             u64 loop_start = buf_length(context->seg_text);
 
             if (stmt->loop.condition != null) {
-                Jump_Fixup fixup = machinecode_for_conditional_jump(context, func, stmt->loop.condition, true, reg_allocator);
-                fixup.jump_to = JUMP_TO_END_OF_LOOP;
-                buf_push(context->jump_fixups, fixup);
+                Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, func, stmt->loop.condition, reg_allocator);
+
+                if (jump_info.first_from != 0) {
+                    buf_push(context->jump_fixups, ((Jump_Fixup) { .text_location = jump_info.first_text_location, .jump_from = jump_info.first_from, .jump_to = JUMP_TO_END_OF_LOOP }));
+                }
+                if (jump_info.second_from != 0) {
+                    buf_push(context->jump_fixups, ((Jump_Fixup) { .text_location = jump_info.second_text_location, .jump_from = jump_info.second_from, .jump_to = JUMP_TO_END_OF_LOOP }));
+                }
             }
 
             for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
