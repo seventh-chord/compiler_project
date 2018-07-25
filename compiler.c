@@ -7742,28 +7742,24 @@ void instruction_ret(Context *context) {
     #endif
 }
 
-// Returns an index to a position where a i32 jump offset should be written
-u64 instruction_jmp_i32(Context *context) {
-    buf_push(context->seg_text, 0xe9);
-    str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
+// Returns an index to a position where a jump offset should be written. The jump offset is a unsigned value of the size
+// given in 'bytes'. This must be 1 or 4 (i.e. i8 or i32).
+u64 instruction_jmp(Context *context, u8 bytes) {
+    if (bytes == 4) {
+        buf_push(context->seg_text, 0xe9);
+        str_push_integer(&context->seg_text, 4, 0xdeadbeef);
+    } else if (bytes == 1) {
+        buf_push(context->seg_text, 0xeb);
+        buf_push(context->seg_text, 0x00);
+    } else {
+        assert(false);
+    }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("jmp ??\n");
     #endif
 
-    return buf_length(context->seg_text) - sizeof(i32);
-}
-
-// Returns an index to a position where a i8 jump offset should be written
-u64 instruction_jmp_i8(Context *context) {
-    buf_push(context->seg_text, 0xeb);
-    buf_push(context->seg_text, 0x00);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("jmp ??\n");
-    #endif
-
-    return buf_length(context->seg_text) - 1;
+    return buf_length(context->seg_text) - bytes;
 }
 
 // Jumps if RCX equals zero
@@ -9861,7 +9857,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, (X64_Address) { .base = pointer_reg }, member_reg, 2);
                 machinecode_cast(context, member_reg, TYPE_U16, TYPE_U64);
                 instruction_integer(context, INTEGER_ADD, MOVE_FROM_MEM, pointer_reg, x64_place_reg(member_reg), POINTER_SIZE);
-                u64 jmp_location = instruction_jmp_i8(context);
+                u64 jmp_location = instruction_jmp(context, sizeof(i8));
                 u64 jge_to = buf_length(context->seg_text);
                 u64 jmp_from = jge_to;
                 instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = enum_type->enumeration.name_table_invalid_offset }, pointer_reg);
@@ -10006,7 +10002,7 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
             u64 second_text_location = instruction_jcc(context, COND_P, sizeof(i8));
             u64 second_from = buf_length(context->seg_text);
 
-            info.first_text_location = instruction_jmp_i32(context);
+            info.first_text_location = instruction_jmp(context, sizeof(i32));
             info.first_from = buf_length(context->seg_text);
 
             *((i8*) &context->seg_text[first_text_location])  = (i8) (info.first_from - first_from);
@@ -10112,7 +10108,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
             u64 second_jump_text_location_index, second_jump_from;
             if (stmt->conditional.else_then != null) {
-                second_jump_text_location_index = instruction_jmp_i32(context);
+                second_jump_text_location_index = instruction_jmp(context, sizeof(i32));
                 second_jump_from = buf_length(context->seg_text);
             }
 
@@ -10164,7 +10160,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 machinecode_for_stmt(context, func, inner, reg_allocator);
             }
 
-            u64 backward_jump_index = instruction_jmp_i32(context);
+            u64 backward_jump_index = instruction_jmp(context, sizeof(i32));
             u64 loop_end = buf_length(context->seg_text);
 
             u64 jump_by = loop_end - loop_start;
@@ -10210,7 +10206,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
             if (!stmt->return_stmt.trailing) {
                 Jump_Fixup fixup = {0};
-                fixup.text_location = instruction_jmp_i32(context);
+                fixup.text_location = instruction_jmp(context, sizeof(i32));
                 fixup.jump_from = buf_length(context->seg_text);
                 fixup.jump_to = JUMP_TO_END_OF_FUNCTION;
                 buf_push(context->jump_fixups, fixup);
@@ -10219,7 +10215,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
         case STMT_BREAK: {
             Jump_Fixup fixup = {0};
-            fixup.text_location = instruction_jmp_i32(context);
+            fixup.text_location = instruction_jmp(context, sizeof(i32));
             fixup.jump_from = buf_length(context->seg_text);
             fixup.jump_to = JUMP_TO_END_OF_LOOP;
             buf_push(context->jump_fixups, fixup);
@@ -10228,7 +10224,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
         case STMT_CONTINUE: {
             assert(false); // TODO untested code
             Jump_Fixup fixup = {0};
-            fixup.text_location = instruction_jmp_i32(context);
+            fixup.text_location = instruction_jmp(context, sizeof(i32));
             fixup.jump_from = buf_length(context->seg_text);
             fixup.jump_to = JUMP_TO_START_OF_LOOP;
             buf_push(context->jump_fixups, fixup);
@@ -10270,7 +10266,7 @@ void build_machinecode(Context *context) {
         instruction_inc_or_dec(context, true, RAX, POINTER_SIZE);
         instruction_inc_or_dec(context, false, RCX, POINTER_SIZE);
 
-        u64 backward_jump_index = instruction_jmp_i8(context);
+        u64 backward_jump_index = instruction_jmp(context, sizeof(i8));
         u64 loop_end = buf_length(context->seg_text);
 
         i8 forward_jump_by = loop_end - loop_start;
@@ -10300,7 +10296,7 @@ void build_machinecode(Context *context) {
         instruction_inc_or_dec(context, true, RDX, POINTER_SIZE);
         instruction_inc_or_dec(context, false, RCX, POINTER_SIZE);
 
-        u64 backward_jump_index = instruction_jmp_i8(context);
+        u64 backward_jump_index = instruction_jmp(context, sizeof(i8));
         u64 loop_end = buf_length(context->seg_text);
         i8 forward_jump_by = loop_end - loop_start;
         i8 backward_jump_by = -((i8) (loop_end - before_loop));
