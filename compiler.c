@@ -7447,13 +7447,21 @@ u8 *register_name(Register reg, u8 size) {
     return REGISTER_NAMES[reg][size_index];
 }
 
-// NB The first four registers in 'VOLATILE_REGISTERS' are used to pass parameters
-#define VOLATILE_REGISTER_COUNT 7
-#define NONVOLATILE_REGISTER_COUNT 9
+#define VOLATILE_REGISTER_COUNT 13
+#define NONVOLATILE_REGISTER_COUNT 19
 #define INPUT_REGISTER_COUNT 4
-Register VOLATILE_REGISTERS[VOLATILE_REGISTER_COUNT]       = { RCX, RDX, R8, R9, RAX, R10, R11 };
-Register NONVOLATILE_REGISTERS[NONVOLATILE_REGISTER_COUNT] = { RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15 };
-Register INPUT_REGISTERS[INPUT_REGISTER_COUNT]             = { RCX, RDX, R8, R9 };
+
+Register VOLATILE_REGISTERS[VOLATILE_REGISTER_COUNT] = {
+    RCX, RDX, R8, R9,
+    RAX, R10, R11,
+    XMM0, XMM1, XMM2, XMM3, XMM4, XMM5
+};
+Register NONVOLATILE_REGISTERS[NONVOLATILE_REGISTER_COUNT] = {
+    RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15,
+    XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15
+};
+Register GPR_INPUT_REGISTERS[INPUT_REGISTER_COUNT] = { RCX, RDX, R8, R9 };
+Register XMM_INPUT_REGISTERS[INPUT_REGISTER_COUNT] = { XMM0, XMM1, XMM2, XMM3 };
 
 enum {
     REX_BASE = 0x40,
@@ -8605,7 +8613,14 @@ void register_allocator_leave_frame(Context *context, Reg_Allocator *allocator) 
     for (int reg = 0; reg < ALLOCATABLE_REGISTER_COUNT; reg += 1) {
         if (allocator->head->states[reg].flushed) {
             X64_Address tmp_address = allocator->head->states[reg].flushed_to;
-            instruction_mov_reg_mem(context, MOVE_FROM_MEM, tmp_address, reg, POINTER_SIZE);
+
+            if (reg >= RAX && reg <= R15) {
+                instruction_mov_reg_mem(context, MOVE_FROM_MEM, tmp_address, reg, POINTER_SIZE);
+            } else if (reg >= XMM0 && reg <= XMM15) {
+                instruction_float_movd(context, MOVE_FROM_MEM, reg, x64_place_address(tmp_address), false);
+            } else {
+                assert(false);
+            }
         }
     }
 
@@ -8712,7 +8727,7 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
         if (src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS) {
             register_allocator_enter_frame(context, reg_allocator);
 
-            Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+            Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
             instruction_mov_reg_mem(context, MOVE_FROM_MEM, src.address, reg, (u8) size);
             instruction_mov_reg_mem(context, MOVE_TO_MEM, dst.address, reg, (u8) size);
 
@@ -8748,7 +8763,7 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
         assert(src.kind == PLACE_ADDRESS && dst.kind == PLACE_ADDRESS);
 
         register_allocator_enter_frame(context, reg_allocator);
-        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
 
         u64 bytes = size;
         while (bytes > 0) {
@@ -8810,7 +8825,7 @@ void machinecode_immediate_to_place(Context *context, Reg_Allocator *reg_allocat
             if (is_gpr(place.reg)) {
                 instruction_mov_imm_reg(context, place.reg, immediate, bytes);
             } else if (is_xmm(place.reg)) {
-                Register temp_reg = register_allocate_temp(reg_allocator, REGISTER_KIND_GPR, false);
+                Register temp_reg = register_allocate_temp(reg_allocator, REGISTER_KIND_GPR, 0);
                 instruction_mov_imm_reg(context, temp_reg, immediate, bytes);
                 machinecode_move(context, reg_allocator, x64_place_reg(temp_reg), place, bytes);
             } else {
@@ -8880,7 +8895,7 @@ void machinecode_lea(Context *context, Reg_Allocator *reg_allocator, X64_Address
         instruction_lea(context, address, place.reg);
     } else {
         register_allocator_enter_frame(context, reg_allocator);
-        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
         instruction_lea(context, address, reg);
         machinecode_move(context, reg_allocator, x64_place_reg(reg), place, POINTER_SIZE);
         register_allocator_leave_frame(context, reg_allocator);
@@ -9070,7 +9085,7 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
             if (parent_type->kind == TYPE_POINTER) {
                 parent_type = parent_type->pointer_to;
 
-                Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, place.address, address_reg, POINTER_SIZE);
                 place.address = (X64_Address) { .base = address_reg };
             }
@@ -9098,7 +9113,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             if (place.kind == PLACE_NOWHERE) return;
 
             u64 size = type_size_of(expr->type);
-            X64_Place from = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
+            X64_Place from = machinecode_for_assignable_expr(context, func, expr, reg_allocator, 0);
             machinecode_move(context, reg_allocator, from, place, size);
         } break;
 
@@ -9210,7 +9225,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 bool return_left_to_place = place.kind == PLACE_ADDRESS || (place.kind == PLACE_REGISTER && !is_xmm(place.reg));
                 Register left_reg;
                 if (return_left_to_place) {
-                    left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                    u32 reserves_for_rhs = machinecode_expr_reserves(expr->binary.right);
+                    left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, reserves_for_rhs);
                 } else {
                     left_reg = place.reg;
                 }
@@ -9219,9 +9235,9 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 register_allocator_enter_frame(context, reg_allocator);
                 X64_Place right_place;
                 if (expr->binary.right->flags & EXPR_FLAG_ASSIGNABLE) {
-                    right_place = machinecode_for_assignable_expr(context, func, expr->binary.right, reg_allocator, false);
+                    right_place = machinecode_for_assignable_expr(context, func, expr->binary.right, reg_allocator, 0);
                 } else {
-                    Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                    Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
                     right_place = x64_place_reg(right_reg);
                     machinecode_for_expr(context, func, expr->binary.right, reg_allocator, right_place);
                 }
@@ -9263,7 +9279,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         if (right_place.kind == PLACE_REGISTER) {
                             instruction_float(context, instruction, right_place.reg, x64_place_reg(left_reg), single);
                         } else if (right_place.kind == PLACE_ADDRESS) {
-                            Register temp_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                            Register temp_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
                             instruction_float(context, FLOAT_MOV, temp_reg, right_place, single);
                             instruction_float(context, instruction, temp_reg, x64_place_reg(left_reg), single);
                             left_reg = temp_reg;
@@ -9469,7 +9485,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         Register reg;
                         if (place.kind == PLACE_ADDRESS) {
                             register_allocator_enter_frame(context, reg_allocator);
-                            reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+                            reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
                             instruction_float(context, FLOAT_MOV, reg, place, single);
                         } else {
                             reg = place.reg;
@@ -9521,7 +9537,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     if (place.kind == PLACE_REGISTER) {
                         inner_place.reg = place.reg;
                     } else {
-                        inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                        inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                     }
 
                     machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, inner_place);
@@ -9538,7 +9554,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 } break;
 
                 case UNARY_ADDRESS_OF: {
-                    X64_Place inner_place = machinecode_for_assignable_expr(context, func, expr->unary.inner, reg_allocator, false);
+                    X64_Place inner_place = machinecode_for_assignable_expr(context, func, expr->unary.inner, reg_allocator, 0);
                     assert(inner_place.kind == PLACE_ADDRESS);
 
                     switch (place.kind) {
@@ -9548,7 +9564,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                         case PLACE_ADDRESS: {
                             register_allocator_enter_frame(context, reg_allocator);
-                            Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                            Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                             instruction_lea(context, inner_place.address, reg);
                             instruction_mov_reg_mem(context, MOVE_TO_MEM, place.address, reg, POINTER_SIZE);
                             register_allocator_leave_frame(context, reg_allocator);
@@ -9572,13 +9588,19 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
 
+            Register return_reg;
+            if (primitive_is_float(expr->type->kind)) {
+                return_reg = XMM0;
+            } else {
+                return_reg = RAX;
+            }
+
             // Compute parameters
             bool skip_first_param_reg = false;
-            bool used_volatile_registers[INPUT_REGISTER_COUNT] = { false };
+            Register used_volatile_registers[INPUT_REGISTER_COUNT] = {0};
 
             if (callee->signature.return_by_reference) {
                 skip_first_param_reg = true;
-                used_volatile_registers[0] = true;
 
                 X64_Address return_into;
                 if (place.kind == PLACE_NOWHERE) {
@@ -9590,7 +9612,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     return_into = place.address;
                 }
 
-                instruction_lea(context, return_into, INPUT_REGISTERS[0]);
+                used_volatile_registers[0] = GPR_INPUT_REGISTERS[0];
+                instruction_lea(context, return_into, GPR_INPUT_REGISTERS[0]);
             }
 
             for (u32 p = 0; p < callee->signature.param_count; p += 1) {
@@ -9602,12 +9625,12 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 if (r < INPUT_REGISTER_COUNT) {
                     Register reg;
                     if (primitive_is_float(param_type->kind)) {
-                        reg = XMM0 + r;
+                        reg = XMM_INPUT_REGISTERS[r];
                     } else {
-                        reg = INPUT_REGISTERS[r];
+                        reg = GPR_INPUT_REGISTERS[r];
                     }
 
-                    used_volatile_registers[p] = true;
+                    used_volatile_registers[p] = reg;
                     target_place = x64_place_reg(reg);
                 } else {
                     target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = r*POINTER_SIZE } };
@@ -9626,7 +9649,9 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         machinecode_lea(context, reg_allocator, tmp_address, target_place);
                     }
                 } else {
-                    if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
+                    if (target_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && target_place.reg == place.reg)) {
+                        register_allocate_specific(context, reg_allocator, target_place.reg);
+                    }
                     machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
                 }
             }
@@ -9635,18 +9660,26 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             for (u32 i = 0; i < VOLATILE_REGISTER_COUNT; i += 1) {
                 Register reg = VOLATILE_REGISTERS[i];
 
-                if (used_volatile_registers[i] || (place.kind == PLACE_REGISTER && place.reg == reg) || reg == RAX) {
-                    continue;
+                bool dont_flush = reg == return_reg || (place.kind == PLACE_REGISTER && place.reg == reg);
+                for (u32 j = 0; j < INPUT_REGISTER_COUNT; j += 1) {
+                    if (used_volatile_registers[j] == reg) {
+                        dont_flush = true;
+                        break;
+                    }
                 }
 
-                register_allocate_specific(context, reg_allocator, reg);
+                if (dont_flush) {
+                    // we are fine overwriting this register
+                } else {
+                    register_allocate_specific(context, reg_allocator, reg);
+                }
             }
 
             // Call function and handle return value
-            if ((place.kind == PLACE_REGISTER && place.reg == RAX) || place.kind == PLACE_NOWHERE || !callee->signature.has_return) {
+            if ((place.kind == PLACE_REGISTER && place.reg == return_reg) || place.kind == PLACE_NOWHERE || !callee->signature.has_return) {
                 instruction_call(context, false, func_index);
             } else {
-                register_allocate_specific(context, reg_allocator, RAX);
+                register_allocate_specific(context, reg_allocator, return_reg);
 
                 instruction_call(context, false, func_index);
 
@@ -9661,7 +9694,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     // NB The function also returns the pointer we passed (in RCX) in RAX, which we could
                     // make use of.
                 } else {
-                    machinecode_move(context, reg_allocator, x64_place_reg(RAX), place, return_size);
+                    machinecode_move(context, reg_allocator, x64_place_reg(return_reg), place, return_size);
                 }
             }
 
@@ -9684,7 +9717,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                 if (place.kind == PLACE_ADDRESS) {
                     inner_place.kind = PLACE_REGISTER;
-                    inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                    inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                     inner_doesnt_match_outer = true;
                 } else {
                     inner_place = place;
@@ -9719,7 +9752,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             X64_Place source;
             if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
+                source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, 0);
             } else {
                 Type *array_type = expr->subscript.array->type;
                 X64_Address array_base;
@@ -9783,7 +9816,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             u64 member_size = type_size_of(expr->type);
 
             if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                X64_Place source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, false);
+                X64_Place source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, 0);
                 machinecode_move(context, reg_allocator, source, place, member_size);
             } else {
                 Expr *parent = expr->member_access.parent;
@@ -9803,7 +9836,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     if (place.kind == PLACE_REGISTER) {
                         pointer_reg = place.reg;
                     } else {
-                        pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+                        pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                     }
 
                     machinecode_for_expr(context, func, parent, reg_allocator, x64_place_reg(pointer_reg));
@@ -9889,10 +9922,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             register_allocator_enter_frame(context, reg_allocator);
 
-            Register member_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+            Register member_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
             machinecode_for_expr(context, func, expr->enum_member, reg_allocator, x64_place_reg(member_reg));
 
-            Register pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+            Register pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
 
             {
                 instruction_cmp_imm(context, x64_place_reg(member_reg), enum_type->enumeration.name_table_entries, op_size);
@@ -9968,10 +10001,10 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
 
             register_allocator_enter_frame(context, reg_allocator);
 
-            Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+            Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
             machinecode_for_expr(context, func, left, reg_allocator, x64_place_reg(left_reg));
 
-            Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, false);
+            Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
             machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
 
             int instruction;
@@ -10016,7 +10049,7 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
             Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves_for_rhs);
             machinecode_for_expr(context, func, left, reg_allocator, x64_place_reg(left_reg));
 
-            Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+            Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
             machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
 
             instruction_cmp(context, x64_place_reg(left_reg), right_reg, primitive_size);
@@ -10027,7 +10060,7 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
         Type_Kind primitive = expr->type->kind;
         u8 primitive_size = primitive_size_of(primitive);
 
-        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, false);
+        Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
         machinecode_for_expr(context, func, expr, reg_allocator, x64_place_reg(reg));
         instruction_cmp_imm(context, x64_place_reg(reg), 0, primitive_size);
         condition = COND_NE;
@@ -10135,7 +10168,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
                 machinecode_for_expr(context, func, right, reg_allocator, tmp_place);
 
-                X64_Place left_place = machinecode_for_assignable_expr(context, func, left, reg_allocator, false);
+                X64_Place left_place = machinecode_for_assignable_expr(context, func, left, reg_allocator, 0);
                 machinecode_move(context, reg_allocator, tmp_place, left_place, size);
             } else {
                 u32 reserves_for_rhs = machinecode_expr_reserves(right);
@@ -10443,7 +10476,7 @@ void build_machinecode(Context *context) {
         if (func->signature.return_by_reference) {
             skip_first_param_reg = true;
 
-            Register reg = INPUT_REGISTERS[0];
+            Register reg = GPR_INPUT_REGISTERS[0];
             X64_Address address = reg_allocator.return_value_address;
             instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
         }
@@ -10455,7 +10488,7 @@ void build_machinecode(Context *context) {
             u32 r = skip_first_param_reg? (p + 1) : p;
 
             if (func->signature.params[p].reference_semantics) {
-                Register reg = INPUT_REGISTERS[r];
+                Register reg = GPR_INPUT_REGISTERS[r];
                 instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
             } else {
                 u64 operand_size = type_size_of(func->signature.params[p].type);
@@ -10465,10 +10498,10 @@ void build_machinecode(Context *context) {
 
                     Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
                     if (primitive_is_float(operand_primitive)) {
-                        Register reg = XMM0 + r;
+                        Register reg = XMM_INPUT_REGISTERS[r];
                         instruction_float_movd(context, MOVE_TO_MEM, reg, x64_place_address(address), operand_primitive == TYPE_F32);
                     } else {
-                        Register reg = INPUT_REGISTERS[r];
+                        Register reg = GPR_INPUT_REGISTERS[r];
                         instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, (u8) operand_size);
                     }
                 }
