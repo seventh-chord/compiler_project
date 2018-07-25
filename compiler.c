@@ -8501,6 +8501,14 @@ void instruction_float(Context *context, int instruction, Register dst, X64_Plac
     if (src.kind == PLACE_REGISTER) assert(is_xmm(src.reg));
 
     u32 opcode = single? FLOAT_SINGLE_OPCODES[instruction] : FLOAT_DOUBLE_OPCODES[instruction];
+
+    // Ensure that the prefix is properly placed before the modrm byte
+    // This is a bit of a hack
+    if ((opcode & 0xff) == 0xf2 || (opcode & 0xff) == 0xf3) {
+        buf_push(context->seg_text, opcode & 0xff);
+        opcode >>= 8;
+    }
+
     encode_instruction_modrm(context, REX_BASE, opcode, src, dst);
 
     u8 required_immediate = FLOAT_REQUIRED_IMMEDIATE[instruction];
@@ -10574,7 +10582,13 @@ void build_machinecode(Context *context) {
         for (u32 i = 0; i < NONVOLATILE_REGISTER_COUNT; i += 1) {
             Register reg = NONVOLATILE_REGISTERS[i];
             if (reg_allocator.touched_registers[reg]) {
-                instruction_mov_reg_mem(context, MOVE_FROM_MEM, restore_address, reg, POINTER_SIZE);
+                if (is_gpr(reg)) {
+                    instruction_mov_reg_mem(context, MOVE_FROM_MEM, restore_address, reg, POINTER_SIZE);
+                } else if (is_xmm(reg)) {
+                    instruction_float_movd(context, MOVE_FROM_MEM, reg, x64_place_address(restore_address), false);
+                } else {
+                    assert(false);
+                }
                 restore_address.immediate_offset += POINTER_SIZE;
             }
         }
@@ -10606,7 +10620,13 @@ void build_machinecode(Context *context) {
             for (u32 i = 0; i < NONVOLATILE_REGISTER_COUNT; i += 1) {
                 Register reg = NONVOLATILE_REGISTERS[i];
                 if (reg_allocator.touched_registers[reg]) {
-                    instruction_mov_reg_mem(context, MOVE_TO_MEM, save_address, reg, POINTER_SIZE);
+                    if (is_gpr(reg)) {
+                        instruction_mov_reg_mem(context, MOVE_TO_MEM, save_address, reg, POINTER_SIZE);
+                    } else if (is_xmm(reg)) {
+                        instruction_float_movd(context, MOVE_TO_MEM, reg, x64_place_address(save_address), false);
+                    } else {
+                        assert(false);
+                    }
                     save_address.immediate_offset += POINTER_SIZE;
                 }
             }

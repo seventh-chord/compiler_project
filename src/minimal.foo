@@ -5,11 +5,6 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-fn flow(a: i32, b: f32, c: i32, d: f32) -> f32 {
-    //return f32(a) + b + f32(c) + d; // TODO
-    return (b + d) * 2.0;
-}
-
 fn print(string: String) {
     let written: u32;
     let stdout_handle = GetStdHandle(u32(-11));
@@ -351,4 +346,10 @@ fn floating_away() {
 
     let d = 1.0 + flow(1, 1.0, 1, 1.0) - 1.0;
     assert(d == 4.0, "Oops we sank\n");
+}
+
+fn flow(a: i32, b: f32, c: i32, d: f32) -> f32 {
+    //return f32(a) + b + f32(c) + d; // TODO
+    let two = (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + 1.0))))))))) / 5.0;
+    return (b + d) * two;
 }
