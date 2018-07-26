@@ -10265,7 +10265,9 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
         } break;
 
         case STMT_BLOCK: {
-            unimplemented();
+            for (Stmt *inner = stmt->block; inner->kind != STMT_END; inner = inner->next) {
+                machinecode_for_stmt(context, func, inner, reg_allocator);
+            }
         } break;
 
         case STMT_IF: {

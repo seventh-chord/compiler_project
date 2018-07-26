@@ -325,9 +325,11 @@ fn floating_away() {
 
     c = -3.0;
 
-    if (c != -3.0) { assert(false, "False"); }
-    if (c == -2.0) { assert(false, "Pretty untrue"); }
-    if (c < -3.0)  { assert(false, "Very false"); }
+    {
+        if (c != -3.0) { assert(false, "False"); }
+        if (c == -2.0) { assert(false, "Pretty untrue"); }
+        if (c < -3.0)  { assert(false, "Very false"); }
+    }
 
     let nan = 0.0 / 0.0;
     if (nan == nan) { assert(false, "Nan-man"); }
