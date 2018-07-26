@@ -348,8 +348,8 @@ fn floating_away() {
     assert(d == 4.0, "Oops we sank\n");
 }
 
-fn flow(a: i32, b: f32, c: i32, d: f32) -> f32 {
-    //return f32(a) + b + f32(c) + d; // TODO
+fn flow(a: i8, b: f32, c: u16, d: f32) -> f32 {
+    let four = f32(a) + b + f32(c) + d;
     let two = (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + 1.0))))))))) / 5.0;
-    return (b + d) * two;
+    return (b + four/4.0) * two;
 }

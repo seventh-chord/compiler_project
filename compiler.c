@@ -4241,7 +4241,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
                 if (expr == null && type == null) {
                     u8* name = string_table_access(context->string_table, name_index);
                     print_file_pos(&t->pos);
-                    printf("Declared variable '%s' without specifying type or initial value. Hence can't infer type\n", name);
+                    printf("Declared variable '%s' without giving type or initial value.\n", name);
                     *length = t - t_first_stmt_start;
                     return null;
                 }
@@ -8229,7 +8229,7 @@ void instruction_mov_imm_reg(Context *context, Register reg, u64 immediate, u8 o
 
     opcode |= REGISTER_INDICES[reg] & 0x07;
     if (REGISTER_INDICES[reg] & 0x08) {
-        reg |= REX_B;
+        rex |= REX_B;
     }
 
     if (rex != REX_BASE) {
@@ -8850,14 +8850,44 @@ void machinecode_immediate_to_place(Context *context, Reg_Allocator *reg_allocat
     }
 }
 
-void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind to) {
+void machinecode_cast(Context *context, Register src, Register dst, Type_Kind from, Type_Kind to) {
     u8 from_size = primitive_size_of(from);
     u8 to_size = primitive_size_of(to);
 
     if (from == TYPE_POINTER && to == TYPE_POINTER) {
         // This is a no-op
-    } else if (primitive_is_float(from) || primitive_is_float(to)) {
-        unimplemented(); // TODO floating point casts
+    } else if (primitive_is_float(from) && primitive_is_float(to)) {
+        unimplemented(); // TODO float->float casts
+    } else if (primitive_is_float(from) && primitive_is_integer(to)) {
+        unimplemented(); // TODO float->int casts
+    } else if (primitive_is_integer(from) && primitive_is_float(to)) {
+        assert(is_gpr(src));
+        assert(is_xmm(dst));
+
+        // There only are instructions to cast from i32/i64 to floats, so we havve to
+        // cast up smaller types first.
+        if (from_size < 4) {
+            Type_Kind extended = primitive_is_signed(from)? TYPE_I32 : TYPE_U32;
+            machinecode_cast(context, src, src, from, extended);
+            from_size = 4;
+            from = extended;
+        }
+
+        if (to == TYPE_F32) {
+            buf_push(context->seg_text, 0xf3);
+        } else if (to == TYPE_F64) {
+            buf_push(context->seg_text, 0xf2);
+        } else {
+            assert(false);
+        }
+
+        u8 rex = REX_BASE;
+        if (from_size == 8) rex |= REX_W;
+        encode_instruction_modrm(context, rex, 0x2a0f, x64_place_reg(src), dst);
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("%s %s, %s\n", to == TYPE_F32? "cvtsi2ss" : "cvtsi2sd", register_name(dst, to_size), register_name(src, from_size));
+        #endif
     } else {
         // Zero-extend or sign-extendto correct width, if needed
         
@@ -8889,10 +8919,10 @@ void machinecode_cast(Context *context, Register reg, Type_Kind from, Type_Kind 
                 buf_push(context->seg_text, WORD_OPERAND_PREFIX);
             }
 
-            encode_instruction_modrm(context, rex_w? (REX_BASE | REX_W) : REX_BASE, opcode, x64_place_reg(reg), reg);
+            encode_instruction_modrm(context, rex_w? (REX_BASE | REX_W) : REX_BASE, opcode, x64_place_reg(src), dst);
 
             #ifdef PRINT_GENERATED_INSTRUCTIONS
-            printf("%s %s, %s\n", sign_extend? "movsx" : "movzx", register_name(reg, to_size), register_name(reg, from_size));
+            printf("%s %s, %s\n", sign_extend? "movsx" : "movzx", register_name(dst, to_size), register_name(src, from_size));
             #endif
         }
     }
@@ -9720,26 +9750,33 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             } else {
                 register_allocator_enter_frame(context, reg_allocator);
 
-                X64_Place inner_place;
-                bool inner_doesnt_match_outer;
+                Register_Kind inner_reg_kind = primitive_is_float(expr->cast_from->type->kind)? REGISTER_KIND_XMM : REGISTER_KIND_GPR;
+                Register_Kind outer_reg_kind = primitive_is_float(expr->type->kind)?            REGISTER_KIND_XMM : REGISTER_KIND_GPR;
+
+                Register inner_reg, outer_reg;
+                bool return_to_place;
 
                 if (place.kind == PLACE_ADDRESS) {
-                    inner_place.kind = PLACE_REGISTER;
-                    inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
-                    inner_doesnt_match_outer = true;
+                    outer_reg = register_allocate(reg_allocator, outer_reg_kind, 0);
+                    return_to_place = true;
+                } else if (place.kind == PLACE_REGISTER) {
+                    outer_reg = place.reg;
+                    return_to_place = false;
                 } else {
-                    inner_place = place;
-                    inner_doesnt_match_outer = false;
+                    assert(false);
                 }
 
-                machinecode_for_expr(context, func, expr->cast_from, reg_allocator, inner_place);
+                if (inner_reg_kind == outer_reg_kind) {
+                    inner_reg = outer_reg;
+                } else {
+                    inner_reg = register_allocate(reg_allocator, inner_reg_kind, 0);
+                }
 
-                if (place.kind == PLACE_NOWHERE) return;
-                assert(inner_place.kind == PLACE_REGISTER);
-                Register inner_reg = inner_place.reg;
-
-                machinecode_cast(context, inner_reg, primitive_of(expr->cast_from->type), primitive_of(expr->type));
-                machinecode_move(context, reg_allocator, inner_place, place, primitive_size_of(primitive_of(expr->type)));
+                machinecode_for_expr(context, func, expr->cast_from, reg_allocator, x64_place_reg(inner_reg));
+                machinecode_cast(context, inner_reg, outer_reg, primitive_of(expr->cast_from->type), primitive_of(expr->type));
+                if (return_to_place) {
+                    machinecode_move(context, reg_allocator, x64_place_reg(outer_reg), place, type_size_of(expr->type));
+                }
 
                 register_allocator_leave_frame(context, reg_allocator);
             }
@@ -9945,7 +9982,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 }
                 instruction_lea(context, (X64_Address) { .base = pointer_reg, .index = member_reg, .scale = 2 }, pointer_reg);
                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, (X64_Address) { .base = pointer_reg }, member_reg, 2);
-                machinecode_cast(context, member_reg, TYPE_U16, TYPE_U64);
+                machinecode_cast(context, member_reg, member_reg, TYPE_U16, TYPE_U64);
                 instruction_integer(context, INTEGER_ADD, MOVE_FROM_MEM, pointer_reg, x64_place_reg(member_reg), POINTER_SIZE);
                 u64 jmp_location = instruction_jmp(context, sizeof(i8));
                 u64 jge_to = buf_length(context->seg_text);
@@ -10286,6 +10323,8 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 if (func->signature.return_by_reference) {
                     instruction_mov_reg_mem(context, MOVE_FROM_MEM, reg_allocator->return_value_address, RAX, POINTER_SIZE);
                     return_location = x64_place_address((X64_Address) { .base = RAX });
+                } else if (primitive_is_float(func->signature.return_type->kind)) {
+                    return_location = x64_place_reg(XMM0);
                 } else {
                     return_location = x64_place_reg(RAX);
                 }
