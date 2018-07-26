@@ -358,5 +358,5 @@ fn flow(a: i8, b: f64, c: u16, d: f64) -> f64 {
 
 fn sailing_away() {
     let n = f64(-7.9);
-    assert(i8(n) == i8(-7), "\"Sailing\"");
+    assert(i8(n) == -7, "\"Sailing\"");
 }

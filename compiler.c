@@ -5876,6 +5876,10 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_BINARY: {
+            if (expr->binary.op == BINARY_EQ && expr->binary.left->kind == EXPR_CAST && expr->binary.right->kind == EXPR_UNARY) {
+                printf("DING\n");
+            }
+
             if (BINARY_OP_COMPARATIVE[expr->binary.op]) {
                 solidify_to = &info->context->primitive_types[TYPE_VOID];
             }
@@ -5978,7 +5982,9 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 } break;
             }
 
-            if (typecheck_expr(info, expr->unary.inner, solidify_to) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            Typecheck_Expr_Result inner_result = typecheck_expr(info, expr->unary.inner, solidify_to);
+            if (inner_result == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (inner_result == TYPECHECK_EXPR_WEAK) strong = false;
 
             switch (expr->unary.op) {
                 case UNARY_NOT: {
