@@ -345,11 +345,18 @@ fn floating_away() {
     assert(i == 1, "Loops are hosed, but in a different way");
 
     let d = 1.0 + flow(1, 1.0, 1, 1.0) - 1.0;
-    assert(d == 4.0, "Oops we sank\n");
+    assert(d == 4.0, "Oops we sank");
+
+    sailing_away();
 }
 
-fn flow(a: i8, b: f32, c: u16, d: f32) -> f32 {
-    let four = f32(a) + b + f32(c) + d;
-    let two = (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + 1.0))))))))) / 5.0;
+fn flow(a: i8, b: f64, c: u16, d: f64) -> f64 {
+    let four = f64(a) + b + f64(c) + d;
+    let two: f64 = (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + 1.0))))))))) / 5.0;
     return (b + four/4.0) * two;
+}
+
+fn sailing_away() {
+    let n = f64(-7.9);
+    assert(i8(n) == i8(-7), "\"Sailing\"");
 }

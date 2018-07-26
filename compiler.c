@@ -5131,7 +5131,9 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
                     break;
                 }
 
-                if (file[i] == '"') {
+                if (file[i] == '\\') {
+                    i += 1;
+                } else if (file[i] == '"') {
                     break;
                 }
             }
@@ -8859,7 +8861,27 @@ void machinecode_cast(Context *context, Register src, Register dst, Type_Kind fr
     } else if (primitive_is_float(from) && primitive_is_float(to)) {
         unimplemented(); // TODO float->float casts
     } else if (primitive_is_float(from) && primitive_is_integer(to)) {
-        unimplemented(); // TODO float->int casts
+        assert(is_xmm(src));
+        assert(is_gpr(dst));
+
+        if (from == TYPE_F32) {
+            buf_push(context->seg_text, 0xf3);
+        } else if (from == TYPE_F64) {
+            buf_push(context->seg_text, 0xf2);
+        } else {
+            assert(false);
+        }
+
+        u8 rex = REX_BASE;
+        if (to_size == 8) rex |= REX_W;
+        encode_instruction_modrm(context, rex, 0x2c0f, x64_place_reg(src), dst);
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("%s %s, %s\n", from == TYPE_F32? "cvttsi2ss" : "cvttsi2sd", register_name(dst, to_size), register_name(src, from_size));
+        #endif
+
+        // Although we just produce either a i32 or a i64, we don't actually have to do any casting
+        // because of how twos-complement works. Downcasting of integers always just removes high bits.
     } else if (primitive_is_integer(from) && primitive_is_float(to)) {
         assert(is_gpr(src));
         assert(is_xmm(dst));
