@@ -5,9 +5,9 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
+let stdout_handle = GetStdHandle(-11);
 fn print(string: String) {
     let written: u32;
-    let stdout_handle = GetStdHandle(u32(-11));
     WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
 }
 

@@ -9,7 +9,7 @@ extern "kernel32.lib" {
     fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> *void;
 }
 
-fn assert(condition: bool, error_message: *u8) {
+fn assert(condition: bool, error_message: String) {
     if (!condition) {
         print("Assertion failed: ");
         print(error_message);
@@ -18,8 +18,8 @@ fn assert(condition: bool, error_message: *u8) {
     }
 }
 
-fn c_string_length(string: *u8) -> u64 {
-    let length: u64 = 0;
+fn c_string_length(string: *u8) -> i64 {
+    let length = 0;
     for (*string != 0) {
         length += 1;
         string = 1 + string;
@@ -27,7 +27,7 @@ fn c_string_length(string: *u8) -> u64 {
     return length;
 }
 
-fn mem_copy(src, dest: *u8, length: u64) {
+fn mem_copy(src, dest: *u8, length: i64) {
     for (length > 0) {
         *dest = *src;
         src += 1;
@@ -37,10 +37,14 @@ fn mem_copy(src, dest: *u8, length: u64) {
 }
 
 let stdout_handle = GetStdHandle(u32(-11));
-fn print(string: *u8) {
-    let length: u64 = c_string_length(string);
+fn print(string: String) {
     let written: u32;
-    WriteFile(stdout_handle, string, u32(length), &written, null);
+    WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
+}
+
+fn print_cstr(string: *u8) {
+    let length = c_string_length(string);
+    print(String { data: string, length: length });
 }
 
 fn print_u64(value: u64, base: u64) {
@@ -74,7 +78,9 @@ fn print_u64(value: u64, base: u64) {
         }
     }
 
-    print(&buffer);
+    let length = c_string_length(&buffer);
+    let string = String { data: &buffer, length: length };
+    print(string);
 }
 
 let SEVEN = u64(u8(u64(3074504259546010887))); // evaluates to 7
@@ -88,7 +94,7 @@ fn main() {
     //let nasty = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
     //let nasty = [3]u8 { 1, 2, 3 }[2];
 
-    let bread_and_butter = [2]*u8 { "bread\n", "butter\n" };
+    let bread_and_butter = [2]String { "bread\n", "butter\n" };
     print(bread_and_butter[0]);
     print(bread_and_butter[1]);
 
@@ -206,11 +212,11 @@ fn seventy_two() -> u8 {
 
 fn test_fancy_casts() {
     let text = "Yo"; 
-    let foo_star = cast(*u16, text);
+    let foo_star = cast(*u16, text.data);
     let foo = *foo_star;
 
     print("0x");
-    print_u64(u64(foo), 16); // Should be 
+    print_u64(u64(foo), 16);
     if (foo != 0x6f59) {
         print(" (Should be 0x6f59)");
     }
@@ -221,11 +227,11 @@ fn test_fancy_casts() {
 enum Name_Enum { ITS_seventh_chord }
 
 let my_name_a = "my name is \0 this won't show up due to the \0 earlier";
-let my_name_b = enum_member_name(Name_Enum::ITS_seventh_chord) + 4;
+let my_name_b = enum_member_name(Name_Enum::ITS_seventh_chord).data + 4;
 
 fn say_my_name() {
     print(my_name_a);
-    print(my_name_b);
+    print_cstr(my_name_b);
     print("\n");
 }
 
@@ -288,15 +294,14 @@ fn arena_test() {
     print("Calvino inbound...\n");
 
     let original = "[There are two kinds of cities]: those that through the years and the changes continue to give their form to desires, and those in which desires either erase the city or are erased by it.\n";
-    let length = c_string_length(original);
 
     let arena: Arena;
-    let copy = arena_new(&arena, length + 1);
-    mem_copy(original, copy, length + 1);
+    let copy = arena_new(&arena, original.length + 1);
+    mem_copy(original.data, copy, original.length + 1);
 
-    print_u64(length, 10);
+    print_u64(u64(original.length), 10);
     print(" characters of Calvino\n");
-    print(copy);
+    print_cstr(copy);
 }
 
 
@@ -305,12 +310,12 @@ let ARENA_BLOCK_SIZE = 1024;
 
 struct Arena {
     data: *u8;
-    used, capacity: u64;
+    used, capacity: i64;
 }
 
-fn arena_new(arena: *Arena, size: u64) -> *u8 {
+fn arena_new(arena: *Arena, size: i64) -> *u8 {
     if (arena.data == null) {
-        arena.data = HeapAlloc(heap, 0, ARENA_BLOCK_SIZE);
+        arena.data = HeapAlloc(heap, 0, u64(ARENA_BLOCK_SIZE));
         arena.used = 0;
         arena.capacity = ARENA_BLOCK_SIZE;
     }
@@ -417,11 +422,11 @@ fn enum_test() {
     print(enum_member_name(our_map.target));
     print("\n");
 
-    print_u64(HOW_LONG_BRO, 10);
+    print_u64(u64(HOW_LONG_BRO), 10);
     print("\n");
 
     print(enum_member_name(cast(Empty_Enum, 0)));
-    print_u64(enum_length(Empty_Enum), 10);
+    print_u64(u64(enum_length(Empty_Enum)), 10);
     print("\n");
 }
 

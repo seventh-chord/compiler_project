@@ -3613,7 +3613,7 @@ Expr* parse_compound(Context* context, Token* t, u32* length) {
         if (t->kind != TOKEN_BRACKET_CURLY_CLOSE) {
             if (t->kind != TOKEN_COMMA) {
                 print_file_pos(&t->pos);
-                printf("Expected comma ',' or closing parenthesis '}' after value in array litereral, but got ");
+                printf("Expected comma ',' or closing parenthesis '}' after value in compound, but got ");
                 print_token(context->string_table, t);
                 printf("\n");
                 *length = t - t_start;
@@ -5828,7 +5828,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                             return TYPECHECK_EXPR_BAD;
                         }
 
-                        if (member_type != child->type) {
+                        if (!type_can_assign(member_type, child->type)) {
                             u8* member_name = string_table_access(info->context->string_table, expr->type->structure.members[m].name);
                             u8* struct_name = string_table_access(info->context->string_table, expr->type->structure.name);
 
@@ -6537,7 +6537,7 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         case EXPR_VARIABLE: {
             if (expr->variable.index & VAR_INDEX_GLOBAL_FLAG) {
                 u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
-                Global_Var* global = &info->context->global_vars[global_index];
+                Global_Var *global = &info->context->global_vars[global_index];
 
                 if (global->compute_at_runtime) {
                     return EVAL_DO_AT_RUNTIME;
@@ -7326,6 +7326,7 @@ void build_enum_member_name_table(Context* context, Type* type) {
 enum {
     RUNTIME_BUILTIN_MEM_CLEAR,
     RUNTIME_BUILTIN_MEM_COPY,
+    RUNTIME_BUILTIN_INIT_GLOBALS,
     RUNTIME_BUILTIN_COUNT,
 };
 
@@ -7518,7 +7519,7 @@ typedef struct X64_Place {
 #define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
-//#define PRINT_GENERATED_INSTRUCTIONS
+#define PRINT_GENERATED_INSTRUCTIONS
 
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
@@ -7953,8 +7954,9 @@ void instruction_call(Context* context, bool builtin, u32 func_index) {
     u8 *name;
     if (builtin) {
         switch (func_index) {
-            case RUNTIME_BUILTIN_MEM_COPY:  name = "builtin_mem_copy"; break;
-            case RUNTIME_BUILTIN_MEM_CLEAR: name = "builtin_mem_clear"; break;
+            case RUNTIME_BUILTIN_MEM_COPY:     name = "builtin_mem_copy"; break;
+            case RUNTIME_BUILTIN_MEM_CLEAR:    name = "builtin_mem_clear"; break;
+            case RUNTIME_BUILTIN_INIT_GLOBALS: name = "init_globals"; break;
             default: assert(false);
         }
     } else {
@@ -9100,8 +9102,20 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
             u32 var_index = expr->variable.index;
-            Var *var = &func->body.vars[var_index];
-            X64_Address address = reg_allocator->var_mem_infos[var_index].address;
+            Var *var;
+            X64_Address address;
+
+            if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                Global_Var *global = &context->global_vars[var_index & ~VAR_INDEX_GLOBAL_FLAG];
+                assert(global->valid);
+                var = &global->var;
+
+                address = (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = global->data_offset };
+            } else {
+                var = &func->body.vars[var_index];
+                address = reg_allocator->var_mem_infos[var_index].address;
+            }
+
 
             if (var->is_reference) {
                 Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
@@ -10480,11 +10494,35 @@ void build_machinecode(Context *context) {
         instruction_ret(context);
     }
 
-    // Normal functions
+
     Reg_Allocator reg_allocator = {0};
     reg_allocator.negate_f32_data_offset = U64_MAX;
     reg_allocator.negate_f64_data_offset = U64_MAX;
 
+    // Initializing global variables
+    bool any_global_init = false;
+    {
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("; --- init globals ---\n");
+        #endif
+
+        runtime_builtin_text_starts[RUNTIME_BUILTIN_INIT_GLOBALS] = buf_length(context->seg_text);
+
+        buf_foreach (Global_Var, global, context->global_vars) {
+            if (global->compute_at_runtime) {
+                any_global_init = true;
+
+                X64_Address address = { .base = RIP_OFFSET_DATA, .immediate_offset = global->data_offset };
+                machinecode_for_expr(context, null, global->initial_expr, &reg_allocator, x64_place_address(address));
+            }
+        }
+
+        if (any_global_init) {
+            instruction_ret(context);
+        }
+    }
+
+    // Normal functions
     u8 *prolog = null; // stretchy-buffer
 
     u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
@@ -10597,6 +10635,10 @@ void build_machinecode(Context *context) {
                     }
                 }
             }
+        }
+
+        if (func == main_func && any_global_init) {
+            instruction_call(context, true, RUNTIME_BUILTIN_INIT_GLOBALS);
         }
 
         // Write out operations
@@ -11503,8 +11545,8 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
 void main() {
     i64 compile_time, run_time;
 
-    compile_and_run("W:/compiler/src/minimal.foo", "build/minimal_out.exe", &compile_time, &run_time);
-    //compile_and_run("W:/compiler/src/code.foo", "build/foo_out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/code.foo",  "build/test1.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/code2.foo", "build/test2.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
 
