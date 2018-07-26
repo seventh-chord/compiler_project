@@ -1779,10 +1779,8 @@ typedef struct Context {
     Type primitive_types[TYPE_KIND_COUNT];
     Type *void_pointer_type, *string_type, *type_info_type, *char_type;
     Type **user_types;
-
-    // These are only for temporary use, we copy to arena buffers & clear
     Global_Var *global_vars;
-    Var *tmp_vars;
+    Var *tmp_vars; // Only for temporary use, we copy to arena buffers & clear
 
     // Low level representation
     u8* seg_text;
@@ -7326,7 +7324,6 @@ void build_enum_member_name_table(Context* context, Type* type) {
 enum {
     RUNTIME_BUILTIN_MEM_CLEAR,
     RUNTIME_BUILTIN_MEM_COPY,
-    RUNTIME_BUILTIN_INIT_GLOBALS,
     RUNTIME_BUILTIN_COUNT,
 };
 
@@ -7956,7 +7953,6 @@ void instruction_call(Context* context, bool builtin, u32 func_index) {
         switch (func_index) {
             case RUNTIME_BUILTIN_MEM_COPY:     name = "builtin_mem_copy"; break;
             case RUNTIME_BUILTIN_MEM_CLEAR:    name = "builtin_mem_clear"; break;
-            case RUNTIME_BUILTIN_INIT_GLOBALS: name = "init_globals"; break;
             default: assert(false);
         }
     } else {
@@ -10500,25 +10496,45 @@ void build_machinecode(Context *context) {
     reg_allocator.negate_f64_data_offset = U64_MAX;
 
     // Initializing global variables
-    bool any_global_init = false;
+    u32 global_init_func_index = U32_MAX;
     {
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("; --- init globals ---\n");
-        #endif
+        Stmt *first_stmt = null;
+        Stmt *last_stmt = null;
 
-        runtime_builtin_text_starts[RUNTIME_BUILTIN_INIT_GLOBALS] = buf_length(context->seg_text);
-
-        buf_foreach (Global_Var, global, context->global_vars) {
+        for (u32 i = 0; i < buf_length(context->global_vars); i += 1) {
+            Global_Var *global = &context->global_vars[i];
             if (global->compute_at_runtime) {
-                any_global_init = true;
+                Expr *left = arena_new(&context->arena, Expr);
+                left->kind = EXPR_VARIABLE;
+                left->flags = EXPR_FLAG_ASSIGNABLE;
+                left->type = global->var.type;
+                left->variable.index = i | VAR_INDEX_GLOBAL_FLAG;
 
-                X64_Address address = { .base = RIP_OFFSET_DATA, .immediate_offset = global->data_offset };
-                machinecode_for_expr(context, null, global->initial_expr, &reg_allocator, x64_place_address(address));
+                Stmt *stmt = arena_new(&context->arena, Stmt);
+                stmt->kind = STMT_ASSIGNMENT;
+                stmt->assignment.left = left;
+                stmt->assignment.right = global->initial_expr;
+
+                if (first_stmt == null) {
+                    first_stmt = stmt;
+                } else {
+                    last_stmt->next = stmt;
+                }
+                last_stmt = stmt;
             }
         }
 
-        if (any_global_init) {
-            instruction_ret(context);
+        if (first_stmt != null) {
+            last_stmt->next = arena_new(&context->arena, Stmt);
+            last_stmt->next->kind = STMT_END;
+
+            Func func = {0};
+            func.name = string_table_intern_cstr(&context->string_table, "__init_globals__");
+            func.kind = FUNC_KIND_NORMAL;
+            func.body.first_stmt = first_stmt;
+
+            global_init_func_index = buf_length(context->funcs);
+            buf_push(context->funcs, func);
         }
     }
 
@@ -10637,11 +10653,11 @@ void build_machinecode(Context *context) {
             }
         }
 
-        if (func == main_func && any_global_init) {
-            instruction_call(context, true, RUNTIME_BUILTIN_INIT_GLOBALS);
+        // Write out operations
+        if (func == main_func && global_init_func_index != U32_MAX) {
+            instruction_call(context, false, global_init_func_index);
         }
 
-        // Write out operations
         for (Stmt* stmt = func->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
             machinecode_for_stmt(context, func, stmt, &reg_allocator);
         }
