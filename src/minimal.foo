@@ -347,16 +347,15 @@ fn floating_away() {
     let d = 1.0 + flow(1, 1.0, 1, 1.0) - 1.0;
     assert(d == 4.0, "Oops we sank");
 
-    sailing_away();
+    let n = f64(-7.9);
+    assert(i8(n) == -7, "\"Sailing\"");
+
+    let r = 4.234;
+    assert(r == f32(f64(r)), "Floating point casts are not working anymore");
 }
 
 fn flow(a: i8, b: f64, c: u16, d: f64) -> f64 {
     let four = f64(a) + b + f64(c) + d;
     let two: f64 = (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + 1.0))))))))) / 5.0;
     return (b + four/4.0) * two;
-}
-
-fn sailing_away() {
-    let n = f64(-7.9);
-    assert(i8(n) == -7, "\"Sailing\"");
 }

@@ -5876,10 +5876,6 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_BINARY: {
-            if (expr->binary.op == BINARY_EQ && expr->binary.left->kind == EXPR_CAST && expr->binary.right->kind == EXPR_UNARY) {
-                printf("DING\n");
-            }
-
             if (BINARY_OP_COMPARATIVE[expr->binary.op]) {
                 solidify_to = &info->context->primitive_types[TYPE_VOID];
             }
@@ -5988,7 +5984,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
             switch (expr->unary.op) {
                 case UNARY_NOT: {
-                    // TODO allow using UNARY_NOT to do a bitwise not on integers
+                    // TODO allow using UNARY_NOT to do a bitwise NOT on integers
                     expr->type = expr->unary.inner->type;
                     if (expr->type->kind != TYPE_BOOL) {
                         print_file_pos(&expr->unary.inner->pos);
@@ -7522,7 +7518,7 @@ typedef struct X64_Place {
 #define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
-#define PRINT_GENERATED_INSTRUCTIONS
+//#define PRINT_GENERATED_INSTRUCTIONS
 
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
@@ -8512,7 +8508,7 @@ void instruction_float(Context *context, int instruction, Register dst, X64_Plac
 
     // Ensure that the prefix is properly placed before the modrm byte
     // This is a bit of a hack
-    if ((opcode & 0xff) == 0xf2 || (opcode & 0xff) == 0xf3) {
+    if ((opcode & 0xff) == 0xf2 || (opcode & 0xff) == 0xf3 || (opcode & 0xff) == 0x66) {
         buf_push(context->seg_text, opcode & 0xff);
         opcode >>= 8;
     }
@@ -8865,7 +8861,25 @@ void machinecode_cast(Context *context, Register src, Register dst, Type_Kind fr
     if (from == TYPE_POINTER && to == TYPE_POINTER) {
         // This is a no-op
     } else if (primitive_is_float(from) && primitive_is_float(to)) {
-        unimplemented(); // TODO float->float casts
+        assert(is_xmm(src) && is_xmm(dst));
+
+        u32 opcode = 0;
+        if (from == to) {
+        } else if (from == TYPE_F32 && to == TYPE_F64) {
+            opcode = 0x5a0ff3;
+        } else if (from == TYPE_F64 && to == TYPE_F32) {
+            opcode = 0x5a0ff2;
+        } else {
+            assert(false);
+        }
+
+        if (opcode != 0) {
+            encode_instruction_modrm(context, REX_BASE, opcode, x64_place_reg(src), dst);
+
+            #ifdef PRINT_GENERATED_INSTRUCTIONS
+            printf("%s %s, %s\n", from == TYPE_F32? "cvtss2sd" : "cvtsd2ss", register_name(dst, to_size), register_name(src, from_size));
+            #endif
+        }
     } else if (primitive_is_float(from) && primitive_is_integer(to)) {
         assert(is_xmm(src));
         assert(is_gpr(dst));
