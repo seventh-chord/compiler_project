@@ -7364,7 +7364,7 @@ typedef enum Register_Kind {
     REGISTER_KIND_XMM,
 } Register_Kind;
 
-inline bool is_gpr(Register reg) { return reg >= RAX && reg <= R15; }
+inline bool is_gpr(Register reg) { return (reg >= RAX && reg <= R15) || (reg >= AH && reg <= BH); }
 inline bool is_xmm(Register reg) { return reg >= XMM0 && reg <= XMM15; }
 
 u8 REGISTER_INDICES[REGISTER_COUNT] = {
@@ -8624,9 +8624,9 @@ void register_allocator_leave_frame(Context *context, Reg_Allocator *allocator) 
         if (allocator->head->states[reg].flushed) {
             X64_Address tmp_address = allocator->head->states[reg].flushed_to;
 
-            if (reg >= RAX && reg <= R15) {
+            if (is_gpr(reg)) {
                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, tmp_address, reg, POINTER_SIZE);
-            } else if (reg >= XMM0 && reg <= XMM15) {
+            } else if (is_xmm(reg)) {
                 instruction_float_movd(context, MOVE_FROM_MEM, reg, x64_place_address(tmp_address), false);
             } else {
                 assert(false);
@@ -8701,9 +8701,9 @@ void register_allocate_specific(Context *context, Reg_Allocator *allocator, Regi
         assert(!allocator->head->states[reg].flushed);
 
         X64_Address tmp_address = register_allocator_temp_stack_space(allocator, POINTER_SIZE, POINTER_SIZE);
-        if (reg >= RAX && reg <= R15) {
+        if (is_gpr(reg)) {
             instruction_mov_reg_mem(context, MOVE_TO_MEM, tmp_address, reg, POINTER_SIZE);
-        } else if (reg >= XMM0 && reg <= XMM15) {
+        } else if (is_xmm(reg)) {
             instruction_float_movd(context, MOVE_TO_MEM, reg, x64_place_address(tmp_address), false);
         } else {
             assert(false);
@@ -9497,7 +9497,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                             if (primitive_is_signed(primitive)) {
                                 instruction_sign_extend_for_division(context, op_size);
                             } else {
-                                unimplemented(); // Zero out high part
+                                Register reg = op_size == 1? AH : RDX;
+                                instruction_integer(context, INTEGER_XOR, MOVE_FROM_MEM, reg, x64_place_reg(reg), op_size);
                             }
                         }
 
@@ -9512,6 +9513,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         instruction_scaling(context, instruction, x64_place_reg(right_reg), op_size);
 
                         Register target_reg = expr->binary.op == BINARY_MOD? RDX : RAX;
+                        if (op_size == 1 && target_reg == RDX) {
+                            target_reg = AH;
+                        }
+
                         if (left_reg != target_reg) {
                             instruction_mov_reg_reg(context, target_reg, left_reg, op_size);
                         }
@@ -10549,6 +10554,9 @@ void build_machinecode(Context *context) {
     assert(main_func->kind == FUNC_KIND_NORMAL); // TODO I'm not sure if this is strictly speaking neccesary!
 
     buf_foreach (Func, func, context->funcs) {
+        instruction_integer_imm(context, INTEGER_ADD, x64_place_reg(RSP), 2, 1);
+        instruction_int3(context);
+
         if (func->kind != FUNC_KIND_NORMAL) continue;
 
         u64 previous_call_fixup_count = buf_length(context->call_fixups);

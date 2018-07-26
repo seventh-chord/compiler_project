@@ -23,6 +23,7 @@ fn assert(condition: bool, message: String) {
 fn main() {
     floating_away();
     division();
+    division_take_two();
     a_raise();
     pointer_arithmetic();
 
@@ -360,4 +361,20 @@ fn flow(a: i8, b: f64, c: u16, d: f64) -> f64 {
     let four = f64(a) + b + f64(c) + d;
     let two: f64 = (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + (1.0 + 1.0))))))))) / 5.0;
     return (b + four/4.0) * two;
+}
+
+fn division_take_two() {
+    let n: u8 = 5;
+    let m: u8 = 16;
+
+    let o = m / n;
+    debug_break;
+    let p = m % n;
+
+    assert(o == 3, "Division is broken");
+    assert(p == 1, "Modulus is broken");
+
+    assert(m / n == 3, "Something here is broken");
+    assert(m % n == 1, "Something here is also broken");
+    assert(m * n == 80, "Something here is really broken");
 }

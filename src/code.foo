@@ -456,6 +456,10 @@ fn float_test(a, b: f32) {
 
 
 /*
+Instruction encoding issue:
+    If you try to encode a 8-bit 'add rsp, rsp', it will act as 'add ah, ah'.
+    For 8-bit instructions, you have to prefix REX for this to work as intended.
+
 Language features
     allow inserting debug interrupts (int 3) either via as a builtin function or as a keyword
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
