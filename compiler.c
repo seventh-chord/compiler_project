@@ -7985,72 +7985,6 @@ void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size
     #endif
 }
 
-void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
-    assert(is_gpr(reg));
-
-    if (mul_by == 0) {
-        return;
-    } else if ((mul_by & (mul_by - 1)) == 0) {
-        // Optimize by using a shift
-        assert(mul_by > 0);
-
-        u8 shift_by = 0;
-        u64 v = mul_by;
-        while ((v >>= 1) != 0) shift_by += 1;
-
-        encode_instruction_modrm(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_4);
-        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
-
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("shl %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
-        #endif
-    } else {
-        // We use imul here, but it is fine because mul and imul give the same result except for beyond the 64th bit
-
-        if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
-            encode_instruction_modrm(context, REX_BASE | REX_W, 0x6b, x64_place_reg(reg), reg);
-            str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &mul_by));
-        } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
-            encode_instruction_modrm(context, REX_BASE | REX_W, 0x69, x64_place_reg(reg), reg);
-            str_push_integer(&context->seg_text, sizeof(i32), *((u64*) &mul_by));
-        } else {
-            assert(false); // NB the immediate operand to the imul instruction can at most be a i32
-        }
-
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        u8 *reg_name = register_name(reg, POINTER_SIZE);
-        printf("imul %s, %s, %i\n", reg_name, reg_name, mul_by);
-        #endif
-    }
-}
-
-void instruction_idiv_pointer_imm(Context *context, Register reg, i64 div_by) {
-    assert(is_gpr(reg));
-
-    if (div_by == 0) {
-        panic("Atempted to generate idiv by 0\n");
-        return;
-    } else if ((div_by & (div_by - 1)) == 0) {
-        // Optimize by using a shift
-        assert(div_by > 0);
-
-        u8 shift_by = 0;
-        u64 v = div_by;
-        while ((v >>= 1) != 0) shift_by += 1;
-
-        encode_instruction_modrm(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_7);
-        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
-
-        #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("sar %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
-        #endif
-    } else {
-        unimplemented(); // TODO actually call idiv
-        // We probably don't want to actually call idiv, because that is slow. Instead, we should do the same
-        // trick as other compilers do (use godbolt to see it) involving a SAR and a IMUL
-    }
-}
-
 void instruction_negative(Context *context, bool unary, X64_Place place, u8 op_size) {
     u8 opcode = 0xf7;
     u8 rex = REX_BASE;
@@ -8345,6 +8279,76 @@ void instruction_integer_imm(Context *context, int instruction, X64_Place place,
     printf(", %u\n", value);
     #endif
 }
+
+void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
+    assert(is_gpr(reg));
+
+    if (mul_by == 0) {
+        assert(false); // We should never try to do this...
+    } else if (mul_by == 1) {
+        // Do nothing
+    } else if ((mul_by & (mul_by - 1)) == 0) {
+        // Optimize by using a shift
+        assert(mul_by > 0);
+
+        u8 shift_by = 0;
+        u64 v = mul_by;
+        while ((v >>= 1) != 0) shift_by += 1;
+
+        encode_instruction_modrm(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_4);
+        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("shl %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
+        #endif
+    } else {
+        // We use imul here, but it is fine because mul and imul give the same result except for beyond the 64th bit
+
+        if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
+            encode_instruction_modrm(context, REX_BASE | REX_W, 0x6b, x64_place_reg(reg), reg);
+            str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &mul_by));
+        } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
+            encode_instruction_modrm(context, REX_BASE | REX_W, 0x69, x64_place_reg(reg), reg);
+            str_push_integer(&context->seg_text, sizeof(i32), *((u64*) &mul_by));
+        } else {
+            assert(false); // NB the immediate operand to the imul instruction can at most be a i32
+        }
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        u8 *reg_name = register_name(reg, POINTER_SIZE);
+        printf("imul %s, %s, %i\n", reg_name, reg_name, mul_by);
+        #endif
+    }
+}
+
+void instruction_idiv_pointer_imm(Context *context, Register reg, i64 div_by) {
+    assert(is_gpr(reg));
+
+    if (div_by == 0) {
+        panic("Atempted to generate idiv by 0\n");
+    } else if (div_by == 1) {
+        // Do nothing
+    } else if ((div_by & (div_by - 1)) == 0) {
+        // Optimize by using a shift
+        assert(div_by > 0);
+
+        u8 shift_by = 0;
+        u64 v = div_by;
+        while ((v >>= 1) != 0) shift_by += 1;
+
+        encode_instruction_modrm(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_7);
+        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
+
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("sar %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
+        #endif
+    } else {
+        unimplemented(); // TODO actually call idiv
+        // We probably don't want to actually call idiv, because that is slow. Instead, we should do the same
+        // trick as other compilers do (use godbolt to see it) involving a SAR and a IMUL
+    }
+}
+
 
 enum {
     SCALING_MUL,
@@ -10439,7 +10443,7 @@ void build_machinecode(Context *context) {
 
     { // mem clear
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("; --- builtin mem clear ---\n");
+        printf("\n; --- builtin mem clear ---\n");
         #endif
 
         // RAX is pointer to memory, RCX is count. Both are modified in the process
@@ -10467,7 +10471,7 @@ void build_machinecode(Context *context) {
 
     { // mem copy
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        printf("; --- builtin mem copy ---\n");
+        printf("\n; --- builtin mem copy ---\n");
         #endif
 
         // RAX is src pointer, RDX is dst pointer, RCX is count, RBX is clobbered.
@@ -10554,9 +10558,6 @@ void build_machinecode(Context *context) {
     assert(main_func->kind == FUNC_KIND_NORMAL); // TODO I'm not sure if this is strictly speaking neccesary!
 
     buf_foreach (Func, func, context->funcs) {
-        instruction_integer_imm(context, INTEGER_ADD, x64_place_reg(RSP), 2, 1);
-        instruction_int3(context);
-
         if (func->kind != FUNC_KIND_NORMAL) continue;
 
         u64 previous_call_fixup_count = buf_length(context->call_fixups);
@@ -10566,7 +10567,7 @@ void build_machinecode(Context *context) {
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         u8* name = string_table_access(context->string_table, func->name);
-        printf(";\n; --- fn %s ---\n;\n", name);
+        printf("\n\n; --- fn %s ---\n", name);
         #endif
 
         // Lay out stack
@@ -10795,7 +10796,6 @@ void build_machinecode(Context *context) {
             Fixup *fixup = &context->fixups[i];
             fixup->text_location += prolog_length;
         }
-
     }
 
     buf_free(prolog);
@@ -11569,8 +11569,8 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
 void main() {
     i64 compile_time, run_time;
 
-    //compile_and_run("W:/compiler/src/code.foo",  "build/test1.exe", &compile_time, &run_time);
-    compile_and_run("W:/compiler/src/code2.foo", "build/test2.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/code.foo",  "build/test1.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/code2.foo", "build/test2.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
 

@@ -290,43 +290,6 @@ fn print_foo(foo: *Foo) {
     print(" }\n");
 }
 
-fn arena_test() {
-    print("Calvino inbound...\n");
-
-    let original = "[There are two kinds of cities]: those that through the years and the changes continue to give their form to desires, and those in which desires either erase the city or are erased by it.\n";
-
-    let arena: Arena;
-    let copy = arena_new(&arena, original.length + 1);
-    mem_copy(original.data, copy, original.length + 1);
-
-    print_u64(u64(original.length), 10);
-    print(" characters of Calvino\n");
-    print_cstr(copy);
-}
-
-
-let heap = GetProcessHeap();
-let ARENA_BLOCK_SIZE = 1024;
-
-struct Arena {
-    data: *u8;
-    used, capacity: i64;
-}
-
-fn arena_new(arena: *Arena, size: i64) -> *u8 {
-    if (arena.data == null) {
-        arena.data = HeapAlloc(heap, 0, u64(ARENA_BLOCK_SIZE));
-        arena.used = 0;
-        arena.capacity = ARENA_BLOCK_SIZE;
-    }
-
-    let result = arena.data + arena.used;
-    arena.used += size;
-    assert(arena.used <= arena.capacity, "arena.used <= arena.capacity");
-    return result;
-}
-
-
 fn stride_test() {
     let list = [3]u64 { 1, 2, 3 };
     let pointer = cast(*u64, &list);
@@ -452,6 +415,42 @@ fn float_test(a, b: f32) {
     print(" but it should be 0x");
     print_u64(u64(sum_bits), 16);
     print("!\n");
+}
+
+fn arena_test() {
+    print("Calvino inbound...\n");
+
+    let original = "[There are two kinds of cities]: those that through the years and the changes continue to give their form to desires, and those in which desires either erase the city or are erased by it.\n";
+
+    let arena: Arena;
+    let copy = arena_new(&arena, original.length + 1);
+    mem_copy(original.data, copy, original.length + 1);
+
+    print_u64(u64(original.length), 10);
+    print(" characters of Calvino\n");
+    print_cstr(copy);
+}
+
+
+let heap = GetProcessHeap();
+let ARENA_BLOCK_SIZE = 1024;
+
+struct Arena {
+    data: *u8;
+    used, capacity: i64;
+}
+
+fn arena_new(arena: *Arena, size: i64) -> *u8 {
+    if (arena.data == null) {
+        arena.data = HeapAlloc(heap, 0, u64(ARENA_BLOCK_SIZE));
+        arena.used = 0;
+        arena.capacity = ARENA_BLOCK_SIZE;
+    }
+
+    let result = arena.data + arena.used;
+    arena.used += size;
+    assert(arena.used <= arena.capacity, "arena.used <= arena.capacity");
+    return result;
 }
 
 

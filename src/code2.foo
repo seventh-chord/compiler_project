@@ -368,7 +368,6 @@ fn division_take_two() {
     let m: u8 = 16;
 
     let o = m / n;
-    debug_break;
     let p = m % n;
 
     assert(o == 3, "Division is broken");
