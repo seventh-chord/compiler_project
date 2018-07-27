@@ -9179,7 +9179,7 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
             if (parent_type->kind == TYPE_POINTER) {
                 parent_type = parent_type->pointer_to;
 
-                Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
+                Register address_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, place.address, address_reg, POINTER_SIZE);
                 place.address = (X64_Address) { .base = address_reg };
             }
@@ -9679,13 +9679,14 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
         } break;
 
         case EXPR_CALL: {
-            register_allocator_enter_frame(context, reg_allocator);
-
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
             u32 func_index = expr->call.func_index;
             Func *callee = &context->funcs[func_index];
 
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
+
+
+            register_allocator_enter_frame(context, reg_allocator); // outer frame for return registers
 
             Register return_reg;
             if (primitive_is_float(expr->type->kind)) {
@@ -9694,7 +9695,16 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 return_reg = RAX;
             }
 
+            bool move_from_return_reg = !((place.kind == PLACE_REGISTER && place.reg == return_reg) ||
+                                          place.kind == PLACE_NOWHERE ||
+                                          !callee->signature.has_return);
+            if (move_from_return_reg) {
+                register_allocate_specific(context, reg_allocator, return_reg);
+            }
+
             // Compute parameters
+            register_allocator_enter_frame(context, reg_allocator); // inner frame for parameters
+
             bool skip_first_param_reg = false;
             Register used_volatile_registers[INPUT_REGISTER_COUNT] = {0};
 
@@ -9711,8 +9721,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     return_into = place.address;
                 }
 
-                used_volatile_registers[0] = GPR_INPUT_REGISTERS[0];
-                instruction_lea(context, return_into, GPR_INPUT_REGISTERS[0]);
+                Register reg = GPR_INPUT_REGISTERS[0];
+                register_allocate_specific(context, reg_allocator, reg);
+                used_volatile_registers[0] = reg;
+                instruction_lea(context, return_into, reg);
             }
 
             for (u32 p = 0; p < callee->signature.param_count; p += 1) {
@@ -9729,10 +9741,14 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         reg = GPR_INPUT_REGISTERS[r];
                     }
 
-                    used_volatile_registers[p] = reg;
+                    used_volatile_registers[r] = reg;
                     target_place = x64_place_reg(reg);
                 } else {
                     target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = r*POINTER_SIZE } };
+                }
+
+                if (target_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && target_place.reg == place.reg)) {
+                    register_allocate_specific(context, reg_allocator, target_place.reg);
                 }
 
                 if (callee->signature.params[p].reference_semantics) {
@@ -9745,12 +9761,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                         machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, tmp_place);
                         if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
+
                         machinecode_lea(context, reg_allocator, tmp_address, target_place);
                     }
                 } else {
-                    if (target_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && target_place.reg == place.reg)) {
-                        register_allocate_specific(context, reg_allocator, target_place.reg);
-                    }
                     machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
                 }
             }
@@ -9775,13 +9789,11 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             }
 
             // Call function and handle return value
-            if ((place.kind == PLACE_REGISTER && place.reg == return_reg) || place.kind == PLACE_NOWHERE || !callee->signature.has_return) {
-                instruction_call(context, false, func_index);
-            } else {
-                register_allocate_specific(context, reg_allocator, return_reg);
+            instruction_call(context, false, func_index);
 
-                instruction_call(context, false, func_index);
+            register_allocator_leave_frame(context, reg_allocator); // inner frame for parameters
 
+            if (move_from_return_reg) {
                 assert(place.kind != PLACE_NOWHERE && callee->signature.has_return);
 
                 Type *return_type = callee->signature.return_type;
@@ -9797,7 +9809,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 }
             }
 
-            register_allocator_leave_frame(context, reg_allocator);
+            register_allocator_leave_frame(context, reg_allocator); // outer frame for return value
         } break;
 
         case EXPR_CAST: {
@@ -11569,8 +11581,8 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
 void main() {
     i64 compile_time, run_time;
 
-    compile_and_run("W:/compiler/src/code.foo",  "build/test1.exe", &compile_time, &run_time);
-    //compile_and_run("W:/compiler/src/code2.foo", "build/test2.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/code1.foo", "build/test1.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/code2.foo", "build/test2.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
 

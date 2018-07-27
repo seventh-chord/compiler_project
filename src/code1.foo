@@ -225,14 +225,12 @@ fn test_fancy_casts() {
 
 
 enum Name_Enum { ITS_seventh_chord }
-
-let my_name_a = "my name is \0 this won't show up due to the \0 earlier";
-let my_name_b = enum_member_name(Name_Enum::ITS_seventh_chord).data + 4;
+let my_name = enum_member_name(Name_Enum::ITS_seventh_chord).data + 4;
 
 fn say_my_name() {
-    print(my_name_a);
-    print_cstr(my_name_b);
-    print("\n");
+    print("My name is ");
+    print_cstr(my_name);
+    print("!\n");
 }
 
 fn test_is_prime() {
@@ -445,6 +443,8 @@ fn arena_new(arena: *Arena, size: i64) -> *u8 {
         arena.data = HeapAlloc(heap, 0, u64(ARENA_BLOCK_SIZE));
         arena.used = 0;
         arena.capacity = ARENA_BLOCK_SIZE;
+
+        assert(arena.data != null, "Failed to alocate");
     }
 
     let result = arena.data + arena.used;
