@@ -1684,22 +1684,21 @@ typedef struct Library_Import {
     u32* function_hints;
 } Library_Import;
 
-typedef struct Fixup {
-    // Fixups which rely on information about adresses in the final executable go here,
-    // other kinds of fixups can have their own struct
-
-    u64 text_location;
+typedef struct Rip_Fixup {
+    // Both values are indices to 'context.seg_text'
+    u64 next_instruction;
+    u64 rip_offset;
 
     enum {
-        FIXUP_IMPORTED_FUNCTION,
-        FIXUP_DATA,
+        RIP_FIXUP_IMPORT_CALL,
+        RIP_FIXUP_DATA,
     } kind;
 
     union {
         Import_Index import_index;
-        u32 data_offset;
+        i32 data_offset;
     };
-} Fixup;
+} Rip_Fixup;
 
 typedef struct Call_Fixup {
     u64 text_location;
@@ -1785,7 +1784,7 @@ typedef struct Context {
     // Low level representation
     u8* seg_text;
     u8* seg_data;
-    Fixup* fixups;
+    Rip_Fixup* fixups;
 
     Library_Import *imports;
     Call_Fixup *call_fixups;
@@ -7516,7 +7515,7 @@ typedef struct X64_Place {
 #define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
-#define PRINT_GENERATED_INSTRUCTIONS
+//#define PRINT_GENERATED_INSTRUCTIONS
 
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
@@ -7564,7 +7563,7 @@ inline bool x64_address_cmp(X64_Address a, X64_Address b) {
     return a.base == b.base && a.index == b.index && a.scale == b.scale && a.immediate_offset == b.immediate_offset;
 }
 
-void encode_instruction_modrm_reg_mem(Context *context, u8 rex, u32 opcode, X64_Address mem, Register reg) {
+void encode_instruction_modrm_reg_mem(Context *context, u8 rex, u32 opcode, X64_Address mem, Register reg, u64 immediate, u8 imm_bytes) {
     u8 modrm = 0;
     u8 sib = 0;
     bool use_sib = false;
@@ -7577,10 +7576,11 @@ void encode_instruction_modrm_reg_mem(Context *context, u8 rex, u32 opcode, X64_
     }
 
 
-    bool force_i32_offset = false;
+    bool force_i32_offset = false, rip_relative = false;
+
     Stack_Access_Fixup stack_access_fixup = {0};
     stack_access_fixup.kind = -1;
-    Fixup data_fixup = {0};
+    Rip_Fixup data_fixup = {0};
     data_fixup.kind = -1;
 
     if (mem.base == RSP_OFFSET_LOCALS || mem.base == RSP_OFFSET_INPUTS) {
@@ -7594,20 +7594,23 @@ void encode_instruction_modrm_reg_mem(Context *context, u8 rex, u32 opcode, X64_
     }
 
     if (mem.base == RIP_OFFSET_DATA) {
-        data_fixup.kind = FIXUP_DATA;
+        data_fixup.kind = RIP_FIXUP_DATA;
         data_fixup.data_offset = mem.immediate_offset;
 
-        mem.immediate_offset = 0;
         assert(mem.index == REGISTER_NONE);
+        mem.immediate_offset = 0xdeadbeef;
 
-        force_i32_offset = false;
+        rip_relative = true;
     }
 
     assert(is_gpr(mem.base) || mem.base == RSP_OFFSET_INPUTS || mem.base == RSP_OFFSET_LOCALS || mem.base == RIP_OFFSET_DATA);
     assert(mem.base != REGISTER_NONE);
     assert(is_gpr(mem.index) || mem.index == REGISTER_NONE);
 
-    if (mem.immediate_offset > I8_MAX || mem.immediate_offset < I8_MIN || force_i32_offset) {
+    if (rip_relative) {
+        modrm |= MODRM_MOD_POINTER;
+        offset_bytes = sizeof(i32);
+    } else if (mem.immediate_offset > I8_MAX || mem.immediate_offset < I8_MIN || force_i32_offset) {
         modrm |= MODRM_MOD_POINTER_PLUS_I32;
         offset_bytes = sizeof(i32);
     } else if (mem.immediate_offset != 0) {
@@ -7680,24 +7683,19 @@ void encode_instruction_modrm_reg_mem(Context *context, u8 rex, u32 opcode, X64_
         buf_push(context->seg_text, sib);
     }
 
-    if (offset_bytes > 0) {
-        stack_access_fixup.text_location = buf_length(context->seg_text);
+    data_fixup.rip_offset = buf_length(context->seg_text);
+    stack_access_fixup.text_location = buf_length(context->seg_text);
 
-        str_push_integer(&context->seg_text, offset_bytes, *((u32*) &mem.immediate_offset));
+    if (offset_bytes > 0) str_push_integer(&context->seg_text, offset_bytes, *((u32*) &mem.immediate_offset));
+    if (imm_bytes > 0)    str_push_integer(&context->seg_text, imm_bytes, immediate);
 
-        if (stack_access_fixup.kind != -1) {
-            buf_push(context->stack_access_fixups, stack_access_fixup);
-        }
-    }
+    data_fixup.next_instruction = buf_length(context->seg_text);
 
-    if (data_fixup.kind != -1) {
-        data_fixup.text_location = buf_length(context->seg_text);
-        str_push_integer(&context->seg_text, sizeof(u32), 0xdeadbeef);
-        buf_push(context->fixups, data_fixup);
-    }
+    if (data_fixup.kind != -1)         buf_push(context->fixups, data_fixup);
+    if (stack_access_fixup.kind != -1) buf_push(context->stack_access_fixups, stack_access_fixup);
 }
 
-void encode_instruction_modrm_reg_reg(Context *context, u8 rex, u32 opcode, Register mem, Register reg) {
+void encode_instruction_modrm_reg_reg(Context *context, u8 rex, u32 opcode, Register mem, Register reg, u64 immediate, u8 imm_bytes) {
     u8 modrm = 0xc0;
 
     modrm |= (REGISTER_INDICES[reg] & 0x07) << 3;
@@ -7720,13 +7718,27 @@ void encode_instruction_modrm_reg_reg(Context *context, u8 rex, u32 opcode, Regi
     } while(opcode != 0);
 
     buf_push(context->seg_text, modrm);
+
+    if (imm_bytes > 0) {
+        str_push_integer(&context->seg_text, imm_bytes, immediate);
+    }
 }
 
 void encode_instruction_modrm(Context *context, u8 rex, u32 opcode, X64_Place mem, Register reg) {
     if (mem.kind == PLACE_ADDRESS) {
-        encode_instruction_modrm_reg_mem(context, rex, opcode, mem.address, reg);
+        encode_instruction_modrm_reg_mem(context, rex, opcode, mem.address, reg, 0, 0);
     } else if (mem.kind == PLACE_REGISTER) {
-        encode_instruction_modrm_reg_reg(context, rex, opcode, mem.reg, reg);
+        encode_instruction_modrm_reg_reg(context, rex, opcode, mem.reg, reg, 0, 0);
+    } else {
+        assert(false);
+    }
+}
+
+void encode_instruction_modrm_with_immediate(Context *context, u8 rex, u32 opcode, X64_Place mem, Register reg, u64 immediate, u8 imm_bytes) {
+    if (mem.kind == PLACE_ADDRESS) {
+        encode_instruction_modrm_reg_mem(context, rex, opcode, mem.address, reg, immediate, imm_bytes);
+    } else if (mem.kind == PLACE_REGISTER) {
+        encode_instruction_modrm_reg_reg(context, rex, opcode, mem.reg, reg, immediate, imm_bytes);
     } else {
         assert(false);
     }
@@ -7901,8 +7913,7 @@ void instruction_cmp_imm(Context *context, X64_Place place, u64 imm, u8 op_size)
         assert(imm < I32_MAX);
     }
 
-    encode_instruction_modrm(context, rex, opcode, place, REGISTER_OPCODE_7);
-    str_push_integer(&context->seg_text, imm_size, imm);
+    encode_instruction_modrm_with_immediate(context, rex, opcode, place, REGISTER_OPCODE_7, imm, imm_size);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("cmp ");
@@ -7928,9 +7939,10 @@ void instruction_call(Context* context, bool builtin, u32 func_index) {
             buf_push(context->seg_text, 0x15);
             str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
 
-            Fixup fixup = {0};
-            fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
-            fixup.kind = FIXUP_IMPORTED_FUNCTION;
+            Rip_Fixup fixup = {0};
+            fixup.rip_offset = buf_length(context->seg_text) - sizeof(i32);
+            fixup.next_instruction = buf_length(context->seg_text);
+            fixup.kind = RIP_FIXUP_IMPORT_CALL;
             fixup.import_index = callee->import_info.index;
             buf_push(context->fixups, fixup);
         }
@@ -8134,12 +8146,11 @@ void instruction_mov_imm_mem(Context *context, X64_Address mem, u64 immediate, u
         default: assert(false);
     }
 
-    encode_instruction_modrm(context, rex, opcode, x64_place_address(mem), REGISTER_OPCODE_0);
-    str_push_integer(&context->seg_text, imm_size, immediate);
+    encode_instruction_modrm_with_immediate(context, rex, opcode, x64_place_address(mem), REGISTER_OPCODE_0, immediate, imm_size);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov ", (u64) op_size*8);
-    print_x64_address(mem);
+    printf("mov ");
+    print_x64_place(x64_place_address(mem), op_size);
     printf(", %x\n", immediate);
     #endif
 }
@@ -8270,8 +8281,7 @@ void instruction_integer_imm(Context *context, int instruction, X64_Place place,
         imm_size = 1;
     }
 
-    encode_instruction_modrm(context, rex, opcode, place, opcode_extension);
-    str_push_integer(&context->seg_text, imm_size, value);
+    encode_instruction_modrm_with_immediate(context, rex, opcode, place, opcode_extension, value, imm_size);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("%s ", INTEGER_INSTRUCTION_NAMES[instruction]);
@@ -8295,8 +8305,7 @@ void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
         u64 v = mul_by;
         while ((v >>= 1) != 0) shift_by += 1;
 
-        encode_instruction_modrm(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_4);
-        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
+        encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_4, shift_by, sizeof(u8));
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         printf("shl %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
@@ -8304,12 +8313,12 @@ void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
     } else {
         // We use imul here, but it is fine because mul and imul give the same result except for beyond the 64th bit
 
+        u64 mul_by_bits = *((u64*) &mul_by);
+
         if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
-            encode_instruction_modrm(context, REX_BASE | REX_W, 0x6b, x64_place_reg(reg), reg);
-            str_push_integer(&context->seg_text, sizeof(i8), *((u64*) &mul_by));
+            encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0x6b, x64_place_reg(reg), reg, sizeof(i8), mul_by_bits);
         } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
-            encode_instruction_modrm(context, REX_BASE | REX_W, 0x69, x64_place_reg(reg), reg);
-            str_push_integer(&context->seg_text, sizeof(i32), *((u64*) &mul_by));
+            encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0x69, x64_place_reg(reg), reg, sizeof(i32), mul_by_bits);
         } else {
             assert(false); // NB the immediate operand to the imul instruction can at most be a i32
         }
@@ -8336,8 +8345,7 @@ void instruction_idiv_pointer_imm(Context *context, Register reg, i64 div_by) {
         u64 v = div_by;
         while ((v >>= 1) != 0) shift_by += 1;
 
-        encode_instruction_modrm(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_7);
-        str_push_integer(&context->seg_text, sizeof(u8), shift_by);
+        encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0xc1, x64_place_reg(reg), REGISTER_OPCODE_7, shift_by, sizeof(u8));
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
         printf("sar %s, %u\n", register_name(reg, POINTER_SIZE), (u64) shift_by);
@@ -8515,11 +8523,12 @@ void instruction_float(Context *context, int instruction, Register dst, X64_Plac
         opcode >>= 8;
     }
 
-    encode_instruction_modrm(context, REX_BASE, opcode, src, dst);
 
     u8 required_immediate = FLOAT_REQUIRED_IMMEDIATE[instruction];
     if (required_immediate != 0) {
-        buf_push(context->seg_text, required_immediate);
+        encode_instruction_modrm_with_immediate(context, REX_BASE, opcode, src, dst, required_immediate, sizeof(u8));
+    } else {
+        encode_instruction_modrm(context, REX_BASE, opcode, src, dst);
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
@@ -10805,8 +10814,9 @@ void build_machinecode(Context *context) {
             fixup->text_location += prolog_length;
         }
         for (u64 i = previous_fixup_count; i < buf_length(context->fixups); i += 1) {
-            Fixup *fixup = &context->fixups[i];
-            fixup->text_location += prolog_length;
+            Rip_Fixup *fixup = &context->fixups[i];
+            fixup->rip_offset += prolog_length;
+            fixup->next_instruction += prolog_length;
         }
     }
 
@@ -11198,34 +11208,6 @@ bool write_executable(u8* path, Context* context) {
     u64 pdata_memory_start = data_memory_start  + round_to_next(data_length,  in_memory_alignment);
     u64 idata_memory_start = pdata_memory_start + round_to_next(pdata_length, in_memory_alignment);
 
-    // Verify that fixups are not bogus data, so we don't have to do that later...
-    buf_foreach (Fixup, fixup, context->fixups) {
-        if (fixup->text_location >= text_length) {
-            panic("Can't apply fixup at %x which is beyond end of text section at %x\n", fixup->text_location, text_length);
-        }
-
-        i32 text_value = *((u32*) (context->seg_text + fixup->text_location));
-        if (text_value != 0xdeadbeef) {
-            panic("All fixup override locations should be set to 0xdeadbeef as a sentinel. Found %x instead\n", text_value);
-        }
-
-        switch (fixup->kind) {
-            case FIXUP_IMPORTED_FUNCTION: {
-                u32 l = fixup->import_index.library;
-                u32 f = fixup->import_index.function;
-
-                assert(l < buf_length(context->imports));
-                assert(f < buf_length(context->imports[l].function_names));
-            } break;
-
-            case FIXUP_DATA: {
-                assert(fixup->data_offset < data_length);
-            } break;
-
-            default: assert(false);
-        }
-    }
-
     // Build idata
     u8* idata = null;
     typedef struct Import_Entry {
@@ -11282,15 +11264,16 @@ bool write_executable(u8* path, Context* context) {
         entry->name_address          = idata_memory_start + name_table_start;
 
         // Apply fixups for this library
-        buf_foreach (Fixup, fixup, context->fixups) {
-            if (fixup->kind != FIXUP_IMPORTED_FUNCTION || fixup->import_index.library != i) { continue; }
+        buf_foreach (Rip_Fixup, fixup, context->fixups) {
+            if (fixup->kind != RIP_FIXUP_IMPORT_CALL || fixup->import_index.library != i) continue;
+            assert(fixup->rip_offset + 4 <= fixup->next_instruction);
 
             u32 function = fixup->import_index.function;
             u64 function_address = idata_memory_start + address_table_start + sizeof(u64)*function;
 
-            i32* text_value = (i32*) (context->seg_text + fixup->text_location);
-            *text_value = function_address;
-            *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
+            i32* text_value = (i32*) (context->seg_text + fixup->rip_offset);
+            assert(*text_value == 0xdeadbeef);
+            *text_value = function_address - (text_memory_start + fixup->next_instruction);
         }
     }
     u64 idata_length = buf_length(idata);
@@ -11299,20 +11282,15 @@ bool write_executable(u8* path, Context* context) {
     u64 file_image_size   = idata_file_start   + round_to_next(idata_length, in_file_alignment);
     u64 memory_image_size = idata_memory_start + round_to_next(idata_length, in_memory_alignment);
 
-    // Apply data & function fixups
-    buf_foreach (Fixup, fixup, context->fixups) {
-        i32* text_value = (u32*) (context->seg_text + fixup->text_location);
+    // Apply data fixups
+    buf_foreach (Rip_Fixup, fixup, context->fixups) {
+        if (fixup->kind != RIP_FIXUP_DATA) continue;
+        assert(fixup->data_offset < data_length);
+        assert(fixup->rip_offset + 4 <= fixup->next_instruction);
 
-        switch (fixup->kind) {
-            case FIXUP_IMPORTED_FUNCTION: break;
-
-            case FIXUP_DATA: {
-                *text_value = data_memory_start + fixup->data_offset;
-                *text_value -= (text_memory_start + fixup->text_location + sizeof(i32)); // make relative
-            } break;
-
-            default: assert(false);
-        }
+        i32 *text_value = (u32*) (context->seg_text + fixup->rip_offset);
+        assert(*text_value == 0xdeadbeef);
+        *text_value = data_memory_start + fixup->data_offset - (text_memory_start + fixup->next_instruction);
     }
 
     // Set up section headers
@@ -11581,7 +11559,7 @@ void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_
 void main() {
     i64 compile_time, run_time;
 
-    //compile_and_run("W:/compiler/src/code1.foo", "build/test1.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/code1.foo", "build/test1.exe", &compile_time, &run_time);
     compile_and_run("W:/compiler/src/code2.foo", "build/test2.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
