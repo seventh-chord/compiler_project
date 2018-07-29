@@ -7676,9 +7676,11 @@ void encode_instruction_modrm_reg_mem(
     }
 
     if (eight_bit_reg_semantics && is_gpr_high(reg)) {
-        unimplemented(); // TODO TODO TODO TODO
+        // NB As per the comment in 'encode_instruction_modrm_reg_reg', we only ever use high registers (AH, CH, DH, BH)
+        // in specific, hardcoded cases. None of these cases hit this path, and thus we don't have to implement it.
+        // (The only place where high registers are needed are for 8-bit division/modulus)
+        assert(false);
     }
-
 
 
     if (rex != REX_BASE) {
@@ -7728,11 +7730,16 @@ void encode_instruction_modrm_reg_reg(
 
     bool force_rex = false;
     if (eight_bit_reg_semantics) {
+        // NB Because we in practice only use the high registers in specific cases
+        // we can avoid any of the assertions here actually triggering.
+        // The only place where high registers currently are used is for
+        // integer division.
+
         assert(!(rex & REX_W));
 
         bool any_high = (reg >=  AH && reg <=  BH) || (mem >=  AH && reg <=  BH);
         bool any_low  = (reg >= RSP && reg <= RDI) || (mem >= RSP && mem <= RDI);
-        assert(!(any_high && any_low)); // In practice, we only use the high registers in specific cases, so this assert should not fire
+        assert(!(any_high && any_low));
 
         if (any_low)  force_rex = true;
         if (any_high) assert(rex == REX_BASE);
