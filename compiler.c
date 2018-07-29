@@ -9570,7 +9570,12 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
                         Register target_reg = expr->binary.op == BINARY_MOD? RDX : RAX;
                         if (op_size == 1 && target_reg == RDX) {
-                            target_reg = AH; // TODO TODO TODO this might cause encoding issues
+                            if (left_reg >= RSP) {
+                                instruction_mov_reg_reg(context, AH, RAX, 1);
+                                target_reg = RAX;
+                            } else {
+                                target_reg = AH;
+                            }
                         }
 
                         if (left_reg != target_reg) {

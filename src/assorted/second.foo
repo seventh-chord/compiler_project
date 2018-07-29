@@ -381,6 +381,6 @@ fn division_take_two() {
 }
 
 fn x64_eight_bit_register_bug() {
-    let a: u8 = 1 + (1 + (1 + (1 + (1 + (1 + (1 + 1))))));
-    assert(a == 8, "Why is x64 such a hodgepodge?");
+    let a: u8 = 1 + (1 + (1 + (1 + (1 % (1 + (1 + 1))))));
+    assert(a == 5, "Why is x64 such a hodgepodge?");
 }
