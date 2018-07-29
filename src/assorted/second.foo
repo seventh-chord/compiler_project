@@ -21,6 +21,8 @@ fn assert(condition: bool, message: String) {
 }
 
 fn main() {
+    x64_eight_bit_register_bug();
+
     floating_away();
     division();
     division_take_two();
@@ -376,4 +378,9 @@ fn division_take_two() {
     assert(m / n == 3, "Something here is broken");
     assert(m % n == 1, "Something here is also broken");
     assert(m * n == 80, "Something here is really broken");
+}
+
+fn x64_eight_bit_register_bug() {
+    let a: u8 = 1 + (1 + (1 + (1 + (1 + (1 + (1 + 1))))));
+    assert(a == 8, "Why is x64 such a hodgepodge?");
 }

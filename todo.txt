@@ -1,0 +1,38 @@
+Language features
+    comparing pointer as if they were integers (doable in C, and potentially usefull...)
+    real constants
+    function pointers
+    complete type_info_of_{value, type}
+    size_of, align_of
+    slices
+    a 'any' type (pointer + type info)
+    uninitialized (zeroed) global variables in .bss
+    unions
+    more operators      <<   >>   |   &   ~   ||   &&    /=    *=
+    variable shadowing
+    taking the address of temporaries (c doesn't support this though, and it messes with potential optimization)
+    a defer statement
+    figure out how to do no parentheses in loops/conditionals
+    maybe a better parser for floats? The current one is pretty accurate for f32 at least though
+    structure definitions inside functions
+    casts from/to bool
+
+Compiler functionality
+    stack unwinding - so we can produce a stack trace on e.g. assert
+    .pdata and unwind info
+    enabling subsystem windows (over subsystem console)
+    debug info
+    growing the stack? __chkstk
+    static libraries (currently we only support dynamic libraries) (Although both static and dynamic libraries have a .lib file on windows, I think explicitly stating whether we expect to load a file as static or dynamic in code is good, as it serves to avoid confusion)
+    proper error message when 'fn main' is missing
+    can we toggle fp exceptions? Should we expose that?
+
+Optimized code-gen
+    constant folding
+    common subexpression elimination
+    avoid using reference semantics for structs of sizes 3, 5, 6, and 7 (we don't for sizes 1, 2, 4 and 8)
+    sethi-ullman? (reordering the order in which we evaluate subexpressions for better register allocation)
+    at least prefer using non-volatile registers when a function call is comming up, so we don't have to store the contents
+    register allocation accross statement-boundaries
+    align functions to 32-bit boundaries, padding with nops (many compilers do this, do we have to though? also, why the padding with noops?)
+    peephole optimizations
