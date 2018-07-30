@@ -180,6 +180,8 @@ int _fltused; // To make floating point work without the c runtime
     } System_Info;
 
     WINAPI_PRE void WINAPI_POST GetSystemInfo(System_Info* info);
+
+    WINAPI_PRE u8* WINAPI_POST GetCommandLineA(void);
 #endif
 
 Handle stdout;
@@ -338,7 +340,7 @@ void mem_fill(u8 *ptr, u8 value, u64 count) {
     }
 }
 
-bool mem_cmp(u8* a, u8* b, u64 count) {
+bool mem_cmp(u8 *a, u8 *b, u64 count) {
     while (count >= 8) {
         if (*((u64*) a) != *((u64*) b)) {
             return false;
@@ -370,7 +372,7 @@ u64 str_length(u8* s) {
     return length;
 }
 
-bool str_cmp(u8* a, u8* b) {
+bool str_cmp(u8 *a, u8 *b) {
     while (true) {
         if (*a != *b) {
             return false;
@@ -387,7 +389,7 @@ bool str_cmp(u8* a, u8* b) {
     return true;
 }
 
-void u32_fill(u32* ptr, u64 count, u32 value) {
+void u32_fill(u32 *ptr, u64 count, u32 value) {
     for (u64 i = 0; i < count; i += 1) {
         *ptr = value;
         ptr += 1;
@@ -11530,53 +11532,6 @@ bool write_executable(u8* path, Context* context) {
 }
 
 
-void print_verbose_info(Context* context) {
-    printf("\n%u functions:\n", (u64) buf_length(context->funcs));
-    buf_foreach (Func, func, context->funcs) {
-        u8* name = string_table_access(context->string_table, func->name);
-        printf("  fn %s\n", name);
-
-        switch (func->kind) {
-            case FUNC_KIND_NORMAL:
-            {
-                printf("    %u variables: ", (u64) func->body.var_count);
-                for (u32 v = 0; v < func->body.var_count; v += 1) {
-                    Var* var = &func->body.vars[v];
-                    u8* name = string_table_access(context->string_table, var->name);
-
-                    if (v > 0) printf(",");
-                    printf("%s: ", name);
-                    print_type(context, var->type);
-                }
-                printf("\n");
-
-                printf("    Statements:\n");
-                for (Stmt *stmt = func->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
-                    print_stmt(context, func, stmt, 2);
-                }
-            } break;
-
-            case FUNC_KIND_IMPORTED: {
-                printf("    (Imported)\n");
-            } break;
-        }
-    }
-}
-
-bool build_file_to_executable(u8* source_path, u8* exe_path) {
-    Context context = {0};
-
-    if (!build_ast(&context, source_path)) return false;
-    if (!typecheck(&context)) return false;
-    //print_verbose_info(&context);
-    build_machinecode(&context);
-    if (!write_executable(exe_path, &context)) return false;
-
-    printf("Generated %u bytes of machine code\n", buf_length(context.seg_text));
-
-    return true;
-}
-
 bool run_executable(u8* exe_path) {
     Startup_Info startup_info = {0};
     startup_info.size = sizeof(Startup_Info);
@@ -11592,32 +11547,107 @@ bool run_executable(u8* exe_path) {
     return true;
 }
 
-void compile_and_run(u8 *source_path, u8 *exe_path, i64 *compile_time, i64 *run_time) {
-    i64 start_time, middle_time, end_time;
-    start_time = perf_time();
 
-    printf("Compiling %s to %s\n", source_path, exe_path);
-    if (build_file_to_executable(source_path, exe_path)) {
-        middle_time = perf_time();
-        printf("Running %s:\n", exe_path);
-        run_executable(exe_path);
-        end_time = perf_time();
-    } else {
-        middle_time = end_time = perf_time();
+
+u64 eat_word(u8 **str) {
+    u64 length = 0;
+    while (**str != ' ' && **str != 0) {
+        length += 1;
+        *str += 1;
     }
-
-    *compile_time = (middle_time - start_time) * 1000 / perf_frequency;
-    *run_time = (end_time - middle_time) * 1000 / perf_frequency;
+    while (**str == ' ' && **str != 0) {
+        *str += 1;
+    }
+    return length;
 }
 
+u8 *make_null_terminated(Arena *arena, u8 *str, u64 length) {
+    u8 *result = arena_alloc(arena, length + 1);
+    result[length] = 0;
+    mem_copy(str, result, length);
+    return result;
+}
+
+void print_usage() {
+    printf("Usage:  sea <source> <executable> [flags]\n");
+    printf("Flags:\n");
+    printf("    -r    Run generated executable\n");
+}
 
 void main() {
-    i64 compile_time, run_time;
+    Arena arena = {0};
 
-    //compile_and_run("W:/compiler/src/assorted/first.foo", "build/test1.exe", &compile_time, &run_time);
-    //compile_and_run("W:/compiler/src/assorted/second.foo", "build/test2.exe", &compile_time, &run_time);
-    //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
-    compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
+    u8 *command_line = GetCommandLineA();
+    eat_word(&command_line); // skip executable name
 
-    printf("Compiled in %i ms, ran in %i ms\n", compile_time, run_time);
+    u8 *source_name = command_line;
+    u64 source_name_length = eat_word(&command_line);
+    source_name = make_null_terminated(&arena, source_name, source_name_length);
+
+    if (source_name_length == 0) {
+        printf("No source name given\n");
+        print_usage();
+        return;
+    }
+
+    u8 *exe_name = command_line;
+    u64 exe_name_length = eat_word(&command_line);
+    exe_name = make_null_terminated(&arena, exe_name, exe_name_length);
+
+    if (exe_name_length == 0) {
+        printf("No executable name given\n");
+        print_usage();
+        return;
+    }
+
+    bool run_after_compile = false;
+
+    while (true) {
+        u8* flag = command_line;
+        u64 flag_length = eat_word(&command_line);
+        if (flag_length == 0) break;
+
+        bool found_match = false;
+        if (flag_length == 2 && flag[0] == '-') {
+            found_match = true;
+
+            u8 c = flag[1];
+            switch (c) {
+                case 'r': {
+                    run_after_compile = true;
+                } break;
+
+                default: {
+                    found_match = false;
+                } break;
+            }
+        }
+
+        if (!found_match) {
+            printf("Unkown flag: %z\n", flag_length, flag);
+            print_usage();
+            return;
+        }
+    }
+
+    printf("Compiling %s to %s\n", source_name, exe_name);
+
+    i64 start = perf_time();
+
+    Context context = {0};
+    context.arena = arena;
+    if (!build_ast(&context, source_name)) return;
+    if (!typecheck(&context)) return;
+    build_machinecode(&context);
+    if (!write_executable(exe_name, &context)) return;
+
+    i64 end = perf_time();
+    i64 time_in_ms = (end - start)*1000 / perf_frequency;
+
+    printf("Generated %u bytes of machine code\n", buf_length(context.seg_text));
+    printf("Compiled in %i ms\n", time_in_ms);
+
+    if (run_after_compile) {
+        run_executable(exe_name);
+    }
 }

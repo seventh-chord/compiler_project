@@ -1,4 +1,14 @@
+Unimplemented & bugs
+    Integer division algorithm
+    machinecode_move bug (documented in code, I think)
+
+Other
+    infer executable name if none is given on command line
+    allow passing command line before source name (do we want this? it probably what people expect though)
+    make test failures easier to spot
+
 Language features
+    includes - either textual or preferably with some nice system!
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
     real constants
     function pointers
@@ -17,7 +27,7 @@ Language features
     structure definitions inside functions
     casts from/to bool
 
-Compiler functionality
+Compiler internals
     stack unwinding - so we can produce a stack trace on e.g. assert
     .pdata and unwind info
     enabling subsystem windows (over subsystem console)

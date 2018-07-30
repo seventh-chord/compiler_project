@@ -22,7 +22,5 @@ link /nologo^
     /debug^
     /incremental:no^
     /entry:program_entry^
-    /out:"build\compiler.exe"^
+    /out:"build\sea.exe"^
     build\main.obj kernel32.lib^
- &&^
-build\compiler.exe
