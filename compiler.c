@@ -208,22 +208,23 @@ void printf_flush();
 u8 *preload_code_text = PRELOAD_QUOTE(
 
 enum Type_Kind (u8) { // We rely on this enum being one byte large!
-    VOID    = 1,
-    BOOL    = 2,
-    U8      = 4,
-    U16     = 5,
-    U32     = 6,
-    U64     = 7,
-    I8      = 8,
-    I16     = 9,
-    I32     = 10,
-    I64     = 11,
-    F32     = 13,
-    F64     = 14,
-    POINTER = 15,
-    ARRAY   = 16,
-    STRUCT  = 18,
-    ENUM    = 19,
+    VOID        = 1,
+    BOOL        = 2,
+    U8          = 4,
+    U16         = 5,
+    U32         = 6,
+    U64         = 7,
+    I8          = 8,
+    I16         = 9,
+    I32         = 10,
+    I64         = 11,
+    F32         = 13,
+    F64         = 14,
+    POINTER     = 15,
+    ARRAY       = 16,
+    STRUCT      = 18,
+    ENUM        = 19,
+    FUNC_PTR    = 20,
 }
 
 // NB Don't change the definition of this struct. It's exact definition is depended
@@ -1196,7 +1197,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 };
 
 
-typedef enum Builtin_Func {
+typedef enum Builtin_Fn {
     BUILTIN_INVALID = 0,
 
     BUILTIN_TYPE_INFO_OF_TYPE,
@@ -1206,7 +1207,7 @@ typedef enum Builtin_Func {
     BUILTIN_CAST,
 
     BUILTIN_COUNT,
-} Builtin_Func;
+} Builtin_Fn;
 
 
 // NB NB NB This MUST always be synchronized with the values in preload.foo
@@ -1233,7 +1234,9 @@ typedef enum Type_Kind {
     TYPE_STRUCT = 18,
     TYPE_ENUM = 19,
 
-    TYPE_KIND_COUNT = 20,
+    TYPE_FN_POINTER = 20,
+
+    TYPE_KIND_COUNT = 21,
 } Type_Kind;
 
 enum { POINTER_SIZE = 8 };
@@ -1265,6 +1268,8 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_UNRESOLVED_NAME]  = "<unresolved>",
     [TYPE_STRUCT]           = "<struct>",
     [TYPE_ENUM]             = "<enum>",
+
+    [TYPE_FN_POINTER]         = "<fn ptr>",
 };
 
 
@@ -1273,6 +1278,7 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
 
 typedef struct Type Type;
 typedef struct Type_List Type_List;
+typedef struct Fn_Signature Fn_Signature;
 
 struct Type {
     Type_Kind kind;
@@ -1319,6 +1325,8 @@ struct Type {
         } array;
 
         Type* pointer_to;
+
+        Fn_Signature *fn_signature;
     };
 
     Type* pointer_type;
@@ -1518,7 +1526,7 @@ struct Expr { // 'typedef'd earlier!
         } unary;
 
         struct {
-            union { u32 unresolved_name; u32 func_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
+            union { u32 unresolved_name; u32 fn_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
 
             Expr** params; // []*Expr
             u32 param_count;
@@ -1705,7 +1713,7 @@ typedef struct Rip_Fixup {
 typedef struct Call_Fixup {
     u64 text_location;
     bool builtin;
-    u32 func_index;
+    u32 fn_index;
 } Call_Fixup;
 
 typedef struct Stack_Access_Fixup {
@@ -1728,28 +1736,28 @@ typedef struct Jump_Fixup {
 } Jump_Fixup;
 
 
-typedef struct Func {
+struct Fn_Signature { // NB typedef is further up
+    bool has_return;
+    bool return_by_reference; // otherwise return in RAX, which we can even do for structs. See reference/notes.md
+    Type *return_type;
+
+    struct {
+        Type *type;
+        bool reference_semantics;
+    } *params;
+    u32 param_count;
+};
+
+typedef struct Fn {
     u32 name;
+
+    Fn_Signature *signature;
     File_Pos declaration_pos;
 
     enum {
         FUNC_KIND_NORMAL, // use '.body'
         FUNC_KIND_IMPORTED, // use '.import_info'
     } kind;
-
-    struct {
-        bool has_return;
-        Type* return_type;
-
-        bool return_by_reference; // otherwise return in RAX, which we can even do for structs. See reference/notes.md
-
-        struct {
-            Type* type;
-            u32 var_index;
-            bool reference_semantics;
-        } *params;
-        u32 param_count;
-    } signature;
 
     union {
         struct {
@@ -1759,13 +1767,14 @@ typedef struct Func {
         struct {
             Var* vars;
             u32 var_count;
+            u32 *param_var_mappings;
 
             Stmt* first_stmt;
 
             u32 text_start;
         } body;
     };
-} Func;
+} Fn;
 
 
 typedef struct Context {
@@ -1776,19 +1785,22 @@ typedef struct Context {
     u32 builtin_names[BUILTIN_COUNT];
 
     // AST & intermediate representation
-    Func* funcs;
+    Fn *fns; // stretchy buffer
+    Fn_Signature **fn_signatures; // stretchy buffer
+    Fn_Signature *void_fn_signature;
+
     Type primitive_types[TYPE_KIND_COUNT];
     Type *void_pointer_type, *string_type, *type_info_type, *char_type;
-    Type **user_types;
-    Global_Var *global_vars;
-    Var *tmp_vars; // Only for temporary use, we copy to arena buffers & clear
+    Type **user_types; // stretchy buffer
+    Global_Var *global_vars; // stretchy buffer
+    Var *tmp_vars; // stretchy buffer, only for temporary use, we copy to arena buffers & clear
 
     // Low level representation
-    u8* seg_text;
-    u8* seg_data;
-    Rip_Fixup* fixups;
+    u8 *seg_text;
+    u8 *seg_data;
 
     Library_Import *imports;
+    Rip_Fixup *fixups;
     Call_Fixup *call_fixups;
     Stack_Access_Fixup *stack_access_fixups;
     Jump_Fixup *jump_fixups;
@@ -1853,9 +1865,13 @@ void init_primitive_types(Context* context) {
 
     context->void_pointer_type = get_pointer_type(context, &context->primitive_types[TYPE_VOID]);
     context->char_type         = &context->primitive_types[TYPE_CHAR];
+
+    assert(buf_empty(context->fn_signatures));
+    context->void_fn_signature = arena_new(&context->arena, Fn_Signature);
+    buf_push(context->fn_signatures, context->void_fn_signature);
 }
 
-void init_builtin_func_names(Context* context) {
+void init_builtin_fn_names(Context* context) {
     context->builtin_names[BUILTIN_TYPE_INFO_OF_TYPE]  = string_table_intern_cstr(&context->string_table, "type_info_of_type");
     context->builtin_names[BUILTIN_TYPE_INFO_OF_VALUE] = string_table_intern_cstr(&context->string_table, "type_info_of_value");
     context->builtin_names[BUILTIN_ENUM_MEMBER_NAME]   = string_table_intern_cstr(&context->string_table, "enum_member_name");
@@ -1916,6 +1932,30 @@ Condition find_condition_for_op_and_type(Binary_Op op, bool is_signed) {
     return 0;
 }
 
+bool fn_signature_cmp(Fn_Signature *a, Fn_Signature *b) {
+    if (!mem_cmp((u8*) a, (u8*) b, sizeof(Fn_Signature))) return false;
+    
+    u64 a_param_data = a->param_count * sizeof(*(a->params));
+    u64 b_param_data = b->param_count * sizeof(*(b->params));
+    assert(a_param_data == b_param_data);
+
+    if (!mem_cmp((u8*) a, (u8*) b, a_param_data)) return false;
+
+    return true;
+}
+
+Fn_Signature *fn_signature_canonicalize(Context *context, Fn_Signature *fn_signature) {
+    buf_foreach (Fn_Signature*, other, context->fn_signatures) {
+        if (fn_signature_cmp(*other, fn_signature)) {
+            return fn_signature;
+        }
+    }
+
+    Fn_Signature *canonicalized = arena_insert_with_size(&context->arena, fn_signature, sizeof(Fn_Signature));
+    buf_push(context->fn_signatures, canonicalized);
+    return canonicalized;
+}
+ 
 // Says '*[3]Foo' is equal to '*Foo'
 bool type_can_assign(Type* a, Type* b) {
     if (a == b) return true;
@@ -1965,6 +2005,7 @@ u8 primitive_size_of(Type_Kind primitive) {
         case TYPE_F32: return 4;
         case TYPE_F64: return 8;
         case TYPE_POINTER: return POINTER_SIZE;
+        case TYPE_FN_POINTER:  return POINTER_SIZE;
         case TYPE_INVALID: assert(false); return 0;
         case TYPE_ARRAY: assert(false); return 0;
         case TYPE_STRUCT: assert(false); return 0;
@@ -2077,6 +2118,7 @@ bool primitive_is_compound(Type_Kind primitive) {
         case TYPE_VOID: return false;
         case TYPE_ENUM: return false;
         case TYPE_POINTER: return false;
+        case TYPE_FN_POINTER: return false;
         case TYPE_INVALID: assert(false); return false;
         case TYPE_UNRESOLVED_NAME: assert(false); return false;
 
@@ -2191,6 +2233,20 @@ void print_type(Context* context, Type* type) {
                 type = type->pointer_to;
             } break;
 
+            case TYPE_FN_POINTER: {
+                Fn_Signature *fn = type->fn_signature;
+
+                printf("*fn(");
+                for (u32 i = 0; i < fn->param_count; i += 1) {
+                    print_type(context, fn->params[i].type);
+                }
+                printf(")");
+                if (fn->has_return) {
+                    printf(" -> ");
+                    print_type(context, fn->return_type);
+                }
+            } break;
+
             case TYPE_ARRAY: {
                 printf("[%u]", type->array.length);
                 type = type->array.of;
@@ -2244,7 +2300,7 @@ void print_token(u8* string_table, Token* t) {
     }
 }
 
-void print_expr(Context* context, Func* func, Expr* expr) {
+void print_expr(Context* context, Fn* fn, Expr* expr) {
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
@@ -2256,7 +2312,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                     u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
                     var = &context->global_vars[global_index].var;
                 } else {
-                    var = &func->body.vars[expr->variable.index];
+                    var = &fn->body.vars[expr->variable.index];
                 }
 
                 if (var != null) {
@@ -2308,7 +2364,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 if (member_name != null) printf("%s: ", member_name);
 
                 Expr* child = expr->compound.content[i].expr;
-                print_expr(context, func, child);
+                print_expr(context, fn, child);
             }
             printf(" }");
         } break;
@@ -2319,15 +2375,15 @@ void print_expr(Context* context, Func* func, Expr* expr) {
 
         case EXPR_BINARY: {
             printf("(");
-            print_expr(context, func, expr->binary.left);
+            print_expr(context, fn, expr->binary.left);
             printf(" %s ", BINARY_OP_SYMBOL[expr->binary.op]);
-            print_expr(context, func, expr->binary.right);
+            print_expr(context, fn, expr->binary.right);
             printf(")");
         } break;
 
         case EXPR_UNARY: {
             printf(UNARY_OP_SYMBOL[expr->unary.op]);
-            print_expr(context, func, expr->unary.inner);
+            print_expr(context, fn, expr->unary.inner);
         } break;
 
         case EXPR_CALL: {
@@ -2335,7 +2391,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
                 u8* name = string_table_access(context->string_table, expr->call.unresolved_name);
                 printf("<unresolved %s>", name);
             } else {
-                Func* callee = &context->funcs[expr->call.func_index];
+                Fn* callee = &context->fns[expr->call.fn_index];
                 u8* name = string_table_access(context->string_table, callee->name);
                 printf("%s", name);
             }
@@ -2344,7 +2400,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             for (u32 i = 0; i < expr->call.param_count; i += 1) {
                 if (i > 0) printf(", ");
                 Expr* child = expr->call.params[i];
-                print_expr(context, func, child);
+                print_expr(context, fn, child);
             }
             printf(")");
         } break;
@@ -2355,26 +2411,26 @@ void print_expr(Context* context, Func* func, Expr* expr) {
             if (primitive_is_integer(primitive)) {
                 print_type(context, expr->type);
                 printf("(");
-                print_expr(context, func, expr->cast_from);
+                print_expr(context, fn, expr->cast_from);
                 printf(")");
             } else {
                 printf("cast(");
                 print_type(context, expr->type);
                 printf(", ");
-                print_expr(context, func, expr->cast_from);
+                print_expr(context, fn, expr->cast_from);
                 printf(")");
             }
         } break;
 
         case EXPR_SUBSCRIPT: {
-            print_expr(context, func, expr->subscript.array);
+            print_expr(context, fn, expr->subscript.array);
             printf("[");
-            print_expr(context, func, expr->subscript.index);
+            print_expr(context, fn, expr->subscript.index);
             printf("]");
         } break;
 
         case EXPR_MEMBER_ACCESS: {
-            print_expr(context, func, expr->member_access.parent);
+            print_expr(context, fn, expr->member_access.parent);
             printf(".");
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
                 u8* name = string_table_access(context->string_table, expr->member_access.member_name);
@@ -2419,7 +2475,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
 
         case EXPR_TYPE_INFO_OF_VALUE: {
             printf("type_info_of_value(");
-            print_expr(context, func, expr->type_info_of_value);
+            print_expr(context, fn, expr->type_info_of_value);
             printf(")");
         } break;
 
@@ -2431,7 +2487,7 @@ void print_expr(Context* context, Func* func, Expr* expr) {
 
         case EXPR_ENUM_MEMBER_NAME: {
             printf("enum_member_name(");
-            print_expr(context, func, expr->enum_member);
+            print_expr(context, fn, expr->enum_member);
             printf(")");
         } break;
 
@@ -2439,24 +2495,24 @@ void print_expr(Context* context, Func* func, Expr* expr) {
     }
 }
 
-void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
+void print_stmt(Context* context, Fn* fn, Stmt* stmt, u32 indent_level) {
     for (u32 i = 0; i < indent_level; i += 1) printf("    ");
 
     switch (stmt->kind) {
         case STMT_ASSIGNMENT: {
-            print_expr(context, func, stmt->assignment.left);
+            print_expr(context, fn, stmt->assignment.left);
             printf(" = ");
-            print_expr(context, func, stmt->assignment.right);
+            print_expr(context, fn, stmt->assignment.right);
             printf(";");
         } break;
 
         case STMT_EXPR: {
-            print_expr(context, func, stmt->expr);
+            print_expr(context, fn, stmt->expr);
             printf(";");
         } break;
 
         case STMT_DECLARATION: {
-            Var* var = &func->body.vars[stmt->declaration.var_index];
+            Var* var = &fn->body.vars[stmt->declaration.var_index];
             u8* name = string_table_access(context->string_table, var->name);
             printf("let %s: ", name);
 
@@ -2464,7 +2520,7 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
 
             if (stmt->declaration.right != null) {
                 printf(" = ");
-                print_expr(context, func, stmt->declaration.right);
+                print_expr(context, fn, stmt->declaration.right);
             }
 
             printf(";");
@@ -2474,7 +2530,7 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
             printf("{\n");
 
             for (Stmt *inner = stmt->block; inner->kind != STMT_END; inner = inner->next) {
-                print_stmt(context, func, inner, indent_level + 1);
+                print_stmt(context, fn, inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -2483,11 +2539,11 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
 
         case STMT_IF: {
             printf("if (");
-            print_expr(context, func, stmt->conditional.condition);
+            print_expr(context, fn, stmt->conditional.condition);
             printf(") {\n");
 
             for (Stmt *inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
-                print_stmt(context, func, inner, indent_level + 1);
+                print_stmt(context, fn, inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -2497,7 +2553,7 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
                 printf(" else {\n");
 
                 for (Stmt *inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    print_stmt(context, func, inner, indent_level + 1);
+                    print_stmt(context, fn, inner, indent_level + 1);
                 }
 
                 for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -2508,14 +2564,14 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
         case STMT_LOOP: {
             if (stmt->loop.condition != null) {
                 printf("for (");
-                print_expr(context, func, stmt->loop.condition);
+                print_expr(context, fn, stmt->loop.condition);
                 printf(") {\n");
             } else {
                 printf("for {\n");
             }
 
             for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
-                print_stmt(context, func, inner, indent_level + 1);
+                print_stmt(context, fn, inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -2525,7 +2581,7 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
         case STMT_RETURN: {
             if (stmt->return_stmt.value != null) {
                 printf("return ");
-                print_expr(context, func, stmt->return_stmt.value);
+                print_expr(context, fn, stmt->return_stmt.value);
                 printf(";");
             } else {
                 printf("return;");
@@ -2545,10 +2601,10 @@ void print_stmt(Context* context, Func* func, Stmt* stmt, u32 indent_level) {
     printf("\n");
 }
 
-u32 find_var(Context* context, Func* func, u32 name) {
-    if (func != null) {
-        for (u32 i = 0; i < func->body.var_count; i += 1) {
-            if (func->body.vars[i].name == name) {
+u32 find_var(Context* context, Fn* fn, u32 name) {
+    if (fn != null) {
+        for (u32 i = 0; i < fn->body.var_count; i += 1) {
+            if (fn->body.vars[i].name == name) {
                 return i;
             }
         }
@@ -2563,10 +2619,10 @@ u32 find_var(Context* context, Func* func, u32 name) {
     return U32_MAX;
 }
 
-u32 find_func(Context* context, u32 name) {
-    u32 length = buf_length(context->funcs);
+u32 find_fn(Context* context, u32 name) {
+    u32 length = buf_length(context->fns);
     for (u32 i = 0; i < length; i += 1) {
-        if (context->funcs[i].name == name) {
+        if (context->fns[i].name == name) {
             return i;
         }
     }
@@ -2640,7 +2696,7 @@ Type *parse_primitive_name(Context* context, u32 name_index) {
     return null;
 }
 
-Builtin_Func parse_builtin_func_name(Context* context, u32 name_index) {
+Builtin_Fn parse_builtin_fn_name(Context* context, u32 name_index) {
     for (u32 i = 0; i < BUILTIN_COUNT; i += 1) {
         if (context->builtin_names[i] == name_index) {
             return i;
@@ -2650,7 +2706,7 @@ Builtin_Func parse_builtin_func_name(Context* context, u32 name_index) {
     return BUILTIN_INVALID;
 }
 
-Type* parse_user_type_name(Context* context, u32 name_index) {
+Type *parse_user_type_name(Context* context, u32 name_index) {
     buf_foreach (Type*, user_type, context->user_types) {
         u32 user_type_name = 0;
         switch ((*user_type)->kind) {
@@ -2671,7 +2727,7 @@ Type* parse_user_type_name(Context* context, u32 name_index) {
     return null;
 }
 
-Type* parse_type(Context* context, Token* t, u32* length) {
+Type *parse_type(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
     typedef struct Prefix Prefix;
@@ -2768,7 +2824,7 @@ Type* parse_type(Context* context, Token* t, u32* length) {
     return type;
 }
 
-Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
+Type *parse_struct_declaration(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
     assert(t->kind == TOKEN_KEYWORD_STRUCT);
@@ -2877,8 +2933,8 @@ Type* parse_struct_declaration(Context* context, Token* t, u32* length) {
     return type;
 }
 
-Type* parse_enum_declaration(Context* context, Token* t, u32* length) {
-    Token* t_start = t;
+Type *parse_enum_declaration(Context* context, Token* t, u32* length) {
+    Token *t_start = t;
 
     assert(t->kind == TOKEN_KEYWORD_ENUM);
     t += 1;
@@ -3170,9 +3226,9 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
-Expr* parse_compound(Context* context, Token* t, u32* length);
-Expr** parse_parameter_list(Context* context, Token* t, u32* length, u32* count);
-Expr* parse_call(Context* context, Token* t, u32* length);
+Expr  *parse_compound(Context* context, Token* t, u32* length);
+Expr **parse_parameter_list(Context* context, Token* t, u32* length, u32* count);
+Expr  *parse_call(Context* context, Token* t, u32* length);
 
 Expr* parse_expr(Context* context, Token* t, u32* length) {
     Token* t_start = t;
@@ -3654,7 +3710,7 @@ Expr* parse_compound(Context* context, Token* t, u32* length) {
     return expr;
 }
 
-Expr** parse_parameter_list(Context* context, Token* t, u32* length, u32* count) {
+Expr **parse_parameter_list(Context* context, Token* t, u32* length, u32* count) {
     Token* t_start = t;
 
     typedef struct Param_Expr Param_Expr;
@@ -3731,7 +3787,7 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
     assert(t->kind == TOKEN_BRACKET_ROUND_OPEN);
     t += 1;
 
-    switch (parse_builtin_func_name(context, name_index)) {
+    switch (parse_builtin_fn_name(context, name_index)) {
         case BUILTIN_TYPE_INFO_OF_TYPE: {
             u32 type_length = 0;
             Type* type = parse_type(context, t, &type_length);
@@ -4364,7 +4420,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
     return first_stmt;
 }
 
-bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u32* length) {
+bool parse_parameter_declaration_list(Context* context, Fn* fn, Token* t, u32* length) {
     Token* t_start = t;
 
     if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_OPEN, "after function name")) {
@@ -4372,8 +4428,8 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
     }
     t += 1;
 
-    assert(func->signature.param_count == 0);
-    assert(func->signature.params == null);
+    assert(fn->signature->param_count == 0);
+    assert(fn->signature->params == null);
 
     typedef struct Param Param;
     struct Param {
@@ -4417,7 +4473,7 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
             last = next;
 
             names_given += 1;
-            func->signature.param_count += 1;
+            fn->signature->param_count += 1;
 
             if (t->kind == TOKEN_COMMA) {
                 t += 1;
@@ -4456,7 +4512,10 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
         }
     }
 
-    func->signature.params = (void*) arena_alloc(&context->arena, func->signature.param_count * sizeof(*func->signature.params));
+    fn->signature->params = (void*) arena_alloc(&context->arena, fn->signature->param_count * sizeof(*fn->signature->params));
+
+    assert(fn->body.param_var_mappings == null); // This is a bit of a hack, we don't know if the function has a body yet
+    fn->body.param_var_mappings = (u32*) arena_alloc(&context->arena, fn->signature->param_count * sizeof(u32));
 
     u32 i = 0;
     for (Param* p = first; p != null; p = p->next, i += 1) {
@@ -4468,8 +4527,8 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
         u32 var_index = buf_length(context->tmp_vars);
         buf_push(context->tmp_vars, var);
 
-        func->signature.params[i].var_index = var_index;
-        func->signature.params[i].type = p->type;
+        fn->body.param_var_mappings[i] = var_index;
+        fn->signature->params[i].type = p->type;
     }
 
     arena_stack_pop(&context->stack);
@@ -4478,8 +4537,7 @@ bool parse_parameter_declaration_list(Context* context, Func* func, Token* t, u3
     return true;
 }
 
-// This parsing function returns length via a pointer, rather than taking it as a parameter
-Func* parse_function(Context* context, Token* t, u32* length) {
+Fn* parse_function(Context* context, Token* t, u32* length) {
     assert(t->kind == TOKEN_KEYWORD_FN);
     bool valid = true;
 
@@ -4506,12 +4564,12 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     u32 name_index = t->identifier_string_table_index;
     t += 1;
 
-    u32 other_func_index = find_func(context, name_index);
-    if (other_func_index != U32_MAX) {
-        Func* other_func = &context->funcs[other_func_index];
+    u32 other_fn_index = find_fn(context, name_index);
+    if (other_fn_index != U32_MAX) {
+        Fn* other_fn = &context->fns[other_fn_index];
         u8* name = string_table_access(context->string_table, name_index);
         print_file_pos(&start->pos);
-        printf("A function called '%s' is defined both on line %u and line %u\n", name, (u64) declaration_pos.line, (u64) other_func->declaration_pos.line);
+        printf("A function called '%s' is defined both on line %u and line %u\n", name, (u64) declaration_pos.line, (u64) other_fn->declaration_pos.line);
         valid = false;
     }
 
@@ -4520,7 +4578,7 @@ Func* parse_function(Context* context, Token* t, u32* length) {
         print_file_pos(&start->pos);
         printf("Can't use '%s' as a function name, as it is reserved for casts\n", name);
         valid = false;
-    } else if (parse_builtin_func_name(context, name_index) != BUILTIN_INVALID) {
+    } else if (parse_builtin_fn_name(context, name_index) != BUILTIN_INVALID) {
         u8* name = string_table_access(context->string_table, name_index);
         print_file_pos(&start->pos);
         printf("Can't use '%s' as a function name, as it would shadow a builtin function\n", name);
@@ -4530,20 +4588,24 @@ Func* parse_function(Context* context, Token* t, u32* length) {
     // NB we use these while parsing, and then copy them into the memory arena
     buf_clear(context->tmp_vars); 
 
-    buf_push(context->funcs, ((Func) {0}));
-    Func* func = buf_end(context->funcs) - 1;
-    func->name = name_index;
-    func->declaration_pos = start->pos;
+    buf_push(context->fns, ((Fn) {0}));
+    Fn* fn = buf_end(context->fns) - 1;
+
+    fn->name = name_index;
+    fn->declaration_pos = start->pos;
+
+    Fn_Signature temp_signature = {0};
+    fn->signature = &temp_signature;
 
     // Parameter list
     u32 parameter_length = 0;
-    if (!parse_parameter_declaration_list(context, func, t, &parameter_length)) return null;
+    if (!parse_parameter_declaration_list(context, fn, t, &parameter_length)) return null;
     t += parameter_length;
 
     // Return type
-    func->signature.has_return = false;
-    func->signature.return_type = &context->primitive_types[TYPE_VOID];
-    func->signature.return_by_reference = false;
+    fn->signature->has_return = false;
+    fn->signature->return_type = &context->primitive_types[TYPE_VOID];
+    fn->signature->return_by_reference = false;
 
     if (t->kind == TOKEN_ARROW) {
         t += 1;
@@ -4555,18 +4617,18 @@ Func* parse_function(Context* context, Token* t, u32* length) {
         if (return_type == null) {
             return null;
         } else if (return_type->kind != TYPE_VOID) {
-            func->signature.has_return = true;
-            func->signature.return_type = return_type;
+            fn->signature->has_return = true;
+            fn->signature->return_type = return_type;
         }
     }
 
     // Functions without a body
     if (t->kind == TOKEN_SEMICOLON) {
-        func->kind = FUNC_KIND_IMPORTED;
+        fn->kind = FUNC_KIND_IMPORTED;
 
     // Body
     } else {
-        func->kind = FUNC_KIND_NORMAL;
+        fn->kind = FUNC_KIND_NORMAL;
 
         if (t->kind != TOKEN_BRACKET_CURLY_OPEN) {
             u8* name = string_table_access(context->string_table, name_index);
@@ -4583,7 +4645,6 @@ Func* parse_function(Context* context, Token* t, u32* length) {
 
         *length = (u32) (t - start) + 1;
 
-
         u32 stmts_length = 0;
         Stmt* first_stmt = parse_stmts(context, body, &stmts_length);
 
@@ -4591,18 +4652,22 @@ Func* parse_function(Context* context, Token* t, u32* length) {
             valid = false;
         }
 
-        func->body.first_stmt = first_stmt;
+        fn->body.first_stmt = first_stmt;
     }
 
     // Copy data out of temporary buffers into permanent arena storage
-    func->body.var_count = buf_length(context->tmp_vars);
-    func->body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
-    mem_copy((u8*) context->tmp_vars, (u8*) func->body.vars, buf_bytes(context->tmp_vars));
+    fn->body.var_count = buf_length(context->tmp_vars);
+    fn->body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
+    mem_copy((u8*) context->tmp_vars, (u8*) fn->body.vars, buf_bytes(context->tmp_vars));
+
+    // Canonicalize signature
+    assert(fn->signature == &temp_signature);
+    fn->signature = fn_signature_canonicalize(context, &temp_signature);
 
     if (!valid) {
         return null;
     } else {
-        return func;
+        return fn;
     }
 }
 
@@ -4652,18 +4717,18 @@ bool parse_extern(Context* context, u8* source_path, Token* t, u32* length) {
         switch (body[i].kind) {
             case TOKEN_KEYWORD_FN: {
                 u32 length;
-                Func* func = parse_function(context, &body[i], &length);
+                Fn* fn = parse_function(context, &body[i], &length);
 
-                if (func == null) {
+                if (fn == null) {
                     valid = false;
-                } else if (func->kind != FUNC_KIND_IMPORTED) {
-                    u8* name = string_table_access(context->string_table, func->name);
+                } else if (fn->kind != FUNC_KIND_IMPORTED) {
+                    u8* name = string_table_access(context->string_table, fn->name);
                     print_file_pos(&body[i].pos);
                     printf("Function '%s' has a body, but functions inside 'extern' blocks can't have bodies\n", name);
                     valid = false;
                 } else {
-                    Import_Index import_index = add_import(context, source_path, library_name_index, func->name);
-                    func->import_info.index = import_index;
+                    Import_Index import_index = add_import(context, source_path, library_name_index, fn->name);
+                    fn->import_info.index = import_index;
                 }
 
                 i += length - 1;
@@ -4690,7 +4755,7 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
 
 bool build_ast(Context* context, u8* file_name) {
     init_keyword_names(context);
-    init_builtin_func_names(context);
+    init_builtin_fn_names(context);
     init_primitive_types(context);
 
     u8* file;
@@ -5292,12 +5357,12 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
     while (t->kind != TOKEN_END_OF_STREAM && valid) switch (t->kind) {
         case TOKEN_KEYWORD_FN: {
             u32 length = 0;
-            Func* func = parse_function(context, t, &length);
+            Fn* fn = parse_function(context, t, &length);
 
-            if (func == null) {
+            if (fn == null) {
                 valid = false;
-            } else if (func->kind != FUNC_KIND_NORMAL) {
-                u8* name = string_table_access(context->string_table, func->name);
+            } else if (fn->kind != FUNC_KIND_NORMAL) {
+                u8* name = string_table_access(context->string_table, fn->name);
                 print_file_pos(&t->pos);
                 printf("Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks\n", name);
                 valid = false;
@@ -5462,7 +5527,7 @@ struct Scope {
 
 typedef struct Typecheck_Info {
     Context *context;
-    Func *func;
+    Fn *fn;
     Scope *scope;
 } Typecheck_Info;
 
@@ -5579,15 +5644,15 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 var_index = find_var(info->context, info->func, expr->variable.unresolved_name);
+                u32 var_index = find_var(info->context, info->fn, expr->variable.unresolved_name);
 
                 if (var_index == U32_MAX) {
                     u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
                     print_file_pos(&expr->pos);
                     printf("Can't find variable '%s' ", var_name);
-                    if (info->func != null) {
-                        u8* func_name = string_table_access(info->context->string_table, info->func->name);
-                        printf("in function '%s' or ", func_name);
+                    if (info->fn != null) {
+                        u8* fn_name = string_table_access(info->context->string_table, info->fn->name);
+                        printf("in function '%s' or ", fn_name);
                     }
                     printf("in global scope\n");
                     return TYPECHECK_EXPR_BAD;
@@ -5610,7 +5675,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                         return TYPECHECK_EXPR_BAD;
                     }
                 } else if (info->scope->map[var_index] == false) {
-                    Var* var = &info->func->body.vars[var_index];
+                    Var* var = &info->fn->body.vars[var_index];
                     u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
 
                     u64 use_line = expr->pos.line;
@@ -5640,7 +5705,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 u32 global_index = expr->variable.index & (~VAR_INDEX_GLOBAL_FLAG);
                 expr->type = info->context->global_vars[global_index].var.type;
             } else {
-                expr->type = info->func->body.vars[expr->variable.index].type;
+                expr->type = info->fn->body.vars[expr->variable.index].type;
             }
         } break;
 
@@ -5651,7 +5716,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
             switch (expr->literal.kind) {
                 case EXPR_LITERAL_POINTER: {
-                    if (to_primitive == TYPE_POINTER) {
+                    if (to_primitive == TYPE_POINTER || to_primitive == TYPE_FN_POINTER) {
                         expr->type = solidify_to;
                     } else {
                         strong = false;
@@ -5911,7 +5976,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     valid_types = true;
 
                     if (!(expr->binary.op == BINARY_EQ || expr->binary.op == BINARY_NEQ)) {
-                        if (primitive == TYPE_POINTER || primitive == TYPE_BOOL) valid_types = false;
+                        if (primitive == TYPE_POINTER || primitive == TYPE_BOOL || primitive == TYPE_FN_POINTER) valid_types = false;
                     }
                 }
             } else {
@@ -5925,19 +5990,22 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
                 // Special-case pointer-pointer arithmetic
                 } else {
+                    Type_Kind left_kind = expr->binary.left->type->kind;
+                    Type_Kind right_kind = expr->binary.right->type->kind;
+
                     if (expr->binary.op == BINARY_ADD || expr->binary.op == BINARY_SUB) {
-                        if (expr->binary.left->type->kind == TYPE_POINTER && (expr->binary.right->type->kind == TYPE_U64 || expr->binary.right->type->kind == TYPE_I64)) {
+                        if (left_kind == TYPE_POINTER && (right_kind == TYPE_U64 || right_kind == TYPE_I64)) {
                             expr->type = expr->binary.left->type;
                             valid_types = true;
                         }
-                        if ((expr->binary.left->type->kind == TYPE_U64 || expr->binary.left->type->kind == TYPE_I64) && expr->binary.right->type->kind == TYPE_POINTER) {
+                        if ((left_kind == TYPE_U64 || left_kind == TYPE_I64) && right_kind == TYPE_POINTER) {
                             expr->type = expr->binary.right->type;
                             valid_types = true;
                         }
                     }
 
                     if (expr->binary.op == BINARY_SUB) {
-                        if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_POINTER) {
+                        if (left_kind == TYPE_POINTER && right_kind == TYPE_POINTER) {
                             expr->type = &info->context->primitive_types[TYPE_POINTER_DIFF];
                             valid_types = true;
                         }
@@ -5971,7 +6039,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 } break;
 
                 case UNARY_ADDRESS_OF: {
-                    if (solidify_to->kind == TYPE_POINTER) {
+                    if (solidify_to->kind == TYPE_POINTER || solidify_to->kind == TYPE_FN_POINTER) {
                         solidify_to = solidify_to->pointer_to;
                     }
                 } break;
@@ -6013,7 +6081,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     if (child_primitive != TYPE_POINTER) {
                         print_file_pos(&expr->pos);
                         printf("Can't dereference non-pointer ");
-                        print_expr(info->context, info->func, expr->unary.inner);
+                        print_expr(info->context, info->fn, expr->unary.inner);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -6022,7 +6090,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     if (pointer_to == TYPE_VOID) {
                         print_file_pos(&expr->pos);
                         printf("Can't dereference a void pointer ");
-                        print_expr(info->context, info->func, expr->unary.inner);
+                        print_expr(info->context, info->fn, expr->unary.inner);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -6033,7 +6101,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     if (!(expr->unary.inner->flags & EXPR_FLAG_ASSIGNABLE)) {
                         print_file_pos(&expr->pos);
                         printf("Can't take address of ");
-                        print_expr(info->context, info->func, expr->unary.inner);
+                        print_expr(info->context, info->fn, expr->unary.inner);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -6045,26 +6113,26 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
         case EXPR_CALL: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 func_index = find_func(info->context, expr->call.unresolved_name);
-                if (func_index == U32_MAX) {
+                u32 fn_index = find_fn(info->context, expr->call.unresolved_name);
+                if (fn_index == U32_MAX) {
                     u8* name = string_table_access(info->context->string_table, expr->call.unresolved_name);
                     print_file_pos(&expr->pos);
                     printf("Can't find function '%s'\n", name);
                     return TYPECHECK_EXPR_BAD;
                 }
 
-                expr->call.func_index = func_index;
+                expr->call.fn_index = fn_index;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            Func* callee = &info->context->funcs[expr->call.func_index];
-            expr->type = callee->signature.return_type;
+            Fn* callee = &info->context->fns[expr->call.fn_index];
+            expr->type = callee->signature->return_type;
 
-            if (expr->call.param_count != callee->signature.param_count) {
+            if (expr->call.param_count != callee->signature->param_count) {
                 u8* name = string_table_access(info->context->string_table, callee->name);
                 print_file_pos(&expr->pos);
 
-                u64 expected = callee->signature.param_count;
+                u64 expected = callee->signature->param_count;
                 u64 given = expr->call.param_count;
                 printf(
                     "Function '%s' takes %u parameters, but %u %s given\n",
@@ -6076,16 +6144,16 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
                 Expr *param_expr = expr->call.params[p];
 
-                u32 var_index = callee->signature.params[p].var_index;
-                Type *expected_type = callee->signature.params[p].type;
+                u32 var_index = callee->body.param_var_mappings[p];
+                Type *expected_type = callee->signature->params[p].type;
 
                 if (typecheck_expr(info, param_expr, expected_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
                 Type *actual_type = param_expr->type;
                 if (!type_can_assign(expected_type, actual_type)) {
-                    u8 *func_name = string_table_access(info->context->string_table, callee->name);
+                    u8 *fn_name = string_table_access(info->context->string_table, callee->name);
                     print_file_pos(&expr->pos);
-                    printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), func_name);
+                    printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), fn_name);
                     print_type(info->context, expected_type);
                     printf(" but got ");
                     print_type(info->context, actual_type);
@@ -6104,9 +6172,9 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             Type_Kind to   = expr->type->kind;
 
             bool valid =
-                (from == TYPE_POINTER && to == TYPE_POINTER) ||
-                (from == TYPE_POINTER && to == TYPE_U64) ||
-                (from == TYPE_U64 && to == TYPE_POINTER) ||
+                ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) ||
+                ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && to == TYPE_U64) ||
+                (from == TYPE_U64 && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) ||
 
                 (primitive_is_integer(from) && primitive_is_integer(to)) ||
 
@@ -6117,34 +6185,14 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 (primitive_is_float(from)   && primitive_is_integer(to)) ||
                 (primitive_is_float(from)   && primitive_is_float(to));
 
-            u32 result = -1;
-            if (valid) {
-                result = 0;
-            } else if (to == TYPE_POINTER || to == TYPE_ENUM || primitive_is_integer(to) || primitive_is_float(to)) {
-                result = 2;
-            } else {
-                result = 1;
-            }
-
-            switch (result) {
-                case 0: {} break;
-                case 1: {
-                    print_file_pos(&expr->pos);
-                    printf("Invalid cast. Can't cast to ");
-                    print_type(info->context, expr->type);
-                    printf("\n");
-                    return TYPECHECK_EXPR_BAD;
-                } break;
-                case 2: {
-                    print_file_pos(&expr->pos);
-                    printf("Invalid cast. Can't cast from ");
-                    print_type(info->context, expr->cast_from->type);
-                    printf(" to ");
-                    print_type(info->context, expr->type);
-                    printf("\n");
-                    return TYPECHECK_EXPR_BAD;
-                } break;
-                default: assert(false);
+            if (!valid) {
+                print_file_pos(&expr->pos);
+                printf("Invalid cast. Can't cast from ");
+                print_type(info->context, expr->cast_from->type);
+                printf(" to ");
+                print_type(info->context, expr->type);
+                printf("\n");
+                return TYPECHECK_EXPR_BAD;
             }
         } break;
 
@@ -6316,7 +6364,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
     if (!resolve_type(info->context, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
     // Autocast from '*void' to any other pointer kind
-    if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && solidify_to->kind == TYPE_POINTER) {
+    if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && (solidify_to->kind == TYPE_POINTER || solidify_to->kind == TYPE_FN_POINTER)) {
         expr->type = solidify_to;
     }
 
@@ -6350,7 +6398,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
                 print_file_pos(&stmt->pos);
                 printf("Can't assign to left hand side: ");
-                print_expr(info->context, info->func, stmt->assignment.left);
+                print_expr(info->context, info->fn, stmt->assignment.left);
                 printf("\n");
                 return false;
             }
@@ -6362,7 +6410,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case STMT_DECLARATION: {
             u32 var_index = stmt->declaration.var_index;
-            Var* var = &info->func->body.vars[var_index];
+            Var* var = &info->fn->body.vars[var_index];
             Expr* right = stmt->declaration.right;
 
             bool good_types = true;
@@ -6469,19 +6517,19 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case STMT_RETURN: {
-            if (!info->func->signature.has_return) {
+            if (!info->fn->signature->has_return) {
                 if (stmt->return_stmt.value != null) {
-                    u8* name = string_table_access(info->context->string_table, info->func->name);
+                    u8* name = string_table_access(info->context->string_table, info->fn->name);
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is not declared to return anything, but tried to return a value\n", name);
                     return false;
                 }
 
             } else {
-                Type* expected_type = info->func->signature.return_type;
+                Type* expected_type = info->fn->signature->return_type;
 
                 if (stmt->return_stmt.value == null) {
-                    u8* name = string_table_access(info->context->string_table, info->func->name);
+                    u8* name = string_table_access(info->context->string_table, info->fn->name);
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is declared to return a ", name);
                     print_type(info->context, expected_type);
@@ -6492,7 +6540,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 if (typecheck_expr(info, stmt->return_stmt.value, expected_type) == TYPECHECK_EXPR_BAD) return false;
 
                 if (!type_can_assign(expected_type, stmt->return_stmt.value->type)) {
-                    u8* name = string_table_access(info->context->string_table, info->func->name);
+                    u8* name = string_table_access(info->context->string_table, info->fn->name);
                     print_file_pos(&stmt->pos);
                     printf("Expected ");
                     print_type(info->context, expected_type);
@@ -7104,36 +7152,36 @@ bool typecheck(Context* context) {
     if (!valid) return false;
     
     // Function signatures
-    buf_foreach (Func, func, context->funcs) {
-        for (u32 p = 0; p < func->signature.param_count; p += 1) {
-            Type **type = &func->signature.params[p].type;
+    buf_foreach (Fn, fn, context->fns) {
+        for (u32 p = 0; p < fn->signature->param_count; p += 1) {
+            Type **type = &fn->signature->params[p].type;
 
-            if (!resolve_type(context, type, &func->declaration_pos)) {
+            if (!resolve_type(context, type, &fn->declaration_pos)) {
                 valid = false;
             } else if (primitive_is_compound((*type)->kind)) {
                 u32 size = type_size_of(*type);
                 if (size == 0 || size == 1 || size == 2 || size == 4 || size == 8) {
                     // Just squish the value into a register
                 } else {
-                    func->signature.params[p].reference_semantics = true;
-                    if (func->kind == FUNC_KIND_NORMAL) {
-                        func->body.vars[func->signature.params[p].var_index].is_reference = true;
+                    fn->signature->params[p].reference_semantics = true;
+                    if (fn->kind == FUNC_KIND_NORMAL) {
+                        fn->body.vars[fn->body.param_var_mappings[p]].is_reference = true;
                     }
                 }
             }
         }
 
-        if (func->signature.has_return) {
-            Type **return_type = &func->signature.return_type;
+        if (fn->signature->has_return) {
+            Type **return_type = &fn->signature->return_type;
 
-            if (!resolve_type(context, return_type, &func->declaration_pos)) {
+            if (!resolve_type(context, return_type, &fn->declaration_pos)) {
                 valid = false;
             } else if (primitive_is_compound((*return_type)->kind)) {
                 u32 size = type_size_of(*return_type);
                 if (size == 1 || size == 2 || size == 4 || size == 8) {
                     // We just squish the struct/array into RAX
                 } else {
-                    func->signature.return_by_reference = true;
+                    fn->signature->return_by_reference = true;
                 }
             }
         }
@@ -7220,37 +7268,37 @@ bool typecheck(Context* context) {
     if (!valid) return false;
 
     // Functions
-    for (u32 f = 0; f < buf_length(context->funcs); f += 1) {
-        info.func = context->funcs + f;
+    for (u32 f = 0; f < buf_length(context->fns); f += 1) {
+        info.fn = context->fns + f;
 
-        if (info.func->kind != FUNC_KIND_NORMAL) {
+        if (info.fn->kind != FUNC_KIND_NORMAL) {
             continue;
         }
 
         arena_stack_push(&context->stack); // for allocating scopes
 
-        info.scope = scope_new(context, info.func->body.var_count);
+        info.scope = scope_new(context, info.fn->body.var_count);
 
         // Parameters are allways in scope
-        for (u32 i = 0; i < info.func->signature.param_count; i += 1) {
-            u32 var_index = info.func->signature.params[i].var_index;
+        for (u32 i = 0; i < info.fn->signature->param_count; i += 1) {
+            u32 var_index = info.fn->body.param_var_mappings[i];
             info.scope->map[var_index] = true;
         }
 
         // Body types
-        for (Stmt* stmt = info.func->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
+        for (Stmt* stmt = info.fn->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
             if (!typecheck_stmt(&info, stmt)) {
                 valid = false;
             }
         }
 
         // Control flow
-        Control_Flow_Result result = check_control_flow(info.func->body.first_stmt, null, true);
+        Control_Flow_Result result = check_control_flow(info.fn->body.first_stmt, null, true);
         if (result == CONTROL_FLOW_INVALID) {
             valid = false;
-        } else if (info.func->signature.has_return && result != CONTROL_FLOW_WILL_RETURN) {
-            u8* name = string_table_access(info.context->string_table, info.func->name);
-            print_file_pos(&info.func->declaration_pos);
+        } else if (info.fn->signature->has_return && result != CONTROL_FLOW_WILL_RETURN) {
+            u8* name = string_table_access(info.context->string_table, info.fn->name);
+            print_file_pos(&info.fn->declaration_pos);
             printf("Function '%s' might not return\n", name);
             valid = false;
         }
@@ -7979,10 +8027,10 @@ void instruction_cmp_imm(Context *context, X64_Place place, u64 imm, u8 op_size)
     #endif
 }
 
-void instruction_call(Context* context, bool builtin, u32 func_index) {
+void instruction_call(Context* context, bool builtin, u32 fn_index) {
     bool near = true;
     if (!builtin) {
-        Func *callee = &context->funcs[func_index];
+        Fn *callee = &context->fns[fn_index];
         if (callee->kind == FUNC_KIND_IMPORTED) {
             near = false;
 
@@ -8006,20 +8054,20 @@ void instruction_call(Context* context, bool builtin, u32 func_index) {
         Call_Fixup fixup = {0};
         fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
         fixup.builtin = builtin;
-        fixup.func_index = func_index;
+        fixup.fn_index = fn_index;
         buf_push(context->call_fixups, fixup);
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8 *name;
     if (builtin) {
-        switch (func_index) {
+        switch (fn_index) {
             case RUNTIME_BUILTIN_MEM_COPY:     name = "builtin_mem_copy"; break;
             case RUNTIME_BUILTIN_MEM_CLEAR:    name = "builtin_mem_clear"; break;
             default: assert(false);
         }
     } else {
-        u32 name_index = context->funcs[func_index].name;
+        u32 name_index = context->fns[fn_index].name;
         name = string_table_access(context->string_table, name_index);
     }
 
@@ -8919,7 +8967,7 @@ void machinecode_cast(Context *context, Register src, Register dst, Type_Kind fr
     u8 from_size = primitive_size_of(from);
     u8 to_size = primitive_size_of(to);
 
-    if (from == TYPE_POINTER && to == TYPE_POINTER) {
+    if ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) {
         // This is a no-op
     } else if (primitive_is_float(from) && primitive_is_float(to)) {
         assert(is_xmm(src) && is_xmm(dst));
@@ -9111,9 +9159,9 @@ u32 machinecode_expr_reserves(Expr *expr) {
     return flags;
 }
 
-void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place);
+void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place);
 
-X64_Address machinecode_index_address(Context *context, Func *func, Reg_Allocator *reg_allocator, X64_Address address, Expr *index, u64 stride) {
+X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *reg_allocator, X64_Address address, Expr *index, u64 stride) {
     if (index->kind == EXPR_LITERAL) {
         u64 offset = index->literal.masked_value * stride;
         assert((((i64) address.immediate_offset) + ((i64) offset)) <= I32_MAX);
@@ -9141,7 +9189,7 @@ X64_Address machinecode_index_address(Context *context, Func *func, Reg_Allocato
         }
         assert(address.index == REGISTER_NONE && address.scale == 0);
 
-        machinecode_for_expr(context, func, index, reg_allocator, x64_place_reg(index_reg));
+        machinecode_for_expr(context, fn, index, reg_allocator, x64_place_reg(index_reg));
         address.index = index_reg;
 
         if (stride == 1 || stride == 2 || stride == 4 || stride == 8) {
@@ -9155,7 +9203,7 @@ X64_Address machinecode_index_address(Context *context, Func *func, Reg_Allocato
     return address;
 }
 
-X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, u32 reserves) {
+X64_Place machinecode_for_assignable_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator, u32 reserves) {
     assert(expr->flags & EXPR_FLAG_ASSIGNABLE);
 
     switch (expr->kind) {
@@ -9173,7 +9221,7 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
 
                 address = (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = global->data_offset };
             } else {
-                var = &func->body.vars[var_index];
+                var = &fn->body.vars[var_index];
                 address = reg_allocator->var_mem_infos[var_index].address;
             }
 
@@ -9191,14 +9239,14 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
             switch (expr->unary.op) {
                 case UNARY_DEREFERENCE: {
                     Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
-                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, x64_place_reg(reg));
+                    machinecode_for_expr(context, fn, expr->unary.inner, reg_allocator, x64_place_reg(reg));
                     return x64_place_address((X64_Address) { .base = reg });
                 } break;
             }
         } break;
 
         case EXPR_SUBSCRIPT: {
-            X64_Place place = machinecode_for_assignable_expr(context, func, expr->subscript.array, reg_allocator, reserves);
+            X64_Place place = machinecode_for_assignable_expr(context, fn, expr->subscript.array, reg_allocator, reserves);
             assert(place.kind == PLACE_ADDRESS);
             X64_Address address = place.address;
 
@@ -9227,13 +9275,13 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
             }
 
             u64 stride = type_size_of(child_type);
-            address = machinecode_index_address(context, func, reg_allocator, address, expr->subscript.index, stride);
+            address = machinecode_index_address(context, fn, reg_allocator, address, expr->subscript.index, stride);
 
             return x64_place_address(address);
         } break;
 
         case EXPR_MEMBER_ACCESS: {
-            X64_Place place = machinecode_for_assignable_expr(context, func, expr->member_access.parent, reg_allocator, reserves);
+            X64_Place place = machinecode_for_assignable_expr(context, fn, expr->member_access.parent, reg_allocator, reserves);
             assert(place.kind == PLACE_ADDRESS);
 
             Type *parent_type = expr->member_access.parent->type;
@@ -9262,13 +9310,13 @@ X64_Place machinecode_for_assignable_expr(Context *context, Func *func, Expr *ex
     return (X64_Place) {0};
 }
 
-void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place) {
+void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place) {
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (place.kind == PLACE_NOWHERE) return;
 
             u64 size = type_size_of(expr->type);
-            X64_Place from = machinecode_for_assignable_expr(context, func, expr, reg_allocator, 0);
+            X64_Place from = machinecode_for_assignable_expr(context, fn, expr, reg_allocator, 0);
             machinecode_move(context, reg_allocator, from, place, size);
         } break;
 
@@ -9300,7 +9348,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             if (place.kind == PLACE_NOWHERE) {
                 for (u32 i = 0; i < expr->compound.count; i += 1) {
                     Expr *child = expr->compound.content[i].expr;
-                    machinecode_for_expr(context, func, child, reg_allocator, place);
+                    machinecode_for_expr(context, fn, child, reg_allocator, place);
                 }
                 return;
             }
@@ -9334,7 +9382,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         assert(expr->compound.content[i].name_mode == EXPR_COMPOUND_NO_NAME);
 
                         Expr *child = expr->compound.content[i].expr;
-                        machinecode_for_expr(context, func, child, reg_allocator, place);
+                        machinecode_for_expr(context, fn, child, reg_allocator, place);
 
                         assert((((i64) place.address.immediate_offset) + ((i64) child_size)) < I32_MAX);
                         place.address.immediate_offset += child_size;
@@ -9353,7 +9401,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         offset_place.address.immediate_offset += (i32) member_offset;
 
                         Expr* child = expr->compound.content[i].expr;
-                        machinecode_for_expr(context, func, child, reg_allocator, offset_place);
+                        machinecode_for_expr(context, fn, child, reg_allocator, offset_place);
                     }
                 } break;
 
@@ -9369,8 +9417,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_BINARY: {
             if (place.kind == PLACE_NOWHERE) {
-                machinecode_for_expr(context, func, expr->binary.left, reg_allocator, place);
-                machinecode_for_expr(context, func, expr->binary.right, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->binary.left, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->binary.right, reg_allocator, place);
                 return;
             }
 
@@ -9385,16 +9433,16 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 } else {
                     left_reg = place.reg;
                 }
-                machinecode_for_expr(context, func, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
+                machinecode_for_expr(context, fn, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
 
                 register_allocator_enter_frame(context, reg_allocator);
                 X64_Place right_place;
                 if (expr->binary.right->flags & EXPR_FLAG_ASSIGNABLE) {
-                    right_place = machinecode_for_assignable_expr(context, func, expr->binary.right, reg_allocator, 0);
+                    right_place = machinecode_for_assignable_expr(context, fn, expr->binary.right, reg_allocator, 0);
                 } else {
                     Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
                     right_place = x64_place_reg(right_reg);
-                    machinecode_for_expr(context, func, expr->binary.right, reg_allocator, right_place);
+                    machinecode_for_expr(context, fn, expr->binary.right, reg_allocator, right_place);
                 }
 
                 Type_Kind primitive = expr->binary.left->type->kind;
@@ -9484,7 +9532,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     left_reg = place.reg;
                 }
 
-                machinecode_for_expr(context, func, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
+                machinecode_for_expr(context, fn, expr->binary.left, reg_allocator, x64_place_reg(left_reg));
 
                 register_allocator_enter_frame(context, reg_allocator);
 
@@ -9498,7 +9546,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 }
                 Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves_for_result);
 
-                machinecode_for_expr(context, func, expr->binary.right, reg_allocator, x64_place_reg(right_reg));
+                machinecode_for_expr(context, fn, expr->binary.right, reg_allocator, x64_place_reg(right_reg));
 
                 switch (expr->binary.op) {
                     case BINARY_ADD:
@@ -9626,7 +9674,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_UNARY: {
             if (place.kind == PLACE_NOWHERE) {
-                machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->unary.inner, reg_allocator, place);
                 return;
             }
 
@@ -9634,7 +9682,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 case UNARY_NOT:
                 case UNARY_NEG:
                 {
-                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, place);
+                    machinecode_for_expr(context, fn, expr->unary.inner, reg_allocator, place);
 
                     Type_Kind primitive = expr->type->kind;
                     if (primitive == TYPE_BOOL) {
@@ -9705,7 +9753,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         inner_place.reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                     }
 
-                    machinecode_for_expr(context, func, expr->unary.inner, reg_allocator, inner_place);
+                    machinecode_for_expr(context, fn, expr->unary.inner, reg_allocator, inner_place);
 
                     Register inner_reg = inner_place.reg;
                     inner_place = (X64_Place) {0};
@@ -9719,7 +9767,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 } break;
 
                 case UNARY_ADDRESS_OF: {
-                    X64_Place inner_place = machinecode_for_assignable_expr(context, func, expr->unary.inner, reg_allocator, 0);
+                    X64_Place inner_place = machinecode_for_assignable_expr(context, fn, expr->unary.inner, reg_allocator, 0);
                     assert(inner_place.kind == PLACE_ADDRESS);
 
                     switch (place.kind) {
@@ -9746,10 +9794,10 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_CALL: {
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
-            u32 func_index = expr->call.func_index;
-            Func *callee = &context->funcs[func_index];
+            u32 fn_index = expr->call.fn_index;
+            Fn *callee = &context->fns[fn_index];
 
-            reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature.param_count);
+            reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature->param_count);
 
 
             register_allocator_enter_frame(context, reg_allocator); // outer frame for return registers
@@ -9763,7 +9811,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             bool move_from_return_reg = !((place.kind == PLACE_REGISTER && place.reg == return_reg) ||
                                           place.kind == PLACE_NOWHERE ||
-                                          !callee->signature.has_return);
+                                          !callee->signature->has_return);
             if (move_from_return_reg) {
                 register_allocate_specific(context, reg_allocator, return_reg);
             }
@@ -9774,13 +9822,13 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             bool skip_first_param_reg = false;
             Register used_volatile_registers[INPUT_REGISTER_COUNT] = {0};
 
-            if (callee->signature.return_by_reference) {
+            if (callee->signature->return_by_reference) {
                 skip_first_param_reg = true;
 
                 X64_Address return_into;
                 if (place.kind == PLACE_NOWHERE) {
-                    u64 size = type_size_of(callee->signature.return_type);
-                    u64 align = type_align_of(callee->signature.return_type);
+                    u64 size = type_size_of(callee->signature->return_type);
+                    u64 align = type_align_of(callee->signature->return_type);
                     return_into = register_allocator_temp_stack_space(reg_allocator, size, align);
                 } else {
                     assert(place.kind == PLACE_ADDRESS);
@@ -9793,8 +9841,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 instruction_lea(context, return_into, reg);
             }
 
-            for (u32 p = 0; p < callee->signature.param_count; p += 1) {
-                Type *param_type = callee->signature.params[p].type;
+            for (u32 p = 0; p < callee->signature->param_count; p += 1) {
+                Type *param_type = callee->signature->params[p].type;
 
                 X64_Place target_place;
 
@@ -9817,7 +9865,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     register_allocate_specific(context, reg_allocator, target_place.reg);
                 }
 
-                if (callee->signature.params[p].reference_semantics) {
+                if (callee->signature->params[p].reference_semantics) {
                     u64 size = type_size_of(param_type);
                     u64 align = type_align_of(param_type);
 
@@ -9825,13 +9873,13 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         X64_Address tmp_address = register_allocator_temp_stack_space(reg_allocator, size, align);
                         X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
 
-                        machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, tmp_place);
+                        machinecode_for_expr(context, fn, expr->call.params[p], reg_allocator, tmp_place);
                         if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
 
                         machinecode_lea(context, reg_allocator, tmp_address, target_place);
                     }
                 } else {
-                    machinecode_for_expr(context, func, expr->call.params[p], reg_allocator, target_place);
+                    machinecode_for_expr(context, fn, expr->call.params[p], reg_allocator, target_place);
                 }
             }
 
@@ -9855,17 +9903,17 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             }
 
             // Call function and handle return value
-            instruction_call(context, false, func_index);
+            instruction_call(context, false, fn_index);
 
             register_allocator_leave_frame(context, reg_allocator); // inner frame for parameters
 
             if (move_from_return_reg) {
-                assert(place.kind != PLACE_NOWHERE && callee->signature.has_return);
+                assert(place.kind != PLACE_NOWHERE && callee->signature->has_return);
 
-                Type *return_type = callee->signature.return_type;
-                u64 return_size = type_size_of(callee->signature.return_type);
+                Type *return_type = callee->signature->return_type;
+                u64 return_size = type_size_of(callee->signature->return_type);
 
-                if (callee->signature.return_by_reference) {
+                if (callee->signature->return_by_reference) {
                     // The function just wrote the result into a pointer we passed it, so we don't have to
                     // do anything more here.
                     // NB The function also returns the pointer we passed (in RCX) in RAX, which we could
@@ -9880,12 +9928,12 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_CAST: {
             if (place.kind == PLACE_NOWHERE) {
-                machinecode_for_expr(context, func, expr->cast_from, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->cast_from, reg_allocator, place);
                 return;
             }
 
             if (expr->type->kind == expr->cast_from->type->kind) {
-                machinecode_for_expr(context, func, expr->cast_from, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->cast_from, reg_allocator, place);
             } else {
                 register_allocator_enter_frame(context, reg_allocator);
 
@@ -9911,7 +9959,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     inner_reg = register_allocate(reg_allocator, inner_reg_kind, 0);
                 }
 
-                machinecode_for_expr(context, func, expr->cast_from, reg_allocator, x64_place_reg(inner_reg));
+                machinecode_for_expr(context, fn, expr->cast_from, reg_allocator, x64_place_reg(inner_reg));
                 machinecode_cast(context, inner_reg, outer_reg, primitive_of(expr->cast_from->type), primitive_of(expr->type));
                 if (return_to_place) {
                     machinecode_move(context, reg_allocator, x64_place_reg(outer_reg), place, type_size_of(expr->type));
@@ -9923,8 +9971,8 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_SUBSCRIPT: {
             if (place.kind == PLACE_NOWHERE) {
-                machinecode_for_expr(context, func, expr->subscript.array, reg_allocator, place);
-                machinecode_for_expr(context, func, expr->subscript.index, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->subscript.array, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->subscript.index, reg_allocator, place);
                 return;
             }
 
@@ -9936,7 +9984,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
             X64_Place source;
             if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, 0);
+                source = machinecode_for_assignable_expr(context, fn, expr, reg_allocator, 0);
             } else {
                 Type *array_type = expr->subscript.array->type;
                 X64_Address array_base;
@@ -9952,20 +10000,20 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves_for_index);
                     }
 
-                    machinecode_for_expr(context, func, expr->subscript.array, reg_allocator, x64_place_reg(pointer_reg));
+                    machinecode_for_expr(context, fn, expr->subscript.array, reg_allocator, x64_place_reg(pointer_reg));
                     array_base = (X64_Address) { .base = pointer_reg };
                 } else if (array_type->kind == TYPE_ARRAY) {
                     u64 size = type_size_of(array_type);
                     u64 align = type_align_of(array_type);
                     array_base = register_allocator_temp_stack_space(reg_allocator, size, align);
 
-                    machinecode_for_expr(context, func, expr->subscript.array, reg_allocator, x64_place_address(array_base));
+                    machinecode_for_expr(context, fn, expr->subscript.array, reg_allocator, x64_place_address(array_base));
                 } else if (array_type == context->string_type) {
                     u64 size = type_size_of(array_type);
                     u64 align = type_size_of(array_type);
                     X64_Address string_address = register_allocator_temp_stack_space(reg_allocator, size, align);
 
-                    machinecode_for_expr(context, func, expr->subscript.array, reg_allocator, x64_place_address(string_address));
+                    machinecode_for_expr(context, fn, expr->subscript.array, reg_allocator, x64_place_address(string_address));
 
                     Register pointer_reg;
                     if (place.kind == PLACE_REGISTER && is_gpr(place.reg)) {
@@ -9981,7 +10029,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                 }
 
                 u64 stride = type_size_of(expr->type);
-                X64_Address address = machinecode_index_address(context, func, reg_allocator, array_base, expr->subscript.index, stride);
+                X64_Address address = machinecode_index_address(context, fn, reg_allocator, array_base, expr->subscript.index, stride);
                 source = x64_place_address(address);
             }
 
@@ -9992,7 +10040,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_MEMBER_ACCESS: {
             if (place.kind == PLACE_NOWHERE) {
-                machinecode_for_expr(context, func, expr->member_access.parent, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->member_access.parent, reg_allocator, place);
                 return;
             }
 
@@ -10000,7 +10048,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             u64 member_size = type_size_of(expr->type);
 
             if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                X64_Place source = machinecode_for_assignable_expr(context, func, expr, reg_allocator, 0);
+                X64_Place source = machinecode_for_assignable_expr(context, fn, expr, reg_allocator, 0);
                 machinecode_move(context, reg_allocator, source, place, member_size);
             } else {
                 Expr *parent = expr->member_access.parent;
@@ -10023,7 +10071,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                         pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
                     }
 
-                    machinecode_for_expr(context, func, parent, reg_allocator, x64_place_reg(pointer_reg));
+                    machinecode_for_expr(context, fn, parent, reg_allocator, x64_place_reg(pointer_reg));
 
                     X64_Place member_place = { .kind = PLACE_ADDRESS };
                     member_place.address.base = pointer_reg;
@@ -10036,7 +10084,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
                     register_allocator_enter_frame(context, reg_allocator);
 
                     X64_Address tmp_address = register_allocator_temp_stack_space(reg_allocator, parent_type->structure.size, parent_type->structure.align);
-                    machinecode_for_expr(context, func, parent, reg_allocator, x64_place_address(tmp_address));
+                    machinecode_for_expr(context, fn, parent, reg_allocator, x64_place_address(tmp_address));
 
                     X64_Place member_place = { .kind = PLACE_ADDRESS };
                     member_place.address = tmp_address;
@@ -10091,7 +10139,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
 
         case EXPR_ENUM_MEMBER_NAME: {
             if (place.kind == PLACE_NOWHERE) {
-                machinecode_for_expr(context, func, expr->enum_member, reg_allocator, place);
+                machinecode_for_expr(context, fn, expr->enum_member, reg_allocator, place);
                 return;
             }
 
@@ -10107,7 +10155,7 @@ void machinecode_for_expr(Context *context, Func *func, Expr *expr, Reg_Allocato
             register_allocator_enter_frame(context, reg_allocator);
 
             Register member_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
-            machinecode_for_expr(context, func, expr->enum_member, reg_allocator, x64_place_reg(member_reg));
+            machinecode_for_expr(context, fn, expr->enum_member, reg_allocator, x64_place_reg(member_reg));
 
             Register pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
 
@@ -10155,7 +10203,7 @@ typedef struct Negated_Jump_Info {
     u64 second_text_location;
 } Negated_Jump_Info;
 
-Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Expr *expr, Reg_Allocator *reg_allocator) { 
+Negated_Jump_Info machinecode_for_negated_jump(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator) { 
     bool invert = true;
     while (expr->kind == EXPR_UNARY && expr->unary.op == UNARY_NOT) {
         invert = !invert;
@@ -10186,10 +10234,10 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
             register_allocator_enter_frame(context, reg_allocator);
 
             Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
-            machinecode_for_expr(context, func, left, reg_allocator, x64_place_reg(left_reg));
+            machinecode_for_expr(context, fn, left, reg_allocator, x64_place_reg(left_reg));
 
             Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
-            machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
+            machinecode_for_expr(context, fn, right, reg_allocator, x64_place_reg(right_reg));
 
             int instruction;
             bool swap_operands = false;
@@ -10231,10 +10279,10 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
             u32 reserves_for_rhs = machinecode_expr_reserves(right);
 
             Register left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves_for_rhs);
-            machinecode_for_expr(context, func, left, reg_allocator, x64_place_reg(left_reg));
+            machinecode_for_expr(context, fn, left, reg_allocator, x64_place_reg(left_reg));
 
             Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
-            machinecode_for_expr(context, func, right, reg_allocator, x64_place_reg(right_reg));
+            machinecode_for_expr(context, fn, right, reg_allocator, x64_place_reg(right_reg));
 
             instruction_cmp(context, x64_place_reg(left_reg), right_reg, primitive_size);
 
@@ -10245,7 +10293,7 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
         u8 primitive_size = primitive_size_of(primitive);
 
         Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
-        machinecode_for_expr(context, func, expr, reg_allocator, x64_place_reg(reg));
+        machinecode_for_expr(context, fn, expr, reg_allocator, x64_place_reg(reg));
         instruction_cmp_imm(context, x64_place_reg(reg), 0, primitive_size);
         condition = COND_NE;
     }
@@ -10292,17 +10340,17 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Func *func, Exp
     return info;
 }
 
-void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocator *reg_allocator) {
+void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *reg_allocator) {
     register_allocator_enter_frame(context, reg_allocator);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("; ");
-    print_stmt(context, func, stmt, 0);
+    print_stmt(context, fn, stmt, 0);
     #endif
 
     switch (stmt->kind) {
         case STMT_DECLARATION: {
-            Var *var = &func->body.vars[stmt->declaration.var_index];
+            Var *var = &fn->body.vars[stmt->declaration.var_index];
 
             u64 size = type_size_of(var->type);
             u64 align = type_align_of(var->type);
@@ -10325,13 +10373,13 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                     machinecode_immediate_to_place(context, reg_allocator, x64_place_address(address), 0, (u8) size);
                 }
             } else {
-                machinecode_for_expr(context, func, stmt->declaration.right, reg_allocator, x64_place_address(address));
+                machinecode_for_expr(context, fn, stmt->declaration.right, reg_allocator, x64_place_address(address));
             }
         } break;
 
         case STMT_EXPR: {
             X64_Place nowhere = { .kind = PLACE_NOWHERE };
-            machinecode_for_expr(context, func, stmt->expr, reg_allocator, nowhere);
+            machinecode_for_expr(context, fn, stmt->expr, reg_allocator, nowhere);
         } break;
 
         case STMT_ASSIGNMENT: {
@@ -10350,28 +10398,28 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 X64_Address tmp_address = register_allocator_temp_stack_space(reg_allocator, size, align);
                 X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
 
-                machinecode_for_expr(context, func, right, reg_allocator, tmp_place);
+                machinecode_for_expr(context, fn, right, reg_allocator, tmp_place);
 
-                X64_Place left_place = machinecode_for_assignable_expr(context, func, left, reg_allocator, 0);
+                X64_Place left_place = machinecode_for_assignable_expr(context, fn, left, reg_allocator, 0);
                 machinecode_move(context, reg_allocator, tmp_place, left_place, size);
             } else {
                 u32 reserves_for_rhs = machinecode_expr_reserves(right);
-                X64_Place left_place = machinecode_for_assignable_expr(context, func, left, reg_allocator, reserves_for_rhs);
-                machinecode_for_expr(context, func, right, reg_allocator, left_place);
+                X64_Place left_place = machinecode_for_assignable_expr(context, fn, left, reg_allocator, reserves_for_rhs);
+                machinecode_for_expr(context, fn, right, reg_allocator, left_place);
             }
         } break;
 
         case STMT_BLOCK: {
             for (Stmt *inner = stmt->block; inner->kind != STMT_END; inner = inner->next) {
-                machinecode_for_stmt(context, func, inner, reg_allocator);
+                machinecode_for_stmt(context, fn, inner, reg_allocator);
             }
         } break;
 
         case STMT_IF: {
-            Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, func, stmt->conditional.condition, reg_allocator);
+            Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->conditional.condition, reg_allocator);
 
             for (Stmt *inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
-                machinecode_for_stmt(context, func, inner, reg_allocator);
+                machinecode_for_stmt(context, fn, inner, reg_allocator);
             }
 
             u64 second_jump_text_location_index, second_jump_from;
@@ -10400,7 +10448,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
 
             if (stmt->conditional.else_then != null) {
                 for (Stmt *inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    machinecode_for_stmt(context, func, inner, reg_allocator);
+                    machinecode_for_stmt(context, fn, inner, reg_allocator);
                 }
 
                 i64 second_jump_by = ((i64) buf_length(context->seg_text)) - ((i64) second_jump_from);
@@ -10414,7 +10462,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
             u64 loop_start = buf_length(context->seg_text);
 
             if (stmt->loop.condition != null) {
-                Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, func, stmt->loop.condition, reg_allocator);
+                Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->loop.condition, reg_allocator);
 
                 if (jump_info.first_from != 0) {
                     buf_push(context->jump_fixups, ((Jump_Fixup) { .text_location = jump_info.first_text_location, .jump_from = jump_info.first_from, .jump_to = JUMP_TO_END_OF_LOOP }));
@@ -10425,7 +10473,7 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
             }
 
             for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
-                machinecode_for_stmt(context, func, inner, reg_allocator);
+                machinecode_for_stmt(context, fn, inner, reg_allocator);
             }
 
             u64 backward_jump_index = instruction_jmp(context, sizeof(i32));
@@ -10461,15 +10509,15 @@ void machinecode_for_stmt(Context *context, Func *func, Stmt *stmt, Reg_Allocato
                 register_allocate_specific(context, reg_allocator, RAX);
 
                 X64_Place return_location;
-                if (func->signature.return_by_reference) {
+                if (fn->signature->return_by_reference) {
                     instruction_mov_reg_mem(context, MOVE_FROM_MEM, reg_allocator->return_value_address, RAX, POINTER_SIZE);
                     return_location = x64_place_address((X64_Address) { .base = RAX });
-                } else if (primitive_is_float(func->signature.return_type->kind)) {
+                } else if (primitive_is_float(fn->signature->return_type->kind)) {
                     return_location = x64_place_reg(XMM0);
                 } else {
                     return_location = x64_place_reg(RAX);
                 }
-                machinecode_for_expr(context, func, stmt->return_stmt.value, reg_allocator, return_location);
+                machinecode_for_expr(context, fn, stmt->return_stmt.value, reg_allocator, return_location);
 
                 register_allocator_leave_frame(context, reg_allocator);
             }
@@ -10583,7 +10631,7 @@ void build_machinecode(Context *context) {
     reg_allocator.negate_f64_data_offset = U64_MAX;
 
     // Initializing global variables
-    u32 global_init_func_index = U32_MAX;
+    u32 global_init_fn_index = U32_MAX;
     {
         Stmt *first_stmt = null;
         Stmt *last_stmt = null;
@@ -10615,42 +10663,43 @@ void build_machinecode(Context *context) {
             last_stmt->next = arena_new(&context->arena, Stmt);
             last_stmt->next->kind = STMT_END;
 
-            Func func = {0};
-            func.name = string_table_intern_cstr(&context->string_table, "__init_globals__");
-            func.kind = FUNC_KIND_NORMAL;
-            func.body.first_stmt = first_stmt;
+            Fn fn = {0};
+            fn.name = string_table_intern_cstr(&context->string_table, "__init_globals__");
+            fn.kind = FUNC_KIND_NORMAL;
+            fn.body.first_stmt = first_stmt;
+            fn.signature = context->void_fn_signature;
 
-            global_init_func_index = buf_length(context->funcs);
-            buf_push(context->funcs, func);
+            global_init_fn_index = buf_length(context->fns);
+            buf_push(context->fns, fn);
         }
     }
 
     // Normal functions
     u8 *prolog = null; // stretchy-buffer
 
-    u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
-    if (main_func_index == STRING_TABLE_NO_MATCH) {
+    u32 main_fn_index = find_fn(context, string_table_search(context->string_table, "main")); 
+    if (main_fn_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
     }
-    Func* main_func = context->funcs + main_func_index;
-    assert(main_func->kind == FUNC_KIND_NORMAL); // TODO I'm not sure if this is strictly speaking neccesary!
+    Fn* main_fn = context->fns + main_fn_index;
+    assert(main_fn->kind == FUNC_KIND_NORMAL); // TODO I'm not sure if this is strictly speaking neccesary!
 
-    buf_foreach (Func, func, context->funcs) {
-        if (func->kind != FUNC_KIND_NORMAL) continue;
+    buf_foreach (Fn, fn, context->fns) {
+        if (fn->kind != FUNC_KIND_NORMAL) continue;
 
         u64 previous_call_fixup_count = buf_length(context->call_fixups);
         u64 previous_fixup_count = buf_length(context->fixups);
 
-        func->body.text_start = buf_length(context->seg_text);
+        fn->body.text_start = buf_length(context->seg_text);
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        u8* name = string_table_access(context->string_table, func->name);
+        u8* name = string_table_access(context->string_table, fn->name);
         printf("\n\n; --- fn %s ---\n", name);
         #endif
 
         // Lay out stack
-        if (reg_allocator.allocated_var_mem_infos < func->body.var_count) {
-            u32 alloc_count = func->body.var_count * 2;
+        if (reg_allocator.allocated_var_mem_infos < fn->body.var_count) {
+            u32 alloc_count = fn->body.var_count * 2;
             reg_allocator.allocated_var_mem_infos = alloc_count;
             reg_allocator.var_mem_infos = (void*) arena_alloc(&context->stack, alloc_count * sizeof(*reg_allocator.var_mem_infos));
         }
@@ -10660,10 +10709,10 @@ void build_machinecode(Context *context) {
         reg_allocator.max_callee_param_count = 0;
 
         // Parameters
-        u32 effective_param_count = func->signature.param_count;
+        u32 effective_param_count = fn->signature->param_count;
 
         u32 input_offset = 0;
-        if (func->signature.return_by_reference) {
+        if (fn->signature->return_by_reference) {
             reg_allocator.return_value_address = (X64_Address) { .base = RSP_OFFSET_INPUTS, .immediate_offset = 0 };
             input_offset += POINTER_SIZE;
             effective_param_count += 1;
@@ -10671,8 +10720,8 @@ void build_machinecode(Context *context) {
             reg_allocator.return_value_address = (X64_Address) {0};
         }
 
-        for (u32 p = 0; p < func->signature.param_count; p += 1) {
-            u32 var_index = func->signature.params[p].var_index;
+        for (u32 p = 0; p < fn->signature->param_count; p += 1) {
+            u32 var_index = fn->body.param_var_mappings[p];
 
             X64_Address address = { .base = RSP_OFFSET_INPUTS, .immediate_offset = input_offset };
             input_offset += POINTER_SIZE;
@@ -10683,11 +10732,11 @@ void build_machinecode(Context *context) {
 
         // Variables
         i32 next_stack_offset = 0;
-        for (u32 v = 0; v < func->body.var_count; v += 1) {
+        for (u32 v = 0; v < fn->body.var_count; v += 1) {
             if (reg_allocator.var_mem_infos[v].address.base != REGISTER_NONE) continue; // Ignore parameters, see previous loop
 
-            u64 size = type_size_of(func->body.vars[v].type);
-            u64 align = type_align_of(func->body.vars[v].type);
+            u64 size = type_size_of(fn->body.vars[v].type);
+            u64 align = type_align_of(fn->body.vars[v].type);
 
             next_stack_offset = (i32) round_to_next(next_stack_offset, align);
             X64_Address address = { .base = RSP_OFFSET_LOCALS, .immediate_offset = next_stack_offset };
@@ -10705,7 +10754,7 @@ void build_machinecode(Context *context) {
         // Copy parameters onto stack
         bool skip_first_param_reg = false;
 
-        if (func->signature.return_by_reference) {
+        if (fn->signature->return_by_reference) {
             skip_first_param_reg = true;
 
             Register reg = GPR_INPUT_REGISTERS[0];
@@ -10713,22 +10762,22 @@ void build_machinecode(Context *context) {
             instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
         }
 
-        for (u32 p = 0; p < min(func->signature.param_count, INPUT_REGISTER_COUNT); p += 1) {
-            u32 var_index = func->signature.params[p].var_index;
+        for (u32 p = 0; p < min(fn->signature->param_count, INPUT_REGISTER_COUNT); p += 1) {
+            u32 var_index = fn->body.param_var_mappings[p];
             X64_Address address = reg_allocator.var_mem_infos[var_index].address;
 
             u32 r = skip_first_param_reg? (p + 1) : p;
 
-            if (func->signature.params[p].reference_semantics) {
+            if (fn->signature->params[p].reference_semantics) {
                 Register reg = GPR_INPUT_REGISTERS[r];
                 instruction_mov_reg_mem(context, MOVE_TO_MEM, address, reg, POINTER_SIZE);
             } else {
-                u64 operand_size = type_size_of(func->signature.params[p].type);
+                u64 operand_size = type_size_of(fn->signature->params[p].type);
 
                 if (operand_size > 0) {
                     assert(operand_size == 1 || operand_size == 2 || operand_size == 4 || operand_size == 8);
 
-                    Type_Kind operand_primitive = primitive_of(func->signature.params[p].type);
+                    Type_Kind operand_primitive = primitive_of(fn->signature->params[p].type);
                     if (primitive_is_float(operand_primitive)) {
                         Register reg = XMM_INPUT_REGISTERS[r];
                         instruction_float_movd(context, MOVE_TO_MEM, reg, x64_place_address(address), operand_primitive == TYPE_F32);
@@ -10741,12 +10790,12 @@ void build_machinecode(Context *context) {
         }
 
         // Write out operations
-        if (func == main_func && global_init_func_index != U32_MAX) {
-            instruction_call(context, false, global_init_func_index);
+        if (fn == main_fn && global_init_fn_index != U32_MAX) {
+            instruction_call(context, false, global_init_fn_index);
         }
 
-        for (Stmt* stmt = func->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
-            machinecode_for_stmt(context, func, stmt, &reg_allocator);
+        for (Stmt* stmt = fn->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
+            machinecode_for_stmt(context, fn, stmt, &reg_allocator);
         }
 
         buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
@@ -10825,7 +10874,7 @@ void build_machinecode(Context *context) {
             instruction_integer_imm(context, INTEGER_ADD, x64_place_reg(RSP), total_stack_bytes, POINTER_SIZE);
         }
 
-        if (!func->signature.has_return) {
+        if (!fn->signature->has_return) {
             instruction_integer(context, INTEGER_XOR, MOVE_FROM_MEM, RAX, x64_place_reg(RAX), POINTER_SIZE);
         }
 
@@ -10886,9 +10935,9 @@ void build_machinecode(Context *context) {
 
         u32 jump_to;
         if (fixup->builtin) {
-            jump_to = runtime_builtin_text_starts[fixup->func_index];
+            jump_to = runtime_builtin_text_starts[fixup->fn_index];
         } else {
-            Func* callee = &context->funcs[fixup->func_index];
+            Fn* callee = &context->fns[fixup->fn_index];
             assert(callee->kind == FUNC_KIND_NORMAL);
             jump_to = callee->body.text_start;
         }
@@ -11451,11 +11500,11 @@ bool write_executable(u8* path, Context* context) {
     image.size_of_initialized_data = data_length + idata_length + pdata_length;
     image.size_of_uninitialized_data = 0;
 
-    u32 main_func_index = find_func(context, string_table_search(context->string_table, "main")); 
-    if (main_func_index == STRING_TABLE_NO_MATCH) {
+    u32 main_fn_index = find_fn(context, string_table_search(context->string_table, "main")); 
+    if (main_fn_index == STRING_TABLE_NO_MATCH) {
         panic("No main function");
     }
-    u32 main_text_start = context->funcs[main_func_index].body.text_start;
+    u32 main_text_start = context->fns[main_fn_index].body.text_start;
     image.entry_point = text_memory_start + main_text_start;
 
     image.base_of_code = text_memory_start;

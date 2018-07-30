@@ -8,10 +8,11 @@ Other
     make test failures easier to spot
 
 Language features
+    function pointers
+    type aliases (nice for working with function pointers)
     includes - either textual or preferably with some nice system!
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
     real constants
-    function pointers
     complete type_info_of_{value, type}
     size_of, align_of
     slices
