@@ -7516,7 +7516,7 @@ typedef struct X64_Place {
 #define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
-#define PRINT_GENERATED_INSTRUCTIONS
+//#define PRINT_GENERATED_INSTRUCTIONS
 
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
@@ -11615,8 +11615,8 @@ void main() {
     i64 compile_time, run_time;
 
     //compile_and_run("W:/compiler/src/assorted/first.foo", "build/test1.exe", &compile_time, &run_time);
-    compile_and_run("W:/compiler/src/assorted/second.foo", "build/test2.exe", &compile_time, &run_time);
-    //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/assorted/second.foo", "build/test2.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
 
     printf("Compiled in %i ms, ran in %i ms\n", compile_time, run_time);
