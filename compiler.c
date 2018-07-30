@@ -11616,8 +11616,8 @@ void main() {
 
     //compile_and_run("W:/compiler/src/assorted/first.foo", "build/test1.exe", &compile_time, &run_time);
     //compile_and_run("W:/compiler/src/assorted/second.foo", "build/test2.exe", &compile_time, &run_time);
-    compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
-    //compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
+    //compile_and_run("W:/compiler/src/link_test/backend.foo", "W:/compiler/src/link_test/build/out.exe", &compile_time, &run_time);
+    compile_and_run("W:/compiler/src/glfw_test/main.foo", "W:/compiler/src/glfw_test/out.exe", &compile_time, &run_time);
 
     printf("Compiled in %i ms, ran in %i ms\n", compile_time, run_time);
 }

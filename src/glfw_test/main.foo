@@ -59,7 +59,7 @@ fn print_int(int: u32) {
 fn main() {
     glfwInit();
 
-    let window = glfwCreateWindow(640, 480, "My window", null, null);
+    let window = glfwCreateWindow(640, 480, "My window".data, null, null);
     if (window == null) {
         glfwTerminate();
         ExitProcess(0);
