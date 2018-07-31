@@ -2,6 +2,8 @@
 fn main() {
     let other: *fn();
     other = &my_callback;
+
+    other();
 }
 
 fn my_callback() {

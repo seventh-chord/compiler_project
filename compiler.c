@@ -1540,7 +1540,13 @@ struct Expr { // 'typedef'd earlier!
         } unary;
 
         struct {
-            union { u32 unresolved_name; u32 fn_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
+            bool pointer_call; // if true, we try to call a function at runtime computed address
+
+            union {
+                u32 unresolved_name; // if EXPR_FLAG_UNRESOLVED
+                Expr *pointer_expr;  // else if pointer_call
+                u32 fn_index;        // else
+            };
 
             Expr** params; // []*Expr
             u32 param_count;
@@ -1811,7 +1817,7 @@ typedef struct Context {
 
 
 
-Type* get_pointer_type(Context* context, Type* type) {
+Type* get_pointer_type(Context *context, Type* type) {
     if (type->pointer_type == null) {
         type->pointer_type = arena_new(&context->arena, Type);
         type->pointer_type->kind = TYPE_POINTER;
@@ -1825,7 +1831,7 @@ Type* get_pointer_type(Context* context, Type* type) {
     return type->pointer_type;
 }
 
-Type* get_array_type(Context* context, Type* type, u64 length) {
+Type* get_array_type(Context *context, Type* type, u64 length) {
     for (Type_List* node = type->array_types; node != null; node = node->next) {
         if (node->type.array.length == length) {
             return &node->type;
@@ -1847,7 +1853,7 @@ Type* get_array_type(Context* context, Type* type, u64 length) {
     return &new->type;
 }
 
-void init_primitive_types(Context* context) {
+void init_primitive_types(Context *context) {
     #define init_primitive(kind) context->primitive_types[kind] = (Type) { kind, .primitive_name = string_table_intern_cstr(&context->string_table, PRIMITIVE_NAMES[kind]) };
 
     init_primitive(TYPE_INVALID);
@@ -1876,7 +1882,7 @@ void init_primitive_types(Context* context) {
     buf_push(context->fn_signatures, context->void_fn_signature);
 }
 
-void init_builtin_fn_names(Context* context) {
+void init_builtin_fn_names(Context *context) {
     context->builtin_names[BUILTIN_TYPE_INFO_OF_TYPE]  = string_table_intern_cstr(&context->string_table, "type_info_of_type");
     context->builtin_names[BUILTIN_TYPE_INFO_OF_VALUE] = string_table_intern_cstr(&context->string_table, "type_info_of_value");
     context->builtin_names[BUILTIN_ENUM_MEMBER_NAME]   = string_table_intern_cstr(&context->string_table, "enum_member_name");
@@ -1884,7 +1890,7 @@ void init_builtin_fn_names(Context* context) {
     context->builtin_names[BUILTIN_CAST]               = string_table_intern_cstr(&context->string_table, "cast");
 }
 
-void init_keyword_names(Context* context) {
+void init_keyword_names(Context *context) {
     u32 i = 0;
 
     #define add_keyword(token, name) \
@@ -2022,7 +2028,7 @@ u8 primitive_size_of(Type_Kind primitive) {
     }
 }
 
-u8* compound_member_name(Context* context, Expr* expr, Compound_Member* member) {
+u8* compound_member_name(Context *context, Expr* expr, Compound_Member* member) {
     u32 name_index;
     switch (member->name_mode) {
         case EXPR_COMPOUND_NAME: {
@@ -2175,7 +2181,7 @@ u64 size_mask(u8 size) {
 
 // NB This currently just assumes we are trying to import a function. In the future we might want to support importing
 // other items, though we probably want to find an example of that first, so we know what we are doing!
-Import_Index add_import(Context* context, u8* source_path, u32 library_name, u32 function_name) {
+Import_Index add_import(Context *context, u8* source_path, u32 library_name, u32 function_name) {
     Import_Index index = {0};
 
     Library_Import* import = null;
@@ -2210,7 +2216,7 @@ Import_Index add_import(Context* context, u8* source_path, u32 library_name, u32
     return index;
 }
 
-u64 add_exe_data(Context* context, u8* data, u64 length, u64 alignment) {
+u64 add_exe_data(Context *context, u8* data, u64 length, u64 alignment) {
     u64 data_offset = buf_length(context->seg_data);
 
     u64 aligned_data_offset = round_to_next(data_offset, alignment);
@@ -2233,7 +2239,7 @@ void print_file_pos(File_Pos* pos) {
     printf("%s(%u): ", name, (u64) pos->line);
 }
 
-void print_type(Context* context, Type* type) {
+void print_type(Context *context, Type* type) {
     while (type != null) {
         switch (type->kind) {
             case TYPE_POINTER: {
@@ -2310,7 +2316,7 @@ void print_token(u8* string_table, Token* t) {
     }
 }
 
-void print_expr(Context* context, Fn* fn, Expr* expr) {
+void print_expr(Context *context, Fn* fn, Expr* expr) {
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
@@ -2398,11 +2404,17 @@ void print_expr(Context* context, Fn* fn, Expr* expr) {
 
         case EXPR_CALL: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u8* name = string_table_access(context->string_table, expr->call.unresolved_name);
+                u8 *name = string_table_access(context->string_table, expr->call.unresolved_name);
                 printf("<unresolved %s>", name);
+            } else if (expr->call.pointer_call) {
+                bool parenthesize = expr->call.pointer_expr->kind != EXPR_VARIABLE;
+
+                if (parenthesize) printf("(");
+                print_expr(context, fn, expr->call.pointer_expr);
+                if (parenthesize) printf(")");
             } else {
                 Fn* callee = &context->fns[expr->call.fn_index];
-                u8* name = string_table_access(context->string_table, callee->name);
+                u8 *name = string_table_access(context->string_table, callee->name);
                 printf("%s", name);
             }
 
@@ -2511,7 +2523,7 @@ void print_expr(Context* context, Fn* fn, Expr* expr) {
     }
 }
 
-void print_stmt(Context* context, Fn* fn, Stmt* stmt, u32 indent_level) {
+void print_stmt(Context *context, Fn* fn, Stmt* stmt, u32 indent_level) {
     for (u32 i = 0; i < indent_level; i += 1) printf("    ");
 
     switch (stmt->kind) {
@@ -2617,7 +2629,7 @@ void print_stmt(Context* context, Fn* fn, Stmt* stmt, u32 indent_level) {
     printf("\n");
 }
 
-u32 find_var(Context* context, Fn* fn, u32 name) {
+u32 find_var(Context *context, Fn* fn, u32 name) {
     if (fn != null) {
         for (u32 i = 0; i < fn->body.var_count; i += 1) {
             if (fn->body.vars[i].name == name) {
@@ -2635,7 +2647,7 @@ u32 find_var(Context* context, Fn* fn, u32 name) {
     return U32_MAX;
 }
 
-u32 find_fn(Context* context, u32 name) {
+u32 find_fn(Context *context, u32 name) {
     u32 length = buf_length(context->fns);
     for (u32 i = 0; i < length; i += 1) {
         if (context->fns[i].name == name) {
@@ -2658,7 +2670,7 @@ u8 resolve_escaped_char(u8 c) {
     }
 }
 
-bool expect_single_token(Context* context, Token* t, int kind, u8* location) {
+bool expect_single_token(Context *context, Token* t, int kind, u8* location) {
     if (t->kind != kind) {
         print_file_pos(&t->pos);
         printf("Expected %s %s, but got ", TOKEN_NAMES[kind], location);
@@ -2701,7 +2713,7 @@ f64 parse_f64(u8* string, u64 length) {
     return value;
 }
 
-Type *parse_primitive_name(Context* context, u32 name_index) {
+Type *parse_primitive_name(Context *context, u32 name_index) {
     for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
         Type* type = &context->primitive_types[i];
         if (type->primitive_name == name_index) {
@@ -2712,7 +2724,7 @@ Type *parse_primitive_name(Context* context, u32 name_index) {
     return null;
 }
 
-Builtin_Fn parse_builtin_fn_name(Context* context, u32 name_index) {
+Builtin_Fn parse_builtin_fn_name(Context *context, u32 name_index) {
     for (u32 i = 0; i < BUILTIN_COUNT; i += 1) {
         if (context->builtin_names[i] == name_index) {
             return i;
@@ -2722,7 +2734,7 @@ Builtin_Fn parse_builtin_fn_name(Context* context, u32 name_index) {
     return BUILTIN_INVALID;
 }
 
-Type *parse_user_type_name(Context* context, u32 name_index) {
+Type *parse_user_type_name(Context *context, u32 name_index) {
     buf_foreach (Type*, user_type, context->user_types) {
         u32 user_type_name = 0;
         switch ((*user_type)->kind) {
@@ -2745,7 +2757,7 @@ Type *parse_user_type_name(Context* context, u32 name_index) {
 
 Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn);
 
-Type *parse_type(Context* context, Token* t, u32* length) {
+Type *parse_type(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     typedef struct Prefix Prefix;
@@ -3032,7 +3044,7 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
     }
 }
 
-Type *parse_struct_declaration(Context* context, Token* t, u32* length) {
+Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     assert(t->kind == TOKEN_KEYWORD_STRUCT);
@@ -3141,7 +3153,7 @@ Type *parse_struct_declaration(Context* context, Token* t, u32* length) {
     return type;
 }
 
-Type *parse_enum_declaration(Context* context, Token* t, u32* length) {
+Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
     Token *t_start = t;
 
     assert(t->kind == TOKEN_KEYWORD_ENUM);
@@ -3304,7 +3316,7 @@ typedef struct Shunting_Yard {
     Expr* unary_prefix;
 } Shunting_Yard;
 
-Shunting_Yard* shunting_yard_setup(Context* context) {
+Shunting_Yard* shunting_yard_setup(Context *context) {
     Shunting_Yard* yard = arena_new(&context->stack, Shunting_Yard);
 
     yard->op_queue_size = 25;
@@ -3332,7 +3344,7 @@ void shunting_yard_push_unary_prefix(Shunting_Yard* yard, Expr* expr) {
     }
 }
 
-void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* index) {
+void shunting_yard_push_subscript(Context *context, Shunting_Yard* yard, Expr* index) {
     assert(yard->unary_prefix == null);
     assert(yard->expr_queue_index > 0);
 
@@ -3355,7 +3367,7 @@ void shunting_yard_push_subscript(Context* context, Shunting_Yard* yard, Expr* i
     *array = expr;
 }
 
-void shunting_yard_push_member_access(Context* context, Shunting_Yard* yard, u32 member_name) {
+void shunting_yard_push_member_access(Context *context, Shunting_Yard* yard, u32 member_name) {
     assert(yard->unary_prefix == null);
     assert(yard->expr_queue_index > 0);
 
@@ -3379,7 +3391,7 @@ void shunting_yard_push_member_access(Context* context, Shunting_Yard* yard, u32
     *structure = expr;
 }
 
-void shunting_yard_push_expr(Context* context, Shunting_Yard* yard, Expr* new_expr) {
+void shunting_yard_push_expr(Context *context, Shunting_Yard* yard, Expr* new_expr) {
     if (yard->unary_prefix != null) {
         Expr* inner = yard->unary_prefix;
         while (inner->unary.inner != null) {
@@ -3396,7 +3408,7 @@ void shunting_yard_push_expr(Context* context, Shunting_Yard* yard, Expr* new_ex
     yard->expr_queue_index += 1;
 }
 
-void shunting_yard_collapse(Context* context, Shunting_Yard* yard) {
+void shunting_yard_collapse(Context *context, Shunting_Yard* yard) {
     assert(yard->op_queue_index >= 1);
     assert(yard->expr_queue_index >= 2);
 
@@ -3415,7 +3427,7 @@ void shunting_yard_collapse(Context* context, Shunting_Yard* yard) {
     shunting_yard_push_expr(context, yard, expr);
 }
 
-void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_op) {
+void shunting_yard_push_op(Context *context, Shunting_Yard* yard, Binary_Op new_op) {
     u8 new_precedence = BINARY_OP_PRECEDENCE[new_op];
 
     while (yard->op_queue_index > 0) {
@@ -3434,11 +3446,11 @@ void shunting_yard_push_op(Context* context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
-Expr  *parse_compound(Context* context, Token* t, u32* length);
-Expr **parse_parameter_list(Context* context, Token* t, u32* length, u32* count);
-Expr  *parse_call(Context* context, Token* t, u32* length);
+Expr  *parse_compound(Context *context, Token* t, u32* length);
+Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count);
+Expr  *parse_call(Context *context, Token* t, u32* length);
 
-Expr* parse_expr(Context* context, Token* t, u32* length) {
+Expr* parse_expr(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     // NB: We only pop the stack if we succesfully parse. That is, for eroneous code we leak memory.
@@ -3821,7 +3833,7 @@ Expr* parse_expr(Context* context, Token* t, u32* length) {
     return expr;
 }
 
-Expr* parse_compound(Context* context, Token* t, u32* length) {
+Expr* parse_compound(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after type of array literal")) {
@@ -3918,7 +3930,7 @@ Expr* parse_compound(Context* context, Token* t, u32* length) {
     return expr;
 }
 
-Expr **parse_parameter_list(Context* context, Token* t, u32* length, u32* count) {
+Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count) {
     Token* t_start = t;
 
     typedef struct Param_Expr Param_Expr;
@@ -3984,7 +3996,7 @@ Expr **parse_parameter_list(Context* context, Token* t, u32* length, u32* count)
     return exprs;
 }
 
-Expr* parse_call(Context* context, Token* t, u32* length) {
+Expr* parse_call(Context *context, Token* t, u32* length) {
     assert(t->kind == TOKEN_IDENTIFIER);
     u32 name_index = t->identifier_string_table_index;
 
@@ -4200,9 +4212,9 @@ Expr* parse_call(Context* context, Token* t, u32* length) {
     return null;
 }
 
-Stmt* parse_stmts(Context* context, Token* t, u32* length);
+Stmt* parse_stmts(Context *context, Token* t, u32* length);
 
-Stmt* parse_basic_block(Context* context, Token* t, u32* length) {
+Stmt* parse_basic_block(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     if (!expect_single_token(context, t, '{', "before block")) {
@@ -4231,7 +4243,7 @@ Stmt* parse_basic_block(Context* context, Token* t, u32* length) {
     return stmts;
 }
 
-Stmt* parse_stmts(Context* context, Token* t, u32* length) {
+Stmt* parse_stmts(Context *context, Token* t, u32* length) {
     Token* t_first_stmt_start = t;
 
     Stmt* first_stmt = arena_new(&context->arena, Stmt);
@@ -4808,9 +4820,9 @@ bool parse_extern(Context *context, u8 *source_path, Token *t, u32 *length) {
 }
 
 
-bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_length);
+bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_length);
 
-bool build_ast(Context* context, u8* file_name) {
+bool build_ast(Context *context, u8* file_name) {
     init_keyword_names(context);
     init_builtin_fn_names(context);
     init_primitive_types(context);
@@ -4849,7 +4861,7 @@ bool build_ast(Context* context, u8* file_name) {
     }
 }
 
-bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_length) {
+bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_length) {
     bool valid = true;
 
     // Lex
@@ -5706,6 +5718,57 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
     return true;
 }
 
+
+bool find_var_in_scope(Typecheck_Info *info, u32 name_index, File_Pos *pos, u32 *var_index_slot) {
+    u32 var_index = find_var(info->context, info->fn, name_index);
+    *var_index_slot = var_index;
+
+    if (var_index == U32_MAX) {
+        return false;
+    }
+
+    if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+        u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
+        Global_Var *global = &info->context->global_vars[global_index];
+
+        if (!global->valid) {
+            if (!global->checked) {
+                u8* name = string_table_access(info->context->string_table, global->var.name);
+                print_file_pos(pos);
+                printf(
+                    "Can't use global variable '%s' before its declaration on line %u\n",
+                    name, (u64) global->var.declaration_pos.line
+                );
+            }
+
+            return false;
+        }
+    } else if (info->scope->map[var_index] == false) {
+        Var *var = &info->fn->body.vars[var_index];
+        u8 *var_name = string_table_access(info->context->string_table, name_index);
+
+        u64 use_line = pos->line;
+        u64 decl_line = var->declaration_pos.line;
+
+        if (use_line <= decl_line) {
+            printf(
+                "Can't use variable '%s' on line %u before its declaration on line %u\n",
+                var_name, use_line, decl_line
+            );
+        } else {
+            printf(
+                "Can't use variable '%s' on line %u, as it isn't in scope\n",
+                var_name, use_line
+            );
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
+
 typedef enum Typecheck_Expr_Result {
     TYPECHECK_EXPR_STRONG,
     TYPECHECK_EXPR_WEAK , // Used for e.g. integer literals, which can solidify to any integer type
@@ -5718,57 +5781,18 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 var_index = find_var(info->context, info->fn, expr->variable.unresolved_name);
+                u32 var_index;
+                bool valid_var = find_var_in_scope(info, expr->variable.unresolved_name, &expr->pos, &var_index);
 
                 if (var_index == U32_MAX) {
                     u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
                     print_file_pos(&expr->pos);
-                    printf("Can't find variable '%s' ", var_name);
-                    if (info->fn != null) {
-                        u8* fn_name = string_table_access(info->context->string_table, info->fn->name);
-                        printf("in function '%s' or ", fn_name);
-                    }
-                    printf("in global scope\n");
-                    return TYPECHECK_EXPR_BAD;
+                    printf("Can't find variable '%s'", var_name);
+                    if (info->fn == null) printf("in global scope\n");
+                    else                  printf("\n");
                 }
 
-                if (var_index & VAR_INDEX_GLOBAL_FLAG) {
-                    u32 global_index = var_index & (~VAR_INDEX_GLOBAL_FLAG);
-                    Global_Var* global = &info->context->global_vars[global_index];
-
-                    if (!global->valid) {
-                        if (!global->checked) {
-                            u8* name = string_table_access(info->context->string_table, global->var.name);
-                            print_file_pos(&expr->pos);
-                            printf(
-                                "Can't use global variable '%s' before its declaration on line %u\n",
-                                name, (u64) global->var.declaration_pos.line
-                            );
-                        }
-
-                        return TYPECHECK_EXPR_BAD;
-                    }
-                } else if (info->scope->map[var_index] == false) {
-                    Var* var = &info->fn->body.vars[var_index];
-                    u8* var_name = string_table_access(info->context->string_table, expr->variable.unresolved_name);
-
-                    u64 use_line = expr->pos.line;
-                    u64 decl_line = var->declaration_pos.line;
-
-                    if (use_line <= decl_line) {
-                        printf(
-                            "Can't use variable '%s' on line %u before its declaration on line %u\n",
-                            var_name, use_line, decl_line
-                        );
-                    } else {
-                        printf(
-                            "Can't use variable '%s' on line %u, as it isn't in scope\n",
-                            var_name, use_line
-                        );
-                    }
-
-                    return TYPECHECK_EXPR_BAD;
-                }
+                if (!valid_var) return TYPECHECK_EXPR_BAD;
 
                 expr->variable.index = var_index;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
@@ -6211,29 +6235,68 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         case EXPR_CALL: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
                 u32 fn_index = find_fn(info->context, expr->call.unresolved_name);
-                if (fn_index == U32_MAX) {
-                    u8* name = string_table_access(info->context->string_table, expr->call.unresolved_name);
-                    print_file_pos(&expr->pos);
-                    printf("Can't find function '%s'\n", name);
-                    return TYPECHECK_EXPR_BAD;
+
+                if (fn_index != U32_MAX) {
+                    expr->call.fn_index = fn_index;
+                } else {
+                    u32 var_index;
+                    bool valid_var = find_var_in_scope(info, expr->call.unresolved_name, &expr->pos, &var_index);
+
+                    if (var_index == U32_MAX) {
+                        u8* name = string_table_access(info->context->string_table, expr->call.unresolved_name);
+                        print_file_pos(&expr->pos);
+                        printf("No such function or function pointer '%s'\n", name);
+                        return TYPECHECK_EXPR_BAD;
+                    } else if (!valid_var) {
+                        return TYPECHECK_EXPR_BAD;
+                    } else {
+                        // Modify the call to call a function pointer stored in a variable
+                        expr->call.pointer_call = true;
+                        expr->call.pointer_expr = arena_new(&info->context->arena, Expr);
+                        *expr->call.pointer_expr = (Expr) {
+                            .kind = EXPR_VARIABLE,
+                            .pos = expr->pos,
+                            .flags = EXPR_FLAG_ASSIGNABLE,
+                            .variable.index = var_index,
+                        };
+                    }
                 }
 
-                expr->call.fn_index = fn_index;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            Fn* callee = &info->context->fns[expr->call.fn_index];
-            expr->type = callee->signature->return_type;
+            Fn_Signature *callee_signature;
+            u8 *callee_name;
 
-            if (expr->call.param_count != callee->signature->param_count) {
-                u8* name = string_table_access(info->context->string_table, callee->name);
+            if (expr->call.pointer_call) {
+                if (typecheck_expr(info, expr->call.pointer_expr, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+
+                Type *t = expr->call.pointer_expr->type;
+                if (t->kind != TYPE_FN_POINTER) {
+                    print_file_pos(&expr->call.pointer_expr->pos);
+                    printf("Expected function pointer, but got ");
+                    print_type(info->context, t);
+                    printf(" on left hand side of call\n");
+                }
+
+                callee_signature = &t->fn_signature;
+                callee_name = "<unkown pointer>";
+            } else {
+                Fn *callee = &info->context->fns[expr->call.fn_index];
+                callee_signature = callee->signature;
+                callee_name = string_table_access(info->context->string_table, callee->name);
+            }
+
+            expr->type = callee_signature->return_type;
+
+            if (expr->call.param_count != callee_signature->param_count) {
                 print_file_pos(&expr->pos);
 
-                u64 expected = callee->signature->param_count;
+                u64 expected = callee_signature->param_count;
                 u64 given = expr->call.param_count;
                 printf(
                     "Function '%s' takes %u parameters, but %u %s given\n",
-                    name, expected, given, given == 1? "was" : "were"
+                    callee_name, expected, given, given == 1? "was" : "were"
                 );
                 return TYPECHECK_EXPR_BAD;
             }
@@ -6241,16 +6304,14 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             for (u32 p = 0; p < expr->call.param_count; p += 1) {
                 Expr *param_expr = expr->call.params[p];
 
-                u32 var_index = callee->body.param_var_mappings[p];
-                Type *expected_type = callee->signature->params[p].type;
+                Type *expected_type = callee_signature->params[p].type;
 
                 if (typecheck_expr(info, param_expr, expected_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
                 Type *actual_type = param_expr->type;
                 if (!type_can_assign(expected_type, actual_type)) {
-                    u8 *fn_name = string_table_access(info->context->string_table, callee->name);
                     print_file_pos(&expr->pos);
-                    printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), fn_name);
+                    printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), callee_name);
                     print_type(info->context, expected_type);
                     printf(" but got ");
                     print_type(info->context, actual_type);
@@ -7101,7 +7162,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
     }
 }
 
-bool typecheck(Context* context) {
+bool typecheck(Context *context) {
     bool valid = true;
 
     Typecheck_Info info = {0};
@@ -7435,7 +7496,7 @@ bool typecheck(Context* context) {
 
 
 
-void build_enum_member_name_table(Context* context, Type* type) {
+void build_enum_member_name_table(Context *context, Type* type) {
     assert(type->kind == TYPE_ENUM);
     assert(type->enumeration.name_table_data_offset == U64_MAX);
 
@@ -7690,7 +7751,7 @@ typedef struct X64_Place {
 #define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
-//#define PRINT_GENERATED_INSTRUCTIONS
+#define PRINT_GENERATED_INSTRUCTIONS
 
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
@@ -8151,7 +8212,7 @@ void instruction_cmp_imm(Context *context, X64_Place place, u64 imm, u8 op_size)
     #endif
 }
 
-void instruction_call(Context* context, bool builtin, u32 fn_index) {
+void instruction_call(Context *context, bool builtin, u32 fn_index) {
     bool near = true;
     if (!builtin) {
         Fn *callee = &context->fns[fn_index];
@@ -8199,12 +8260,22 @@ void instruction_call(Context* context, bool builtin, u32 fn_index) {
     #endif
 }
 
-void instruction_lea_call(Context* context, u32 fn_index, Register reg) {
+void instruction_call_indirect(Context *context, X64_Place place) {
+    encode_instruction_modrm(context, REX_BASE, 0xff, false, place, REGISTER_OPCODE_2);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("call ");
+    print_x64_place(place, POINTER_SIZE);
+    printf("\n");
+    #endif
+}
+
+void instruction_lea_call(Context *context, u32 fn_index, Register reg) {
     assert(is_gpr(reg) && !is_gpr_high(reg));
 
     Fn *callee = &context->fns[fn_index];
     if (callee->kind == FUNC_KIND_IMPORTED) {
-        unimplemented(); // TODO TODO TODO
+        unimplemented(); // TODO :FnPtr
     } else if (callee->kind == FUNC_KIND_NORMAL) {
         u8 rex = REX_BASE | REX_W;
         u8 modrm = 0x05;
@@ -9291,6 +9362,10 @@ u32 machinecode_expr_reserves(Expr *expr) {
                 flags |= RESERVE_RAX;
             }
 
+            if (expr->call.pointer_call) {
+                flags |= machinecode_expr_reserves(expr->call.pointer_expr);
+            }
+
             for (u32 i = 0; i < expr->call.param_count; i += 1) {
                 flags |= machinecode_expr_reserves(expr->call.params[i]);
             }
@@ -9954,10 +10029,19 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
         case EXPR_CALL: {
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
-            u32 fn_index = expr->call.fn_index;
-            Fn *callee = &context->fns[fn_index];
 
-            reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee->signature->param_count);
+            Fn_Signature *callee_signature;
+            if (expr->call.pointer_call) {
+                Type *fn_pointer_type = expr->call.pointer_expr->type;
+                assert(fn_pointer_type->kind == TYPE_FN_POINTER);
+                callee_signature = &fn_pointer_type->fn_signature;
+            } else {
+                u32 fn_index = expr->call.fn_index;
+                Fn *callee = &context->fns[fn_index];
+                callee_signature = callee->signature;
+            }
+
+            reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee_signature->param_count);
 
 
             register_allocator_enter_frame(context, reg_allocator); // outer frame for return registers
@@ -9969,10 +10053,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 return_reg = RAX;
             }
 
-            bool move_from_return_reg = !((place.kind == PLACE_REGISTER && place.reg == return_reg) ||
-                                          place.kind == PLACE_NOWHERE ||
-                                          !callee->signature->has_return);
-            if (move_from_return_reg) {
+            if (!(place.kind == PLACE_REGISTER && place.reg == return_reg)) {
                 register_allocate_specific(context, reg_allocator, return_reg);
             }
 
@@ -9982,13 +10063,13 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             bool skip_first_param_reg = false;
             Register used_volatile_registers[INPUT_REGISTER_COUNT] = {0};
 
-            if (callee->signature->return_by_reference) {
+            if (callee_signature->return_by_reference) {
                 skip_first_param_reg = true;
 
                 X64_Address return_into;
                 if (place.kind == PLACE_NOWHERE) {
-                    u64 size = type_size_of(callee->signature->return_type);
-                    u64 align = type_align_of(callee->signature->return_type);
+                    u64 size = type_size_of(callee_signature->return_type);
+                    u64 align = type_align_of(callee_signature->return_type);
                     return_into = register_allocator_temp_stack_space(reg_allocator, size, align);
                 } else {
                     assert(place.kind == PLACE_ADDRESS);
@@ -10001,8 +10082,8 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 instruction_lea(context, return_into, reg);
             }
 
-            for (u32 p = 0; p < callee->signature->param_count; p += 1) {
-                Type *param_type = callee->signature->params[p].type;
+            for (u32 p = 0; p < callee_signature->param_count; p += 1) {
+                Type *param_type = callee_signature->params[p].type;
 
                 X64_Place target_place;
 
@@ -10025,7 +10106,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                     register_allocate_specific(context, reg_allocator, target_place.reg);
                 }
 
-                if (callee->signature->params[p].reference_semantics) {
+                if (callee_signature->params[p].reference_semantics) {
                     u64 size = type_size_of(param_type);
                     u64 align = type_align_of(param_type);
 
@@ -10063,17 +10144,34 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             }
 
             // Call function and handle return value
-            instruction_call(context, false, fn_index);
+            if (expr->call.pointer_call) {
+                Register pointer_reg;
+                if (return_reg == RAX) {
+                    pointer_reg = RAX;
+                } else {
+                    pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
+                }
+
+                machinecode_for_expr(context, fn, expr->call.pointer_expr, reg_allocator, x64_place_reg(pointer_reg));
+
+                instruction_call_indirect(context, x64_place_reg(pointer_reg));
+            } else {
+                u32 fn_index = expr->call.fn_index;
+                instruction_call(context, false, fn_index);
+            }
 
             register_allocator_leave_frame(context, reg_allocator); // inner frame for parameters
 
+            bool move_from_return_reg = !((place.kind == PLACE_REGISTER && place.reg == return_reg) ||
+                                           place.kind == PLACE_NOWHERE ||
+                                           !callee_signature->has_return);
             if (move_from_return_reg) {
-                assert(place.kind != PLACE_NOWHERE && callee->signature->has_return);
+                assert(place.kind != PLACE_NOWHERE && callee_signature->has_return);
 
-                Type *return_type = callee->signature->return_type;
-                u64 return_size = type_size_of(callee->signature->return_type);
+                Type *return_type = callee_signature->return_type;
+                u64 return_size = type_size_of(callee_signature->return_type);
 
-                if (callee->signature->return_by_reference) {
+                if (callee_signature->return_by_reference) {
                     // The function just wrote the result into a pointer we passed it, so we don't have to
                     // do anything more here.
                     // NB The function also returns the pointer we passed (in RCX) in RAX, which we could
@@ -11293,7 +11391,7 @@ bool read_archive_member_header(
     return true;
 }
 
-bool parse_library(Context* context, Library_Import* import) {
+bool parse_library(Context *context, Library_Import* import) {
     u8* raw_lib_name = string_table_access(context->string_table, import->lib_name);
     u8* source_path = import->importing_source_file;
     u8* source_folder = path_get_folder(&context->arena, source_path);
@@ -11452,7 +11550,7 @@ bool parse_library(Context* context, Library_Import* import) {
     return false;
 }
 
-bool write_executable(u8* path, Context* context) {
+bool write_executable(u8* path, Context *context) {
     enum { MAX_SECTION_COUNT = 4 }; // So we can use it as an array length
 
     u64 text_length = buf_length(context->seg_text);
