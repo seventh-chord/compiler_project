@@ -1,7 +1,8 @@
 
 fn main() {
-    let callback: *fn() -> u32 = null;
-    let other:    *fn() -> u32;
+    let other: *fn();
+    other = &my_callback;
+}
 
-    other = callback;
+fn my_callback() {
 }

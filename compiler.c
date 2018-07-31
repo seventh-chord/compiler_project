@@ -1493,6 +1493,7 @@ typedef enum Expr_Kind {
     EXPR_TYPE_INFO_OF_VALUE,
     EXPR_ENUM_LENGTH,
     EXPR_ENUM_MEMBER_NAME,
+    EXPR_ADDRESS_OF_FUNCTION,
 } Expr_Kind;
 
 struct Expr { // 'typedef'd earlier!
@@ -1550,6 +1551,7 @@ struct Expr { // 'typedef'd earlier!
         Expr* cast_from;
         Type* enum_length_of;
         Expr* enum_member;
+        u32 address_of_fn_index;
 
         struct {
             Expr* array;
@@ -2497,6 +2499,12 @@ void print_expr(Context* context, Fn* fn, Expr* expr) {
             printf("enum_member_name(");
             print_expr(context, fn, expr->enum_member);
             printf(")");
+        } break;
+
+        case EXPR_ADDRESS_OF_FUNCTION: {
+            Fn *other_func = &context->fns[expr->address_of_fn_index];
+            u8 *name = string_table_access(context->string_table, other_func->name);
+            printf("&%s", name);
         } break;
 
         default: assert(false);
@@ -6099,6 +6107,29 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_UNARY: {
+            if (
+                expr->unary.op == UNARY_ADDRESS_OF &&
+                expr->unary.inner->kind == EXPR_VARIABLE &&
+                (expr->unary.inner->flags & EXPR_FLAG_UNRESOLVED) &&
+                (find_var(info->context, info->fn, expr->unary.inner->variable.unresolved_name) == U32_MAX)
+            ) {
+                // Special case: We are trying to take the address of a undefined variable, which means we might
+                // be trying to actually get a function pointer. We have to slightly modify the ast in this case.
+                // The alternative would be to use a different syntax to get function pointers, or putting
+                // functions and variables in the same namespace.
+
+                u32 name = expr->unary.inner->variable.unresolved_name;
+                u32 fn_index = find_fn(info->context, name);
+
+                if (fn_index != U32_MAX) {
+                    Fn *other_func = &info->context->fns[fn_index];
+                    expr->kind = EXPR_ADDRESS_OF_FUNCTION;
+                    expr->address_of_fn_index = fn_index;
+                    expr->type = other_func->signature_type;
+                    break; // This breaks out of the switch!
+                }
+            }
+
             switch (expr->unary.op) {
                 case UNARY_DEREFERENCE: {
                     solidify_to = get_pointer_type(info->context, solidify_to);
@@ -6422,6 +6453,10 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
+        } break;
+
+        case EXPR_ADDRESS_OF_FUNCTION: {
+            assert(false); // We only generate 'EXPR_ADDRESS_OF_FUNCTION' from within 'typecheck_expr'
         } break;
 
         default: assert(false);
@@ -6968,6 +7003,10 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
 
         case EXPR_ENUM_MEMBER_NAME: {
             return EVAL_DO_AT_RUNTIME;
+        } break;
+
+        case EXPR_ADDRESS_OF_FUNCTION: {
+            return EVAL_DO_AT_RUNTIME; // TODO If we go full-on cyclic dependency resolution, we could compute this at compile time
         } break;
 
         default: assert(false); return EVAL_BAD;
@@ -8160,6 +8199,41 @@ void instruction_call(Context* context, bool builtin, u32 fn_index) {
     #endif
 }
 
+void instruction_lea_call(Context* context, u32 fn_index, Register reg) {
+    assert(is_gpr(reg) && !is_gpr_high(reg));
+
+    Fn *callee = &context->fns[fn_index];
+    if (callee->kind == FUNC_KIND_IMPORTED) {
+        unimplemented(); // TODO TODO TODO
+    } else if (callee->kind == FUNC_KIND_NORMAL) {
+        u8 rex = REX_BASE | REX_W;
+        u8 modrm = 0x05;
+
+        modrm |= (REGISTER_INDICES[reg] & 0x07) << 3;
+        if (REGISTER_INDICES[reg] & 8) {
+            modrm |= REX_R;
+        }
+
+        buf_push(context->seg_text, rex);
+        buf_push(context->seg_text, 0x8d);
+        buf_push(context->seg_text, modrm);
+        str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
+
+        Call_Fixup fixup = {0};
+        fixup.text_location = buf_length(context->seg_text) - sizeof(i32);
+        fixup.builtin = false;
+        fixup.fn_index = fn_index;
+        buf_push(context->call_fixups, fixup);
+    } else {
+        assert(false);
+    }
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    u8 *callee_name = string_table_access(context->string_table, callee->name);
+    printf("mov %s, &%s\n", register_name(reg, POINTER_SIZE), callee_name);
+    #endif
+}
+
 void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size) {
     assert(is_gpr(reg));
 
@@ -9190,6 +9264,7 @@ u32 machinecode_expr_reserves(Expr *expr) {
         case EXPR_TYPE_INFO_OF_TYPE:
         case EXPR_TYPE_INFO_OF_VALUE:
         case EXPR_ENUM_LENGTH:
+        case EXPR_ADDRESS_OF_FUNCTION:
         {} break;
 
         case EXPR_COMPOUND: {
@@ -10207,6 +10282,22 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
             Type_Kind primitive = expr->type_info_of_value->type->kind;
             machinecode_immediate_to_place(context, reg_allocator, place, (u64) primitive, 1);
+        } break;
+
+        case EXPR_ADDRESS_OF_FUNCTION: {
+            if (place.kind == PLACE_NOWHERE) return;
+
+            if (place.kind == PLACE_REGISTER) {
+                instruction_lea_call(context, expr->address_of_fn_index, place.reg);
+            } else if (place.kind == PLACE_ADDRESS) {
+                Register reg = register_allocate_temp(reg_allocator, REGISTER_KIND_GPR, 0);
+                instruction_lea_call(context, expr->address_of_fn_index, reg);
+                instruction_mov_reg_mem(context, MOVE_TO_MEM, place.address, reg, POINTER_SIZE);
+            } else if (place.kind == PLACE_NOWHERE) {
+                // Do nothing
+            } else {
+                assert(false);
+            }
         } break;
 
         case EXPR_ENUM_LENGTH: {
