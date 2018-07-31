@@ -368,10 +368,11 @@ fn enum_test() {
     print("!\n");
 
     let a = 0;
-    for (a < 20) {
+    for (a < enum_length(Type_Kind)) {
+        if (a > 0) { print(", "); }
+
         let invalid = cast(Type_Kind, a);
         print(enum_member_name(invalid));
-        print(", ");
 
         a += 1;
     }

@@ -224,7 +224,7 @@ enum Type_Kind (u8) { // We rely on this enum being one byte large!
     ARRAY       = 16,
     STRUCT      = 18,
     ENUM        = 19,
-    FUNC_PTR    = 20,
+    FN_POINTER  = 20,
 }
 
 // NB Don't change the definition of this struct. It's exact definition is depended
@@ -1019,6 +1019,8 @@ IO_Result write_entire_file(u8* file_name, u8* contents, u32 length) {
     if (file == INVALID_HANDLE_VALUE) {
         u32 error_code = GetLastError();
         switch (error_code) {
+            case 2:  return IO_NOT_FOUND; // File not found
+            case 3:  return IO_NOT_FOUND; // Path not found
             case 32: return IO_ALREADY_OPEN;
             default: return IO_ERROR;
         }
@@ -1278,7 +1280,18 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
 
 typedef struct Type Type;
 typedef struct Type_List Type_List;
-typedef struct Fn_Signature Fn_Signature;
+
+typedef struct Fn_Signature {
+    bool has_return;
+    bool return_by_reference; // otherwise return in RAX, which we can even do for structs. See reference/notes.md
+    Type *return_type;
+
+    struct {
+        Type *type;
+        bool reference_semantics;
+    } *params;
+    u32 param_count;
+} Fn_Signature;
 
 struct Type {
     Type_Kind kind;
@@ -1326,7 +1339,7 @@ struct Type {
 
         Type* pointer_to;
 
-        Fn_Signature *fn_signature;
+        Fn_Signature fn_signature;
     };
 
     Type* pointer_type;
@@ -1735,24 +1748,12 @@ typedef struct Jump_Fixup {
     } jump_to;
 } Jump_Fixup;
 
-
-struct Fn_Signature { // NB typedef is further up
-    bool has_return;
-    bool return_by_reference; // otherwise return in RAX, which we can even do for structs. See reference/notes.md
-    Type *return_type;
-
-    struct {
-        Type *type;
-        bool reference_semantics;
-    } *params;
-    u32 param_count;
-};
-
 typedef struct Fn {
     u32 name;
-
-    Fn_Signature *signature;
     File_Pos declaration_pos;
+
+    Type *signature_type;
+    Fn_Signature *signature; // NB this should always be a pointer into 'signature_type'
 
     enum {
         FUNC_KIND_NORMAL, // use '.body'
@@ -1786,12 +1787,12 @@ typedef struct Context {
 
     // AST & intermediate representation
     Fn *fns; // stretchy buffer
-    Fn_Signature **fn_signatures; // stretchy buffer
-    Fn_Signature *void_fn_signature;
 
     Type primitive_types[TYPE_KIND_COUNT];
     Type *void_pointer_type, *string_type, *type_info_type, *char_type;
     Type **user_types; // stretchy buffer
+    Type **fn_signatures; // stretchy buffer
+    Type *void_fn_signature;
     Global_Var *global_vars; // stretchy buffer
     Var *tmp_vars; // stretchy buffer, only for temporary use, we copy to arena buffers & clear
 
@@ -1867,7 +1868,9 @@ void init_primitive_types(Context* context) {
     context->char_type         = &context->primitive_types[TYPE_CHAR];
 
     assert(buf_empty(context->fn_signatures));
-    context->void_fn_signature = arena_new(&context->arena, Fn_Signature);
+
+    context->void_fn_signature = arena_new(&context->arena, Type);
+    context->void_fn_signature->kind = TYPE_FN_POINTER;
     buf_push(context->fn_signatures, context->void_fn_signature);
 }
 
@@ -1939,19 +1942,22 @@ bool fn_signature_cmp(Fn_Signature *a, Fn_Signature *b) {
     u64 b_param_data = b->param_count * sizeof(*(b->params));
     assert(a_param_data == b_param_data);
 
+    // NB This works because equal types have equal pointers
     if (!mem_cmp((u8*) a, (u8*) b, a_param_data)) return false;
 
     return true;
 }
 
-Fn_Signature *fn_signature_canonicalize(Context *context, Fn_Signature *fn_signature) {
-    buf_foreach (Fn_Signature*, other, context->fn_signatures) {
-        if (fn_signature_cmp(*other, fn_signature)) {
-            return fn_signature;
+Type *fn_signature_canonicalize(Context *context, Fn_Signature *fn_signature) {
+    buf_foreach (Type*, other, context->fn_signatures) {
+        if (fn_signature_cmp(&((*other)->fn_signature), fn_signature)) {
+            return *other;
         }
     }
 
-    Fn_Signature *canonicalized = arena_insert_with_size(&context->arena, fn_signature, sizeof(Fn_Signature));
+    Type *canonicalized = arena_new(&context->arena, Type);
+    canonicalized->kind = TYPE_FN_POINTER;
+    canonicalized->fn_signature = *fn_signature;
     buf_push(context->fn_signatures, canonicalized);
     return canonicalized;
 }
@@ -1982,7 +1988,7 @@ bool type_can_assign(Type* a, Type* b) {
                 b = b->array.of;
             }
         } else {
-            return true;
+            return a == b;
         }
     }
 
@@ -2234,17 +2240,19 @@ void print_type(Context* context, Type* type) {
             } break;
 
             case TYPE_FN_POINTER: {
-                Fn_Signature *fn = type->fn_signature;
+                Fn_Signature *signature = &type->fn_signature;
 
                 printf("*fn(");
-                for (u32 i = 0; i < fn->param_count; i += 1) {
-                    print_type(context, fn->params[i].type);
+                for (u32 i = 0; i < signature->param_count; i += 1) {
+                    print_type(context, signature->params[i].type);
                 }
                 printf(")");
-                if (fn->has_return) {
+                if (signature->has_return) {
                     printf(" -> ");
-                    print_type(context, fn->return_type);
+                    print_type(context, signature->return_type);
                 }
+
+                type = null;
             } break;
 
             case TYPE_ARRAY: {
@@ -2727,6 +2735,8 @@ Type *parse_user_type_name(Context* context, u32 name_index) {
     return null;
 }
 
+Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn);
+
 Type *parse_type(Context* context, Token* t, u32* length) {
     Token* t_start = t;
 
@@ -2790,10 +2800,21 @@ Type *parse_type(Context* context, Token* t, u32* length) {
             case TOKEN_MUL: {
                 t += 1;
 
-                Prefix* new = arena_new(&context->stack, Prefix);
-                new->kind = PREFIX_POINTER;
-                new->link = prefix;
-                prefix = new;
+                if (t->kind == TOKEN_KEYWORD_FN) {
+                    u32 signature_length;
+                    base_type = parse_fn_signature(context, t, &signature_length, null);
+                    t += signature_length;
+
+                    if (base_type == null) {
+                        *length = t - t_start;
+                        return null;
+                    }
+                } else {
+                    Prefix* new = arena_new(&context->stack, Prefix);
+                    new->kind = PREFIX_POINTER;
+                    new->link = prefix;
+                    prefix = new;
+                }
             } break;
 
             default: {
@@ -2822,6 +2843,185 @@ Type *parse_type(Context* context, Token* t, u32* length) {
 
     *length = t - t_start;
     return type;
+}
+
+Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
+    Token *t_start = t;
+    assert(t->kind == TOKEN_KEYWORD_FN);
+    t += 1;
+
+    Fn_Signature signature = {0};
+
+    if (t->kind == TOKEN_IDENTIFIER) {
+        if (fn != null) fn->name = t->identifier_string_table_index;
+        t += 1;
+    } else if (fn != null) {
+        print_file_pos(&t->pos);
+        printf("Expected function name, but found ");
+        print_token(context->string_table, t);
+        printf("\n");
+        return null;
+    }
+
+    if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_OPEN, "after fn")) {
+        *length = t - t_start;
+        return null;
+    }
+    t += 1;
+
+    if (t->kind == TOKEN_BRACKET_ROUND_CLOSE) {
+        t += 1;
+    } else {
+        arena_stack_push(&context->stack);
+
+        typedef struct Param Param;
+        struct Param {
+            u32 name;
+            File_Pos pos;
+            Type *type;
+            Param *next, *previous;
+        };
+
+        Param *first = null;
+        Param *last = null;
+
+        while (true) {
+            u32 names_given = 0;
+
+            while(true) {
+                if (t->kind != TOKEN_IDENTIFIER) {
+                    print_file_pos(&t->pos);
+                    printf("Expected a parameter name, but got ");
+                    print_token(context->string_table, t);
+                    printf("\n");
+                    *length = t - t_start;
+                    return null;
+                }
+
+                Param *next = arena_new(&context->stack, Param);
+                next->name = t->identifier_string_table_index;
+                next->pos = t->pos;
+                t += 1;
+
+                if (first == null) {
+                    first = next;
+                } else {
+                    next->previous = last;
+                    last->next = next;
+                }
+                last = next;
+
+                names_given += 1;
+                signature.param_count += 1;
+
+                if (t->kind == TOKEN_COMMA) {
+                    t += 1;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+
+            if (!expect_single_token(context, t, TOKEN_COLON, names_given > 1? "after parameter names" : "after parameter name")) {
+                *length = t - t_start;
+                return null;
+            }
+            t += 1;
+
+            u32 type_length = 0;
+            Type* param_type = parse_type(context, t, &type_length);
+            t += type_length;
+            if (param_type == null) {
+                *length = t - t_start;
+                return null;
+            }
+
+            Param* p = last;
+            for (u32 i = 0; i < names_given; i += 1) {
+                p->type = param_type;
+                p = p->previous;
+            }
+
+            if (t->kind == TOKEN_BRACKET_ROUND_CLOSE) {
+                t += 1;
+                break;
+            } else {
+                if (!expect_single_token(context, t, TOKEN_COMMA, "after member declaration")) return null;
+                t += 1;
+                continue;
+            }
+        }
+
+        signature.params = (void*) arena_alloc(&context->arena, signature.param_count * sizeof(*signature.params));
+        u32 i = 0;
+        for (Param *p = first; p != null; p = p->next, i += 1) {
+            signature.params[i].type = p->type;
+        }
+
+        if (fn != null) {
+            assert(fn->body.param_var_mappings == null);
+            fn->body.param_var_mappings = (u32*) arena_alloc(&context->arena, signature.param_count * sizeof(u32));
+            
+            u32 i = 0;
+            for (Param *p = first; p != null; p = p->next, i += 1) {
+                Var var = {0};
+                var.name = p->name;
+                var.type = p->type;
+                var.declaration_pos = p->pos;
+
+                u32 var_index = buf_length(context->tmp_vars);
+                buf_push(context->tmp_vars, var);
+
+                fn->body.param_var_mappings[i] = var_index;
+            }
+        }
+
+        arena_stack_pop(&context->stack);
+    }
+
+    if (t->kind == TOKEN_ARROW) {
+        t += 1;
+
+        u32 type_length;
+        Type *return_type = parse_type(context, t, &type_length);
+        t += type_length;
+
+        if (return_type == null) {
+            *length = t - t_start;
+            return null;
+        }
+
+        signature.has_return = true;
+        signature.return_type = return_type;
+    } else {
+        signature.has_return = false;
+        signature.return_type = &context->primitive_types[TYPE_VOID];
+    }
+
+
+    *length = t - t_start;
+
+
+    bool unresolved = false;
+    for (u32 p = 0; p < signature.param_count; p += 1) {
+        if (signature.params[p].type->flags & TYPE_FLAG_UNRESOLVED) {
+            unresolved = true;
+            break;
+        }
+    }
+    if (signature.has_return && (signature.return_type->flags & TYPE_FLAG_UNRESOLVED)) {
+        unresolved = true;
+    }
+
+    if (unresolved) {
+        Type *type = arena_new(&context->arena, Type);
+        type->flags |= TYPE_FLAG_UNRESOLVED;
+        type->kind = TYPE_FN_POINTER;
+        type->fn_signature = signature;
+        return type;
+    } else {
+        return fn_signature_canonicalize(context, &signature);
+    }
 }
 
 Type *parse_struct_declaration(Context* context, Token* t, u32* length) {
@@ -4420,124 +4620,7 @@ Stmt* parse_stmts(Context* context, Token* t, u32* length) {
     return first_stmt;
 }
 
-bool parse_parameter_declaration_list(Context* context, Fn* fn, Token* t, u32* length) {
-    Token* t_start = t;
-
-    if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_OPEN, "after function name")) {
-        return null;
-    }
-    t += 1;
-
-    assert(fn->signature->param_count == 0);
-    assert(fn->signature->params == null);
-
-    typedef struct Param Param;
-    struct Param {
-        u32 name;
-        Type* type;
-        File_Pos pos;
-        Param *next, *previous;
-    };
-
-    Param* first = null;
-    Param* last = null;
-
-    arena_stack_push(&context->stack);
-
-    if (t->kind == TOKEN_BRACKET_ROUND_CLOSE) {
-        t += 1;
-    } else while (true) {
-        u32 names_given = 0;
-        while (true) {
-            if (t->kind != TOKEN_IDENTIFIER) {
-                print_file_pos(&t->pos);
-                printf("Expected a parameter name, but got ");
-                print_token(context->string_table, t);
-                printf("\n");
-                *length = t - t_start;
-                return false;
-            }
-
-            Param* next = arena_new(&context->stack, Param);
-            next->name = t->identifier_string_table_index;
-            next->pos = t->pos;
-
-            t += 1;
-
-            if (first == null) {
-                first = next;
-            } else {
-                next->previous = last;
-                last->next = next;
-            }
-            last = next;
-
-            names_given += 1;
-            fn->signature->param_count += 1;
-
-            if (t->kind == TOKEN_COMMA) {
-                t += 1;
-                continue;
-            } else {
-                break;
-            }
-        }
-
-        if (!expect_single_token(context, t, TOKEN_COLON, names_given > 1? "after parameter names" : "after parameter name")) {
-            *length = t - t_start;
-            return false;
-        }
-        t += 1;
-
-        u32 type_length = 0;
-        Type* param_type = parse_type(context, t, &type_length);
-        t += type_length;
-        if (param_type == null) {
-            *length = t - t_start;
-            return false;
-        }
-
-        Param* p = last;
-        for (u32 i = 0; i < names_given; i += 1) {
-            p->type = param_type;
-            p = p->previous;
-        }
-
-        if (t->kind == TOKEN_BRACKET_ROUND_CLOSE) {
-            t += 1;
-            break;
-        } else {
-            if (!expect_single_token(context, t, TOKEN_COMMA, "after member declaration")) return false;
-            t += 1;
-        }
-    }
-
-    fn->signature->params = (void*) arena_alloc(&context->arena, fn->signature->param_count * sizeof(*fn->signature->params));
-
-    assert(fn->body.param_var_mappings == null); // This is a bit of a hack, we don't know if the function has a body yet
-    fn->body.param_var_mappings = (u32*) arena_alloc(&context->arena, fn->signature->param_count * sizeof(u32));
-
-    u32 i = 0;
-    for (Param* p = first; p != null; p = p->next, i += 1) {
-        Var var = {0};
-        var.name = p->name;
-        var.type = p->type;
-        var.declaration_pos = p->pos;
-
-        u32 var_index = buf_length(context->tmp_vars);
-        buf_push(context->tmp_vars, var);
-
-        fn->body.param_var_mappings[i] = var_index;
-        fn->signature->params[i].type = p->type;
-    }
-
-    arena_stack_pop(&context->stack);
-
-    *length = t - t_start;
-    return true;
-}
-
-Fn* parse_function(Context* context, Token* t, u32* length) {
+Fn *parse_fn(Context *context, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_FN);
     bool valid = true;
 
@@ -4545,93 +4628,62 @@ Fn* parse_function(Context* context, Token* t, u32* length) {
     File_Pos declaration_pos = t->pos;
 
     // Estimate size of function, so we still print reasonable errors on bad function declarations
-    // NB This assumes functions with bodies at the moment, maybe that is bad?
+    // TODO TODO TODO This estimation is completly useless now, as we can have function pointers.
+    // We probably just want to bail out on the first error, so we don't have to deal with
+    // properly continuing compilation on errors!
     *length = 1;
     for (Token* u = t + 1; !(u->kind == TOKEN_END_OF_STREAM || u->kind == TOKEN_KEYWORD_FN); u += 1) {
         *length += 1;
     }
 
-    // Name
-    t += 1;
-    if (t->kind != TOKEN_IDENTIFIER) {
-        print_file_pos(&t->pos);
-        printf("Expected function name, but found ");
-        print_token(context->string_table, t);
-        printf("\n");
 
-        return null;
-    }
-    u32 name_index = t->identifier_string_table_index;
-    t += 1;
+    // NB we use these while parsing, and then copy them into the memory arena
+    buf_clear(context->tmp_vars); 
 
-    u32 other_fn_index = find_fn(context, name_index);
+
+    Fn fn = {0};
+    fn.declaration_pos = t->pos;
+
+    u32 signature_length = 0;
+    Type *signature_type = parse_fn_signature(context, t, &signature_length, &fn);
+    t += signature_length;
+
+    if (signature_type == null) return null;
+    assert(signature_type->kind == TYPE_FN_POINTER);
+    fn.signature_type = signature_type;
+    fn.signature = &signature_type->fn_signature;
+
+    u32 other_fn_index = find_fn(context, fn.name);
     if (other_fn_index != U32_MAX) {
         Fn* other_fn = &context->fns[other_fn_index];
-        u8* name = string_table_access(context->string_table, name_index);
+        u8* name = string_table_access(context->string_table, fn.name);
         print_file_pos(&start->pos);
         printf("A function called '%s' is defined both on line %u and line %u\n", name, (u64) declaration_pos.line, (u64) other_fn->declaration_pos.line);
         valid = false;
     }
 
-    if (parse_primitive_name(context, name_index) != null || context->builtin_names[BUILTIN_CAST] == name_index) {
-        u8* name = string_table_access(context->string_table, name_index);
+    if (parse_primitive_name(context, fn.name) != null || context->builtin_names[BUILTIN_CAST] == fn.name) {
+        u8* name = string_table_access(context->string_table, fn.name);
         print_file_pos(&start->pos);
         printf("Can't use '%s' as a function name, as it is reserved for casts\n", name);
         valid = false;
-    } else if (parse_builtin_fn_name(context, name_index) != BUILTIN_INVALID) {
-        u8* name = string_table_access(context->string_table, name_index);
+    } else if (parse_builtin_fn_name(context, fn.name) != BUILTIN_INVALID) {
+        u8* name = string_table_access(context->string_table, fn.name);
         print_file_pos(&start->pos);
         printf("Can't use '%s' as a function name, as it would shadow a builtin function\n", name);
         valid = false;
     }
 
-    // NB we use these while parsing, and then copy them into the memory arena
-    buf_clear(context->tmp_vars); 
-
-    buf_push(context->fns, ((Fn) {0}));
-    Fn* fn = buf_end(context->fns) - 1;
-
-    fn->name = name_index;
-    fn->declaration_pos = start->pos;
-
-    Fn_Signature temp_signature = {0};
-    fn->signature = &temp_signature;
-
-    // Parameter list
-    u32 parameter_length = 0;
-    if (!parse_parameter_declaration_list(context, fn, t, &parameter_length)) return null;
-    t += parameter_length;
-
-    // Return type
-    fn->signature->has_return = false;
-    fn->signature->return_type = &context->primitive_types[TYPE_VOID];
-    fn->signature->return_by_reference = false;
-
-    if (t->kind == TOKEN_ARROW) {
-        t += 1;
-
-        u32 return_type_length = 0;
-        Type* return_type = parse_type(context, t, &return_type_length);
-        t += return_type_length;
-
-        if (return_type == null) {
-            return null;
-        } else if (return_type->kind != TYPE_VOID) {
-            fn->signature->has_return = true;
-            fn->signature->return_type = return_type;
-        }
-    }
-
     // Functions without a body
     if (t->kind == TOKEN_SEMICOLON) {
-        fn->kind = FUNC_KIND_IMPORTED;
+        fn.kind = FUNC_KIND_IMPORTED;
 
     // Body
     } else {
-        fn->kind = FUNC_KIND_NORMAL;
+        fn.kind = FUNC_KIND_NORMAL;
 
         if (t->kind != TOKEN_BRACKET_CURLY_OPEN) {
-            u8* name = string_table_access(context->string_table, name_index);
+            u8* name = string_table_access(context->string_table, fn.name);
             print_file_pos(&t->pos);
             printf("Expected an open curly brace { after 'fn %s ...', but found ", name);
             print_token(context->string_table, t);
@@ -4652,26 +4704,23 @@ Fn* parse_function(Context* context, Token* t, u32* length) {
             valid = false;
         }
 
-        fn->body.first_stmt = first_stmt;
+        fn.body.first_stmt = first_stmt;
     }
 
     // Copy data out of temporary buffers into permanent arena storage
-    fn->body.var_count = buf_length(context->tmp_vars);
-    fn->body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
-    mem_copy((u8*) context->tmp_vars, (u8*) fn->body.vars, buf_bytes(context->tmp_vars));
-
-    // Canonicalize signature
-    assert(fn->signature == &temp_signature);
-    fn->signature = fn_signature_canonicalize(context, &temp_signature);
+    fn.body.var_count = buf_length(context->tmp_vars);
+    fn.body.vars = (Var*) arena_alloc(&context->arena, buf_bytes(context->tmp_vars));
+    mem_copy((u8*) context->tmp_vars, (u8*) fn.body.vars, buf_bytes(context->tmp_vars));
 
     if (!valid) {
         return null;
     } else {
-        return fn;
+        buf_push(context->fns, fn);
+        return buf_end(context->fns) - 1;
     }
 }
 
-bool parse_extern(Context* context, u8* source_path, Token* t, u32* length) {
+bool parse_extern(Context *context, u8 *source_path, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_EXTERN);
 
     Token* start = t;
@@ -4717,7 +4766,7 @@ bool parse_extern(Context* context, u8* source_path, Token* t, u32* length) {
         switch (body[i].kind) {
             case TOKEN_KEYWORD_FN: {
                 u32 length;
-                Fn* fn = parse_function(context, &body[i], &length);
+                Fn* fn = parse_fn(context, &body[i], &length);
 
                 if (fn == null) {
                     valid = false;
@@ -5357,7 +5406,7 @@ bool lex_and_parse_text(Context* context, u8* file_name, u8* file, u32 file_leng
     while (t->kind != TOKEN_END_OF_STREAM && valid) switch (t->kind) {
         case TOKEN_KEYWORD_FN: {
             u32 length = 0;
-            Fn* fn = parse_function(context, t, &length);
+            Fn* fn = parse_fn(context, t, &length);
 
             if (fn == null) {
                 valid = false;
@@ -5609,6 +5658,23 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
 
                 type = new;
 
+                done = true;
+            } break;
+
+            case TYPE_FN_POINTER: {
+                Fn_Signature signature = type->fn_signature;
+
+                for (u32 p = 0; p < signature.param_count; p += 1) {
+                    if (!resolve_type(context, &signature.params[p].type, pos)) {
+                        return false;
+                    }
+                }
+
+                if (!resolve_type(context, &signature.return_type, pos)) {
+                    return false;
+                }
+
+                type = fn_signature_canonicalize(context, &signature);
                 done = true;
             } break;
 
@@ -7150,41 +7216,16 @@ bool typecheck(Context* context) {
     }
 
     if (!valid) return false;
-    
-    // Function signatures
+
+    // Functions
     buf_foreach (Fn, fn, context->fns) {
-        for (u32 p = 0; p < fn->signature->param_count; p += 1) {
-            Type **type = &fn->signature->params[p].type;
-
-            if (!resolve_type(context, type, &fn->declaration_pos)) {
+        if (fn->signature_type->flags & TYPE_FLAG_UNRESOLVED) {
+            if (!resolve_type(context, &fn->signature_type, &fn->declaration_pos)) {
                 valid = false;
-            } else if (primitive_is_compound((*type)->kind)) {
-                u32 size = type_size_of(*type);
-                if (size == 0 || size == 1 || size == 2 || size == 4 || size == 8) {
-                    // Just squish the value into a register
-                } else {
-                    fn->signature->params[p].reference_semantics = true;
-                    if (fn->kind == FUNC_KIND_NORMAL) {
-                        fn->body.vars[fn->body.param_var_mappings[p]].is_reference = true;
-                    }
-                }
             }
         }
 
-        if (fn->signature->has_return) {
-            Type **return_type = &fn->signature->return_type;
-
-            if (!resolve_type(context, return_type, &fn->declaration_pos)) {
-                valid = false;
-            } else if (primitive_is_compound((*return_type)->kind)) {
-                u32 size = type_size_of(*return_type);
-                if (size == 1 || size == 2 || size == 4 || size == 8) {
-                    // We just squish the struct/array into RAX
-                } else {
-                    fn->signature->return_by_reference = true;
-                }
-            }
-        }
+        fn->signature = &fn->signature_type->fn_signature;
     }
 
     if (!valid) return false;
@@ -7267,7 +7308,7 @@ bool typecheck(Context* context) {
 
     if (!valid) return false;
 
-    // Functions
+    // Functions bodies
     for (u32 f = 0; f < buf_length(context->fns); f += 1) {
         info.fn = context->fns + f;
 
@@ -7304,6 +7345,50 @@ bool typecheck(Context* context) {
         }
 
         arena_stack_pop(&context->stack);
+    }
+
+    // Function signatures
+    buf_foreach (Type*, signature_type, context->fn_signatures) {
+        assert(!((*signature_type)->flags & TYPE_FLAG_UNRESOLVED));
+
+        Fn_Signature *signature = &((*signature_type)->fn_signature);
+
+        for (u32 p = 0; p < signature->param_count; p += 1) {
+            Type **type = &signature->params[p].type;
+            assert(!((*type)->flags & TYPE_FLAG_UNRESOLVED));
+
+            if (primitive_is_compound((*type)->kind)) {
+                u32 size = type_size_of(*type);
+                if (size == 0 || size == 1 || size == 2 || size == 4 || size == 8) {
+                    // Just squish the value into a register
+                } else {
+                    signature->params[p].reference_semantics = true;
+                }
+            }
+        }
+
+        if (signature->has_return) {
+            Type **return_type = &signature->return_type;
+            assert(!((*return_type)->flags & TYPE_FLAG_UNRESOLVED));
+
+            if (primitive_is_compound((*return_type)->kind)) {
+                u32 size = type_size_of(*return_type);
+                if (size == 1 || size == 2 || size == 4 || size == 8) {
+                    // We just squish the struct/array into RAX
+                } else {
+                    signature->return_by_reference = true;
+                }
+            }
+        }
+    }
+
+    // Mark variables as references according to the signature, now that we have completed signatures
+    buf_foreach (Fn, fn, context->fns) {
+        for (u32 p = 0; p < fn->signature->param_count; p += 1) {
+            if (fn->signature->params[p].reference_semantics && fn->kind == FUNC_KIND_NORMAL) {
+                fn->body.vars[fn->body.param_var_mappings[p]].is_reference = true;
+            }
+        }
     }
 
     return valid;
@@ -10667,7 +10752,8 @@ void build_machinecode(Context *context) {
             fn.name = string_table_intern_cstr(&context->string_table, "__init_globals__");
             fn.kind = FUNC_KIND_NORMAL;
             fn.body.first_stmt = first_stmt;
-            fn.signature = context->void_fn_signature;
+            fn.signature_type = context->void_fn_signature;
+            fn.signature = &fn.signature_type->fn_signature;
 
             global_init_fn_index = buf_length(context->fns);
             buf_push(context->fns, fn);

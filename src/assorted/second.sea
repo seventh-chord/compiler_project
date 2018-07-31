@@ -41,7 +41,7 @@ fn main() {
 
     big_bummer();
 
-    assert(enum_length(Type_Kind) == i64(Type_Kind::ENUM) + 1, "There are not enough types!");
+    assert(enum_length(Type_Kind) == i64(Type_Kind::FN_POINTER) + 1, "There are not enough types!");
 
     print(get_second_word("This Whoa\n sentence will not be printed!"));
 
