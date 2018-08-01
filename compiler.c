@@ -6320,6 +6320,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     printf("Expected function pointer, but got ");
                     print_type(info->context, t);
                     printf(" on left hand side of call\n");
+                    return TYPECHECK_EXPR_BAD;
                 }
 
                 callee_signature = &t->fn_signature;

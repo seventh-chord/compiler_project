@@ -6,6 +6,9 @@ fn main() {
     other();
 
     give_us_a_function_pointer()();
+
+    let shit: u64;
+    shit();
 }
 
 fn my_callback() {
