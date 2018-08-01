@@ -3344,30 +3344,55 @@ void shunting_yard_push_unary_prefix(Shunting_Yard* yard, Expr* expr) {
     }
 }
 
-void shunting_yard_push_subscript(Context *context, Shunting_Yard* yard, Expr* index) {
+void shunting_yard_push_subscript(Context *context, Shunting_Yard *yard, Expr *index) {
     assert(yard->unary_prefix == null);
     assert(yard->expr_queue_index > 0);
 
-    Expr** array = &yard->expr_queue[yard->expr_queue_index - 1];
-
+    Expr **array = &yard->expr_queue[yard->expr_queue_index - 1];
     while (true) {
         if ((*array)->kind == EXPR_UNARY) {
             array = &((*array)->unary.inner);
         } else {
+            assert((*array)->kind != EXPR_ADDRESS_OF_FUNCTION); // Supporting this would not be hard, but we don't generate it in the parser rn
             break;
         }
     }
 
-    Expr* expr = arena_new(&context->arena, Expr);
+    Expr *expr = arena_new(&context->arena, Expr);
     expr->kind = EXPR_SUBSCRIPT;
+    expr->pos = (*array)->pos;
     expr->subscript.array = *array;
     expr->subscript.index = index;
-    expr->pos = expr->subscript.array->pos;
 
     *array = expr;
 }
 
-void shunting_yard_push_member_access(Context *context, Shunting_Yard* yard, u32 member_name) {
+void shunting_yard_push_pointer_call(Context *context, Shunting_Yard *yard, Expr **params, u32 param_count) {
+    assert(yard->unary_prefix == null);
+    assert(yard->expr_queue_index > 0);
+
+    Expr **pointer = &yard->expr_queue[yard->expr_queue_index - 1];
+    while (true) {
+        if ((*pointer)->kind == EXPR_UNARY) {
+            pointer = &((*pointer)->unary.inner);
+        } else {
+            assert((*pointer)->kind != EXPR_ADDRESS_OF_FUNCTION); // Supporting this would not be hard, but we don't generate it in the parser rn
+            break;
+        }
+    }
+
+    Expr *expr = arena_new(&context->arena, Expr);
+    expr->kind = EXPR_CALL;
+    expr->pos = (*pointer)->pos;
+    expr->call.pointer_call = true;
+    expr->call.pointer_expr = *pointer;
+    expr->call.params = params;
+    expr->call.param_count = param_count;
+
+    *pointer = expr;
+}
+
+void shunting_yard_push_member_access(Context *context, Shunting_Yard *yard, u32 member_name) {
     assert(yard->unary_prefix == null);
     assert(yard->expr_queue_index > 0);
 
@@ -3713,7 +3738,7 @@ Expr* parse_expr(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     u32 index_length = 0;
-                    Expr* index = parse_expr(context, t, &index_length);
+                    Expr *index = parse_expr(context, t, &index_length);
                     t += index_length;
 
                     if (index == null) {
@@ -3728,6 +3753,24 @@ Expr* parse_expr(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     shunting_yard_push_subscript(context, yard, index);
+
+                    expect_value = false;
+                    could_parse = true;
+                } break;
+
+                case TOKEN_BRACKET_ROUND_OPEN: {
+                    t += 1;
+
+                    u32 param_list_length = 0;
+                    u32 param_count = 0;
+                    Expr **params = parse_parameter_list(context, t, &param_list_length, &param_count);
+                    t += param_list_length;
+                    if (params == null) {
+                        *length = t - t_start;
+                        return null;
+                    }
+
+                    shunting_yard_push_pointer_call(context, yard, params, param_count);
 
                     expect_value = false;
                     could_parse = true;
@@ -10124,6 +10167,17 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 }
             }
 
+            Register pointer_reg = REGISTER_NONE;
+            if (expr->call.pointer_call) {
+                // We need to compute this before we save volatile registers for the call
+                if (return_reg == RAX) {
+                    pointer_reg = RAX;
+                } else {
+                    pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
+                }
+                machinecode_for_expr(context, fn, expr->call.pointer_expr, reg_allocator, x64_place_reg(pointer_reg));
+            }
+
             // Save volatile registers, unless we are using them for parameters
             for (u32 i = 0; i < VOLATILE_REGISTER_COUNT; i += 1) {
                 Register reg = VOLATILE_REGISTERS[i];
@@ -10145,15 +10199,6 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
             // Call function and handle return value
             if (expr->call.pointer_call) {
-                Register pointer_reg;
-                if (return_reg == RAX) {
-                    pointer_reg = RAX;
-                } else {
-                    pointer_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
-                }
-
-                machinecode_for_expr(context, fn, expr->call.pointer_expr, reg_allocator, x64_place_reg(pointer_reg));
-
                 instruction_call_indirect(context, x64_place_reg(pointer_reg));
             } else {
                 u32 fn_index = expr->call.fn_index;

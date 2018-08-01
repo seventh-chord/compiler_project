@@ -4,7 +4,13 @@ fn main() {
     other = &my_callback;
 
     other();
+
+    give_us_a_function_pointer()();
 }
 
 fn my_callback() {
+}
+
+fn give_us_a_function_pointer() -> *fn() {
+    return &my_callback;
 }
