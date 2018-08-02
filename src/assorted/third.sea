@@ -1,4 +1,19 @@
 
+extern "kernel32.lib" {
+    fn ExitProcess(exit_code: u32);
+    fn GetStdHandle(key: u32) -> u64;
+    fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+}
+
+let write_fn = &WriteFile;
+
+let stdout_handle = GetStdHandle(u32(-11));
+fn print(string: String) {
+    let written: u32;
+    write_fn(stdout_handle, string.data, u32(string.length), &written, null);
+}
+
+
 fn main() {
     let other: *fn();
     other = &my_callback;
@@ -7,11 +22,11 @@ fn main() {
 
     give_us_a_function_pointer()();
 
-    let shit: u64;
-    shit();
+    ExitProcess(0);
 }
 
 fn my_callback() {
+    print("You just called my callback!\n");
 }
 
 fn give_us_a_function_pointer() -> *fn() {

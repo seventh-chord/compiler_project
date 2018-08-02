@@ -8319,8 +8319,30 @@ void instruction_lea_call(Context *context, u32 fn_index, Register reg) {
 
     Fn *callee = &context->fns[fn_index];
     if (callee->kind == FUNC_KIND_IMPORTED) {
-        unimplemented(); // TODO :FnPtr
+        // 'mov reg, [rip + ...]'               (address is in .idata, which points to function elsewhere)
+
+        u8 rex = REX_BASE | REX_W;
+        u8 modrm = 0x05;
+
+        modrm |= (REGISTER_INDICES[reg] & 0x07) << 3;
+        if (REGISTER_INDICES[reg] & 8) {
+            modrm |= REX_R;
+        }
+
+        buf_push(context->seg_text, rex);
+        buf_push(context->seg_text, 0x8b);
+        buf_push(context->seg_text, modrm);
+        str_push_integer(&context->seg_text, sizeof(i32), 0xdeadbeef);
+
+        Rip_Fixup fixup = {0};
+        fixup.rip_offset = buf_length(context->seg_text) - sizeof(i32);
+        fixup.next_instruction = buf_length(context->seg_text);
+        fixup.kind = RIP_FIXUP_IMPORT_CALL;
+        fixup.import_index = callee->import_info.index;
+        buf_push(context->fixups, fixup);
     } else if (callee->kind == FUNC_KIND_NORMAL) {
+        // 'lea reg, [rip + ...]'               (function is in .text)
+
         u8 rex = REX_BASE | REX_W;
         u8 modrm = 0x05;
 
