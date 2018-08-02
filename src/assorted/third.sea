@@ -15,20 +15,35 @@ fn print(string: String) {
 
 
 fn main() {
-    let other: *fn();
+    let n: i32 = 7;
+
+    let other: *fn(p: i32) -> i32;
     other = &my_callback;
 
-    other();
+    n = other(n);
 
-    give_us_a_function_pointer()();
+    n = give_us_a_function_pointer()(n);
+
+    n = down_the_rabbit_hole()()(n);
+
+    if (n != 10) {
+        print("The callback DID NOT WORK\n");
+    } else {
+        print("The callback did work\n");
+    }
 
     ExitProcess(0);
 }
 
-fn my_callback() {
+fn my_callback(parameter: i32) -> i32 {
     print("You just called my callback!\n");
+    return parameter + 1;
 }
 
-fn give_us_a_function_pointer() -> *fn() {
+fn give_us_a_function_pointer() -> *fn(p: i32) -> i32 {
     return &my_callback;
+}
+
+fn down_the_rabbit_hole() -> *fn() -> *fn(p: i32) -> i32 {
+    return &give_us_a_function_pointer;
 }

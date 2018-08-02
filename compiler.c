@@ -1944,15 +1944,18 @@ Condition find_condition_for_op_and_type(Binary_Op op, bool is_signed) {
 }
 
 bool fn_signature_cmp(Fn_Signature *a, Fn_Signature *b) {
-    if (!mem_cmp((u8*) a, (u8*) b, sizeof(Fn_Signature))) return false;
+    bool equal = 
+        a->has_return == b->has_return &&
+        a->return_type == b->return_type &&
+        a->param_count == b->param_count;
+    if (!equal) return false;
+
+    for (u32 p = 0; p < a->param_count; p += 1) {
+        if (a->params[p].type != b->params[p].type) {
+            return false;
+        }
+    }
     
-    u64 a_param_data = a->param_count * sizeof(*(a->params));
-    u64 b_param_data = b->param_count * sizeof(*(b->params));
-    assert(a_param_data == b_param_data);
-
-    // NB This works because equal types have equal pointers
-    if (!mem_cmp((u8*) a, (u8*) b, a_param_data)) return false;
-
     return true;
 }
 
