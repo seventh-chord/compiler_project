@@ -5,7 +5,8 @@ extern "kernel32.lib" {
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
 }
 
-let write_fn = &WriteFile;
+typedef WriteFile_Type = *fn(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+let write_fn: WriteFile_Type = &WriteFile;
 
 let stdout_handle = GetStdHandle(u32(-11));
 fn print(string: String) {
@@ -13,6 +14,8 @@ fn print(string: String) {
     write_fn(stdout_handle, string.data, u32(string.length), &written, null);
 }
 
+
+typedef int = i32;
 
 fn main() {
     let n: i32 = 7;
@@ -32,6 +35,8 @@ fn main() {
         print("The callback did work\n");
     }
 
+    print_keyword();
+
     ExitProcess(0);
 }
 
@@ -44,6 +49,25 @@ fn give_us_a_function_pointer() -> *fn(p: i32) -> i32 {
     return &my_callback;
 }
 
-fn down_the_rabbit_hole() -> *fn() -> *fn(p: i32) -> i32 {
+fn down_the_rabbit_hole() -> *fn() -> *fn(p: i32) -> int {
     return &give_us_a_function_pointer;
+}
+
+
+typedef Keyword_Factory = *fn() -> String;
+
+fn get_keyword() -> String {
+    return "Big bummer";
+}
+
+fn get_keyword_factory() -> Keyword_Factory {
+    return &get_keyword;
+}
+
+fn print_keyword() {
+    let factory = get_keyword_factory();
+    let keyword = factory();
+
+    print(keyword);
+    print("\n");
 }

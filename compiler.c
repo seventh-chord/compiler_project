@@ -1046,7 +1046,7 @@ typedef struct File_Pos {
     u32 line;
 } File_Pos;
 
-enum { KEYWORD_COUNT = 16 };
+enum { KEYWORD_COUNT = 17 };
 
 typedef struct Token {
     enum {
@@ -1102,6 +1102,7 @@ typedef struct Token {
 
         TOKEN_KEYWORD_FN,
         TOKEN_KEYWORD_EXTERN,
+        TOKEN_KEYWORD_TYPEDEF,
         TOKEN_KEYWORD_LET,
         TOKEN_KEYWORD_IF,
         TOKEN_KEYWORD_ELSE,
@@ -1182,6 +1183,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 
     [TOKEN_KEYWORD_FN]           = "fn",
     [TOKEN_KEYWORD_EXTERN]       = "extern",
+    [TOKEN_KEYWORD_TYPEDEF]      = "typedef",
     [TOKEN_KEYWORD_LET]          = "let",
     [TOKEN_KEYWORD_IF]           = "if",
     [TOKEN_KEYWORD_ELSE]         = "else",
@@ -1350,6 +1352,11 @@ struct Type_List {
     Type type;
     Type_List* next;
 };
+
+typedef struct Typedef {
+    u32 name;
+    Type *type;
+} Typedef;
 
 
 
@@ -1799,6 +1806,7 @@ typedef struct Context {
     Type primitive_types[TYPE_KIND_COUNT];
     Type *void_pointer_type, *string_type, *type_info_type, *char_type;
     Type **user_types; // stretchy buffer
+    Typedef *typedefs; // stretchy buffer
     Type **fn_signatures; // stretchy buffer
     Type *void_fn_signature;
     Global_Var *global_vars; // stretchy buffer
@@ -1900,6 +1908,7 @@ void init_keyword_names(Context *context) {
 
     add_keyword(TOKEN_KEYWORD_FN,          "fn");
     add_keyword(TOKEN_KEYWORD_EXTERN,      "extern");
+    add_keyword(TOKEN_KEYWORD_TYPEDEF,     "typedef");
     add_keyword(TOKEN_KEYWORD_LET,         "let");
     add_keyword(TOKEN_KEYWORD_IF,          "if");
     add_keyword(TOKEN_KEYWORD_ELSE,        "else");
@@ -2755,6 +2764,12 @@ Type *parse_user_type_name(Context *context, u32 name_index) {
         }
     }
 
+    buf_foreach (Typedef, def, context->typedefs) {
+        if (def->name == name_index)  {
+            return def->type;
+        }
+    }
+
     return null;
 }
 
@@ -3048,6 +3063,7 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
 }
 
 Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
+    File_Pos declaration_pos = t->pos;
     Token* t_start = t;
 
     assert(t->kind == TOKEN_KEYWORD_STRUCT);
@@ -3153,10 +3169,20 @@ Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
     type->flags |= TYPE_FLAG_SIZE_NOT_COMPUTED;
 
     *length = t - t_start;
-    return type;
+
+    Type *old_type = parse_user_type_name(context, type->enumeration.name);
+    if (old_type != null) {
+        u8 *name = string_table_access(context->string_table, type->structure.name);
+        print_file_pos(&declaration_pos);
+        printf("Redefinition of type '%s'\n", name);
+        return null;
+    } else {
+        return type;
+    }
 }
 
 Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
+    File_Pos declaration_pos = t->pos;
     Token *t_start = t;
 
     assert(t->kind == TOKEN_KEYWORD_ENUM);
@@ -3306,7 +3332,16 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
     arena_stack_pop(&context->stack);
 
     *length = t - t_start;
-    return type;
+
+    Type *old_type = parse_user_type_name(context, type->enumeration.name);
+    if (old_type != null) {
+        u8 *name = string_table_access(context->string_table, type->enumeration.name);
+        print_file_pos(&declaration_pos);
+        printf("Redefinition of type '%s'\n", name);
+        return null;
+    } else {
+        return type;
+    }
 }
 
 typedef struct Shunting_Yard {
@@ -3520,7 +3555,7 @@ Expr* parse_expr(Context *context, Token* t, u32* length) {
                         case TOKEN_BRACKET_CURLY_OPEN: {
                             File_Pos start_pos = t->pos;
 
-                            Type* type = parse_user_type_name(context, t->identifier_string_table_index);
+                            Type *type = parse_user_type_name(context, t->identifier_string_table_index);
                             if (type == null) {
                                 type = arena_new(&context->arena, Type);
                                 type->kind = TYPE_UNRESOLVED_NAME;
@@ -4786,10 +4821,61 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     }
 }
 
+bool parse_typedef(Context *context, Token *t, u32 *length) {
+    File_Pos declaration_pos = t->pos;
+    Token *t_start = t;
+
+    // Estimate size
+    *length = 0;
+    for (Token* u = t; !(u->kind == TOKEN_END_OF_STREAM || u->kind == TOKEN_SEMICOLON); u += 1) {
+        *length += 1;
+    }
+
+    assert(t->kind == TOKEN_KEYWORD_TYPEDEF);
+    t += 1;
+
+    if (t->kind != TOKEN_IDENTIFIER) {
+        print_file_pos(&t->pos);
+        printf("Expected new type name, but got ");
+        print_token(context->string_table, t);
+        printf("\n");
+        return false;
+    }
+    u32 name_index = t->identifier_string_table_index;
+    t += 1;
+
+    if (!expect_single_token(context, t, TOKEN_ASSIGN, "after typedef name")) return false;
+    t += 1;
+
+    u32 type_length = 0;
+    Type *type = parse_type(context, t, &type_length);
+    t += type_length;
+
+    if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after type")) return false;
+    t += 1;
+
+    *length = t - t_start;
+
+    Type *old_type = parse_user_type_name(context, name_index);
+    if (old_type != null) {
+        u8 *name = string_table_access(context->string_table, name_index);
+        print_file_pos(&declaration_pos);
+        printf("Redefinition of type '%s'\n", name);
+        return false;
+    } else {
+        Typedef def = {
+            .name = name_index,
+            .type = type,
+        };
+        buf_push(context->typedefs, def);
+        return true;
+    }
+}
+
 bool parse_extern(Context *context, u8 *source_path, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_EXTERN);
 
-    Token* start = t;
+    Token *start = t;
     File_Pos declaration_pos = t->pos;
 
     // Estimate size of block, so we still print reasonable errors on bad function declarations
@@ -4807,7 +4893,7 @@ bool parse_extern(Context *context, u8 *source_path, Token *t, u32 *length) {
         printf("\n");
         return false;
     }
-    u8* library_name = t->string.bytes;
+    u8 *library_name = t->string.bytes;
     u32 library_name_index = string_table_intern(&context->string_table, t->string.bytes, t->string.length);
 
     // Body
@@ -5492,6 +5578,12 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             t += length;
         } break;
 
+        case TOKEN_KEYWORD_TYPEDEF: {
+            u32 length = 0;
+            valid &= parse_typedef(context, t, &length);
+            t += length;
+        } break;
+
         case TOKEN_KEYWORD_LET: {
             File_Pos start_pos = t->pos;
             t += 1;
@@ -5589,25 +5681,6 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             t += length;
 
             if (type == null) {
-                valid = false;
-                break;
-            }
-
-            u32 our_name = user_type_name(type);
-
-            bool redeclaration = false;
-            buf_foreach(Type*, old_type_pointer, context->user_types) {
-                u32 old_name = user_type_name(*old_type_pointer);
-                if (old_name == our_name) {
-                    redeclaration = true;
-                    break;
-                }
-            }
-
-            if (redeclaration) {
-                u8* our_name_string = string_table_access(context->string_table, our_name);
-                print_file_pos(&start_pos);
-                printf("Duplicate definition of type '%s'\n", our_name_string);
                 valid = false;
             } else {
                 buf_push(context->user_types, type);
@@ -5713,7 +5786,7 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
             } break;
 
             case TYPE_UNRESOLVED_NAME: {
-                Type* new = parse_user_type_name(context, type->unresolved_name);
+                Type *new = parse_user_type_name(context, type->unresolved_name);
 
                 if (new == null) {
                     u8* name_string = string_table_access(context->string_table, type->unresolved_name);
@@ -6487,7 +6560,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
         case EXPR_STATIC_MEMBER_ACCESS: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                Type* parent = parse_user_type_name(info->context, expr->static_member_access.parent_name);
+                Type *parent = parse_user_type_name(info->context, expr->static_member_access.parent_name);
 
                 if (parent == null) {
                     u8* name_string = string_table_access(info->context->string_table, expr->static_member_access.parent_name);
