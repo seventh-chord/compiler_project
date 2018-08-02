@@ -7795,7 +7795,7 @@ typedef struct X64_Place {
 #define x64_place_address(...) (X64_Place) { .kind = PLACE_ADDRESS, .address = (__VA_ARGS__) }
 
 
-#define PRINT_GENERATED_INSTRUCTIONS
+//#define PRINT_GENERATED_INSTRUCTIONS
 
 void print_x64_address(X64_Address address) {
     printf("[%s", register_name(address.base, POINTER_SIZE));
@@ -7947,7 +7947,7 @@ void encode_instruction_modrm_reg_mem(
             }
         }
 
-        assert(mem.base != RBX);
+        assert(mem.base != RBP);
         sib |= REGISTER_INDICES[mem.base] & 0x07;
         if (REGISTER_INDICES[mem.base] & 0x08) {
             rex |= REX_B;
@@ -10119,7 +10119,12 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 return_reg = RAX;
             }
 
-            if (!(place.kind == PLACE_REGISTER && place.reg == return_reg)) {
+            bool move_from_return_reg =
+                !(place.kind == PLACE_REGISTER && place.reg == return_reg) &&
+                place.kind != PLACE_NOWHERE &&
+                callee_signature->has_return;
+
+            if (move_from_return_reg) {
                 register_allocate_specific(context, reg_allocator, return_reg);
             }
 
@@ -10205,7 +10210,10 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             for (u32 i = 0; i < VOLATILE_REGISTER_COUNT; i += 1) {
                 Register reg = VOLATILE_REGISTERS[i];
 
-                bool dont_flush = reg == return_reg || (place.kind == PLACE_REGISTER && place.reg == reg);
+                bool dont_flush =
+                    (callee_signature->has_return && reg == return_reg) ||
+                    (place.kind == PLACE_REGISTER && place.reg == reg);
+
                 for (u32 j = 0; j < INPUT_REGISTER_COUNT; j += 1) {
                     if (used_volatile_registers[j] == reg) {
                         dont_flush = true;
@@ -10230,9 +10238,6 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
             register_allocator_leave_frame(context, reg_allocator); // inner frame for parameters
 
-            bool move_from_return_reg = !((place.kind == PLACE_REGISTER && place.reg == return_reg) ||
-                                           place.kind == PLACE_NOWHERE ||
-                                           !callee_signature->has_return);
             if (move_from_return_reg) {
                 assert(place.kind != PLACE_NOWHERE && callee_signature->has_return);
 
