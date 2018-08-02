@@ -11425,7 +11425,7 @@ typedef struct Image_Header {
     u32 size_of_image;
     u32 size_of_headers;
 
-    u32 checksum; // Not checked for contexts
+    u32 checksum; // Not checked for executables
     u16 subsystem;
     u16 dll_flags;
     u64 stack_reserve;
@@ -11700,12 +11700,12 @@ bool parse_library(Context *context, Library_Import* import) {
 }
 
 bool write_executable(u8* path, Context *context) {
-    enum { MAX_SECTION_COUNT = 4 }; // So we can use it as an array length
+    enum { MAX_SECTION_COUNT = 3 }; // So we can use it as an array length
 
     u64 text_length = buf_length(context->seg_text);
     u64 data_length = buf_length(context->seg_data);
 
-    u32 section_count = 3;
+    u32 section_count = 2;
     if (data_length > 0) section_count += 1;
 
     u64 in_file_alignment = 0x200;
@@ -11716,27 +11716,17 @@ bool write_executable(u8* path, Context *context) {
     u64 dos_prepend_size = 200;
     u64 total_header_size = dos_prepend_size + sizeof(COFF_Header) + sizeof(Image_Header) + section_count*sizeof(Section_Header);
 
-    // TODO pdata is completly messed up. It is supposed to be pointing to some
-    // unwind info, which we deleted by accident. We have to figure out how to
-    // generate that info. We can't test that without first having some codegen
-    // though...
-    typedef struct Pdata_Entry { u32 begin_address, end_address, unwind_address; } Pdata_Entry; // Proper format for x64!!
-    u8 pdata[12]  = { 0x0, 0x10, 0x0, 0x0, 0xa5, 0x10, 0x0, 0x0, 0x10, 0x21, 0x0, 0x0 };
-    u64 pdata_length = 12;
-
     // Figure out placement and final size
     // NB sections data needs to be in the same order as section headers!
     u64 header_space = round_to_next(total_header_size, in_file_alignment);
 
     u64 text_file_start  = header_space;
-    u64 data_file_start  = text_file_start  + round_to_next(text_length,  in_file_alignment);
-    u64 pdata_file_start = data_file_start  + round_to_next(data_length,  in_file_alignment);
-    u64 idata_file_start = pdata_file_start + round_to_next(pdata_length, in_file_alignment);
+    u64 data_file_start  = text_file_start + round_to_next(text_length, in_file_alignment);
+    u64 idata_file_start = data_file_start + round_to_next(data_length, in_file_alignment);
 
     u64 text_memory_start  = round_to_next(total_header_size, in_memory_alignment);
-    u64 data_memory_start  = text_memory_start  + round_to_next(text_length,  in_memory_alignment);
-    u64 pdata_memory_start = data_memory_start  + round_to_next(data_length,  in_memory_alignment);
-    u64 idata_memory_start = pdata_memory_start + round_to_next(pdata_length, in_memory_alignment);
+    u64 data_memory_start  = text_memory_start + round_to_next(text_length, in_memory_alignment);
+    u64 idata_memory_start = data_memory_start + round_to_next(data_length, in_memory_alignment);
 
     // Build idata
     u8* idata = null;
@@ -11847,15 +11837,6 @@ bool write_executable(u8* path, Context *context) {
         data_header->pointer_to_raw_data = data_file_start;
     }
 
-    Section_Header* pdata_header = &section_headers[section_index];
-    section_index += 1;
-    mem_copy(".pdata", pdata_header->name, 6);
-    pdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
-    pdata_header->virtual_size = pdata_length;
-    pdata_header->virtual_address = pdata_memory_start;
-    pdata_header->size_of_raw_data = round_to_next(pdata_length, in_file_alignment);
-    pdata_header->pointer_to_raw_data = pdata_file_start;
-
     Section_Header* idata_header = &section_headers[section_index];
     section_index += 1;
     mem_copy(".idata", idata_header->name, 6);
@@ -11921,7 +11902,7 @@ bool write_executable(u8* path, Context *context) {
     coff.section_count = section_count;
 
     image.size_of_code = text_length;
-    image.size_of_initialized_data = data_length + idata_length + pdata_length;
+    image.size_of_initialized_data = data_length + idata_length;
     image.size_of_uninitialized_data = 0;
 
     u32 main_fn_index = find_fn(context, string_table_search(context->string_table, "main")); 
@@ -11943,8 +11924,6 @@ bool write_executable(u8* path, Context *context) {
     image.number_of_rva_and_sizes = 16;
     image.data_directories[1].virtual_address = idata_memory_start + idata_import_offset;
     image.data_directories[1].size = (buf_length(context->imports) + 1)*sizeof(Import_Entry);
-    image.data_directories[3].virtual_address = pdata_memory_start;
-    image.data_directories[3].size = pdata_length;
 
     #if 0
     if (write_debug_info) {
@@ -11990,7 +11969,6 @@ bool write_executable(u8* path, Context *context) {
     // Write data
     mem_copy(context->seg_text, output_file + text_file_start, text_length);
     mem_copy(context->seg_data, output_file + data_file_start, data_length);
-    mem_copy(pdata, output_file + pdata_file_start, pdata_length);
     mem_copy(idata, output_file + idata_file_start, idata_length);
 
     IO_Result result = write_entire_file(path, output_file, file_image_size);
