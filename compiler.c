@@ -1224,6 +1224,8 @@ typedef enum Builtin_Fn {
     BUILTIN_ENUM_MEMBER_NAME,
     BUILTIN_ENUM_LENGTH,
     BUILTIN_CAST,
+    BUILTIN_SIZE_OF,
+    BUILTIN_ALIGN_OF,
 
     BUILTIN_COUNT,
 } Builtin_Fn;
@@ -1520,11 +1522,11 @@ typedef enum Expr_Kind {
     EXPR_MEMBER_ACCESS, // a.b
     EXPR_STATIC_MEMBER_ACCESS, // a::b
 
+    EXPR_ADDRESS_OF_FUNCTION,
     EXPR_TYPE_INFO_OF_TYPE,
     EXPR_TYPE_INFO_OF_VALUE,
-    EXPR_ENUM_LENGTH,
     EXPR_ENUM_MEMBER_NAME,
-    EXPR_ADDRESS_OF_FUNCTION,
+    EXPR_QUERY_TYPE_INFO, // enum_length, size_of, align_of
 } Expr_Kind;
 
 struct Expr { // 'typedef'd earlier!
@@ -1550,7 +1552,7 @@ struct Expr { // 'typedef'd earlier!
         } literal;
 
         struct {
-            u8* bytes; // null-terminated
+            u8 *bytes; // null-terminated
             u64 length; // not including trailing \0
         } string;
 
@@ -1561,13 +1563,12 @@ struct Expr { // 'typedef'd earlier!
 
         struct {
             Binary_Op op;
-            Expr* left;
-            Expr* right;
+            Expr *left, *right;
         } binary;
 
         struct {
             Unary_Op op;
-            Expr* inner;
+            Expr *inner;
         } unary;
 
         struct {
@@ -1579,30 +1580,38 @@ struct Expr { // 'typedef'd earlier!
                 u32 fn_index;        // else
             };
 
-            Expr** params; // []*Expr
+            Expr **params; // []*Expr
             u32 param_count;
         } call;
 
-        Type* type_info_of_type;
-        Expr* type_info_of_value;
-        Expr* cast_from;
-        Type* enum_length_of;
-        Expr* enum_member;
+        Type *type_info_of_type;
+        Expr *type_info_of_value;
+        Expr *cast_from;
+        Expr *enum_member;
         u32 address_of_fn_index;
 
         struct {
-            Expr* array;
-            Expr* index;
+            enum {
+                QUERY_TYPE_INFO_ENUM_LENGTH,
+                QUERY_TYPE_INFO_SIZE,
+                QUERY_TYPE_INFO_ALIGN,
+            } query;
+            Type *type;
+        } query_type_info;
+
+        struct {
+            Expr *array;
+            Expr *index;
         } subscript;
 
         struct {
-            Expr* parent;
+            Expr *parent;
             union { u32 member_name; u32 member_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
         } member_access;
 
         struct {
             // Both unions discriminated by EXPR_FLAG_UNRESOLVED
-            union { u32 parent_name; Type* parent_type; };
+            union { u32 parent_name; Type *parent_type; };
             union { u32 member_name; u32 member_index; };
         } static_member_access;
     };
@@ -1920,6 +1929,8 @@ void init_builtin_fn_names(Context *context) {
     context->builtin_names[BUILTIN_ENUM_MEMBER_NAME]   = string_table_intern_cstr(&context->string_table, "enum_member_name");
     context->builtin_names[BUILTIN_ENUM_LENGTH]        = string_table_intern_cstr(&context->string_table, "enum_length");
     context->builtin_names[BUILTIN_CAST]               = string_table_intern_cstr(&context->string_table, "cast");
+    context->builtin_names[BUILTIN_SIZE_OF]            = string_table_intern_cstr(&context->string_table, "size_of");
+    context->builtin_names[BUILTIN_ALIGN_OF]           = string_table_intern_cstr(&context->string_table, "align_of");
 }
 
 void init_keyword_names(Context *context) {
@@ -2537,9 +2548,17 @@ void print_expr(Context *context, Fn* fn, Expr* expr) {
             printf(")");
         } break;
 
-        case EXPR_ENUM_LENGTH: {
-            printf("enum_length(");
-            print_type(context, expr->enum_length_of);
+        case EXPR_QUERY_TYPE_INFO: {
+            u8 *name;
+            switch (expr->query_type_info.query) {
+                case QUERY_TYPE_INFO_ENUM_LENGTH:   name = "enum_length"; break;
+                case QUERY_TYPE_INFO_SIZE:          name = "size_of"; break;
+                case QUERY_TYPE_INFO_ALIGN:         name = "align_of"; break;
+                default: assert(false);
+            }
+
+            printf("%s(", name);
+            print_type(context, expr->query_type_info.type);
             printf(")");
         } break;
 
@@ -4117,7 +4136,9 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
     assert(t->kind == TOKEN_BRACKET_ROUND_OPEN);
     t += 1;
 
-    switch (parse_builtin_fn_name(context, name_index)) {
+
+    Builtin_Fn builtin_name = parse_builtin_fn_name(context, name_index);
+    switch (builtin_name) {
         case BUILTIN_TYPE_INFO_OF_TYPE: {
             u32 type_length = 0;
             Type* type = parse_type(context, t, &type_length);
@@ -4170,7 +4191,18 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
             return expr;
         } break;
 
-        case BUILTIN_ENUM_LENGTH: {
+        case BUILTIN_SIZE_OF:
+        case BUILTIN_ALIGN_OF:
+        case BUILTIN_ENUM_LENGTH:
+        {
+            int query;
+            switch (builtin_name) {
+                case BUILTIN_SIZE_OF:       query = QUERY_TYPE_INFO_SIZE; break;
+                case BUILTIN_ALIGN_OF:      query = QUERY_TYPE_INFO_ALIGN; break;
+                case BUILTIN_ENUM_LENGTH:   query = QUERY_TYPE_INFO_ENUM_LENGTH; break;
+                default: assert(false);
+            }
+
             u32 type_length = 0;
             Type* type = parse_type(context, t, &type_length);
             t += type_length;
@@ -4188,8 +4220,9 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
 
             Expr* expr = arena_new(&context->arena, Expr);
             expr->pos = start_pos;
-            expr->kind = EXPR_ENUM_LENGTH;
-            expr->enum_length_of = type;
+            expr->kind = EXPR_QUERY_TYPE_INFO;
+            expr->query_type_info.type = type;
+            expr->query_type_info.query = query;
             expr->type = &context->primitive_types[TYPE_DEFAULT_INT];
 
             *length = t - t_start;
@@ -6643,13 +6676,16 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             if (typecheck_expr(info, expr->type_info_of_value, void_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
         } break;
 
-        case EXPR_ENUM_LENGTH: {
-            if (!resolve_type(info->context, &expr->enum_length_of, &expr->pos)) return TYPECHECK_EXPR_BAD;
+        case EXPR_QUERY_TYPE_INFO: {
+            if (!resolve_type(info->context, &expr->query_type_info.type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
-            if (expr->enum_length_of->kind != TYPE_ENUM) {
+            if (
+                expr->query_type_info.query == QUERY_TYPE_INFO_ENUM_LENGTH &&
+                expr->query_type_info.type->kind != TYPE_ENUM
+            ) {
                 print_file_pos(&expr->pos);
                 printf("Can't call 'enum_length' on ");
-                print_type(info->context, expr->enum_length_of);
+                print_type(info->context, expr->query_type_info.type);
                 printf(", it's not an enum");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -7202,20 +7238,32 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             return EVAL_DO_AT_RUNTIME;
         } break;
 
-        case EXPR_ENUM_LENGTH: {
-            if (expr->enum_length_of->kind == TYPE_UNRESOLVED_NAME) {
+        case EXPR_QUERY_TYPE_INFO: {
+            Type *type = expr->query_type_info.type;
+
+            if (expr->query_type_info.type->kind == TYPE_UNRESOLVED_NAME) {
                 return EVAL_DO_AT_RUNTIME;
             } else {
-                assert(expr->enum_length_of->kind == TYPE_ENUM);
+                i64 result;
 
-                u64 length = 0;
-                for (u32 m = 0; m < expr->enum_length_of->enumeration.member_count; m += 1) {
-                    u64 value = expr->enum_length_of->enumeration.members[m].value;
-                    length = max(value + 1, length);
+                switch (expr->query_type_info.query) {
+                    case QUERY_TYPE_INFO_ENUM_LENGTH: {
+                        assert(type->kind == TYPE_ENUM);
+                        result = 0;
+                        for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
+                            u64 value = type->enumeration.members[m].value;
+                            result = max(value + 1, result);
+                        }
+                    } break;
+
+                    case QUERY_TYPE_INFO_SIZE:  result = type_size_of(type);  break;
+                    case QUERY_TYPE_INFO_ALIGN: result = type_align_of(type); break;
+
+                    default: assert(false);
                 }
 
                 assert(expr->type->kind == TYPE_DEFAULT_INT);
-                mem_copy((u8*) &length, result_into, type_size);
+                mem_copy((u8*) &result, result_into, type_size);
 
                 return EVAL_OK;
             }
@@ -9512,7 +9560,7 @@ u32 machinecode_expr_reserves(Expr *expr) {
         case EXPR_STATIC_MEMBER_ACCESS:
         case EXPR_TYPE_INFO_OF_TYPE:
         case EXPR_TYPE_INFO_OF_VALUE:
-        case EXPR_ENUM_LENGTH:
+        case EXPR_QUERY_TYPE_INFO:
         case EXPR_ADDRESS_OF_FUNCTION:
         {} break;
 
@@ -10593,17 +10641,29 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             }
         } break;
 
-        case EXPR_ENUM_LENGTH: {
+        case EXPR_QUERY_TYPE_INFO: {
             if (place.kind == PLACE_NOWHERE) return;
-            assert(expr->enum_length_of->kind == TYPE_ENUM);
 
-            u64 length = 0;
-            for (u32 m = 0; m < expr->enum_length_of->enumeration.member_count; m += 1) {
-                u64 value = expr->enum_length_of->enumeration.members[m].value;
-                length = max(value + 1, length);
+            Type *type = expr->query_type_info.type;
+
+            i64 result;
+            switch (expr->query_type_info.query) {
+                case QUERY_TYPE_INFO_ENUM_LENGTH: {
+                    assert(type->kind == TYPE_ENUM);
+                    result = 0;
+                    for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
+                        u64 value = type->enumeration.members[m].value;
+                        result = max(value + 1, result);
+                    }
+                } break;
+
+                case QUERY_TYPE_INFO_SIZE:  result = type_size_of(type);  break;
+                case QUERY_TYPE_INFO_ALIGN: result = type_align_of(type); break;
+
+                default: assert(false);
             }
 
-            machinecode_immediate_to_place(context, reg_allocator, place, length, primitive_size_of(TYPE_DEFAULT_INT));
+            machinecode_immediate_to_place(context, reg_allocator, place, result, primitive_size_of(TYPE_DEFAULT_INT));
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {

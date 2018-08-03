@@ -8,11 +8,11 @@ Other
     make test failures easier to spot
 
 Language features
+    namespaces, for includes, extern-blocks, etc
     includes - either textual or preferably with some nice system!
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
     real constants
     complete type_info_of_{value, type}
-    size_of, align_of
     slices
     a 'any' type (pointer + type info)
     uninitialized (zeroed) global variables in .bss

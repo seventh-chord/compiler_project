@@ -306,6 +306,9 @@ fn farwell() {
         castles_in_the_distance:  2,
     };
 
+    assert(size_of(The_Pages_Of_History) == 24, "size_of is broken");
+    assert(align_of(The_Pages_Of_History) == 8, "align_of is broken");
+
     turn(pages);
     print(", ");
     print_u64(pages.path_of_least_resistance, 10);
