@@ -3010,6 +3010,11 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
             } else {
                 if (!expect_single_token(context, t, TOKEN_COMMA, "after member declaration")) return null;
                 t += 1;
+                if (t->kind == TOKEN_BRACKET_ROUND_CLOSE) {
+                    // Allow trailing commas
+                    t += 1;
+                    break;
+                }
                 continue;
             }
         }
