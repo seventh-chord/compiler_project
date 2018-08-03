@@ -179,7 +179,14 @@ int _fltused; // To make floating point work without the c runtime
         u16 processor_revision;
     } System_Info;
 
-    WINAPI_PRE void WINAPI_POST GetSystemInfo(System_Info* info);
+    WINAPI_PRE void WINAPI_POST GetSystemInfo(System_Info *info);
+
+    typedef struct File_Time {
+        u32 lo;
+        u32 hi;
+    } File_Time;
+
+    WINAPI_PRE void WINAPI_POST GetSystemTimeAsFileTime(File_Time *time);
 
     WINAPI_PRE u8* WINAPI_POST GetCommandLineA(void);
 #endif
@@ -264,12 +271,20 @@ i64 perf_time() {
     return result;
 }
 
+u64 unix_time() {
+    // This is a mess, but it's not my fault
+   File_Time t;
+   GetSystemTimeAsFileTime(&t);
+   u64 ticks = t.lo | (((u64) t.hi) << 32);
+   return (ticks - 0x019db1ded53e8000) / 10000000;
+}
+
 // Memory
 
-void* alloc(u64 size) {
+void *alloc(u64 size) {
     return HeapAlloc(process_heap, 0, size);
 }
-void* realloc(void *mem, u64 size) {
+void *realloc(void *mem, u64 size) {
     return HeapReAlloc(process_heap, 0, mem, size);
 }
 bool free(void *mem) {
@@ -524,7 +539,7 @@ u8 *str_make_space(u8 **buf, u64 at_index, u64 length) {
 // We also have functions to use arenas as stack allocators.
 
 enum {
-    ARENA_PAGE_SIZE = 8 * 1024 * 1024,
+    ARENA_PAGE_SIZE = 8 * 1024 * 1024, // 8 megabytes
     ARENA_ALIGN = 16,
 };
 
@@ -974,7 +989,7 @@ IO_Result get_temp_path(u8* path_into, u32* length) {
     }
 }
 
-IO_Result read_entire_file(u8* file_name, u8** contents, u32* length) {
+IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length) {
     Handle file = CreateFileA(file_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
     if (file == INVALID_HANDLE_VALUE) {
         u32 error_code = GetLastError();
@@ -1014,7 +1029,7 @@ IO_Result read_entire_file(u8* file_name, u8** contents, u32* length) {
     return IO_OK;
 }
 
-IO_Result write_entire_file(u8* file_name, u8* contents, u32 length) {
+IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length) {
     Handle file = CreateFileA(file_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
     if (file == INVALID_HANDLE_VALUE) {
         u32 error_code = GetLastError();
@@ -8395,7 +8410,7 @@ void instruction_lea_call(Context *context, u32 fn_index, Register reg) {
 
     Fn *callee = &context->fns[fn_index];
     if (callee->kind == FUNC_KIND_IMPORTED) {
-        // 'mov reg, [rip + ...]'               (address is in .idata, which points to function elsewhere)
+        // 'mov reg, [rip + ...]'               (address is in .rdata, which points to function elsewhere)
 
         u8 rex = REX_BASE | REX_W;
         u8 modrm = 0x05;
@@ -11699,7 +11714,61 @@ bool parse_library(Context *context, Library_Import* import) {
     return false;
 }
 
-bool write_executable(u8* path, Context *context) {
+bool write_pdb(u8 *path, Context *context) {
+    /*
+    u32 block_size = 4096;
+    u32 allocated_blocks = 1000;
+    u8 *data = alloc(block_size * allocated_blocks);
+
+    struct {
+        u8 magic[32];
+        u32 block_size;
+        u32 fpm_block; // free page map
+        u32 block_count;
+        u32 directory_bytes_count;
+        u32 unkown;
+        u32 block_map_address;
+    } *superblock = data[0];
+
+    u8 magic_a[24] = "Microsoft C/C++ MSF 7.00";
+    u8 magic_b[8]  = { 0x0d, 0x0a, 0x1a, 0x44, 0x53, 0x00, 0x00, 0x00 };
+    mem_copy(magic_a, superblock->magic, sizeof(magic_a));
+    mem_copy(magic_b, superblock->magic + sizeof(magic_a), sizeof(magic_b));
+
+    superblock->block_size = block_size;
+    superblock->block_count = 4; // superblock, fpm, stream directory address, stream directory
+    superblock->fpm_block = 1; // I don't think we need this if we don't write anything...
+    superblock->block_map_address = 2; // Block containing indices of other blocks which contain directory bytes
+
+    u32 *block_map_address_data = (u32*) (&data[superblock->block_map_address * block_size]);
+    *block_map_address_data = 3;
+
+    u32 *stream_directory_data = (u32*) (&data[*block_map_address_data * block_size]);
+    superblock->directory_bytes_count = 0;
+    assert(superblock->directory_bytes_count < block_size); // We just allocated one block for the stream directory
+    //struct {
+    //  u32 streams;
+    //  u32 stream_sizes[streams];
+    //  u32 stream_blocks[streams][];
+    //};
+    *stream_directory_data += 1;
+    *stream_directory_data[1] = 0;
+    *stream_directory_data[2] = *block_map_address_data;
+
+    IO_Result result = write_entire_file(path, data, data_size);
+    free(data);
+    if (result != IO_OK) {
+        printf("Couldn't write \"%s\": %s\n", path, io_result_message(result));
+        return false;
+    } else {
+        return true;
+    }
+    */
+    unimplemented();
+    return false;
+}
+
+bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     enum { MAX_SECTION_COUNT = 3 }; // So we can use it as an array length
 
     u64 text_length = buf_length(context->seg_text);
@@ -11722,14 +11791,62 @@ bool write_executable(u8* path, Context *context) {
 
     u64 text_file_start  = header_space;
     u64 data_file_start  = text_file_start + round_to_next(text_length, in_file_alignment);
-    u64 idata_file_start = data_file_start + round_to_next(data_length, in_file_alignment);
+    u64 rdata_file_start = data_file_start + round_to_next(data_length, in_file_alignment);
 
     u64 text_memory_start  = round_to_next(total_header_size, in_memory_alignment);
     u64 data_memory_start  = text_memory_start + round_to_next(text_length, in_memory_alignment);
-    u64 idata_memory_start = data_memory_start + round_to_next(data_length, in_memory_alignment);
+    u64 rdata_memory_start = data_memory_start + round_to_next(data_length, in_memory_alignment);
 
-    // Build idata
-    u8* idata = null;
+    u8* rdata = null; // We need to generate .rdata
+
+    // Write debug info into .rdata
+    u32 debug_size = 0;
+    u32 rdata_debug_offset = 0;
+
+    if (debug_path != null) {
+        u8 *pdb_path = debug_path;
+        u32 pdb_path_length = str_length(pdb_path);
+
+        if (!write_pdb(pdb_path, context)) {
+            return false;
+        }
+
+        // Points to a .pdb file
+        u32 rsds_pointer_offset = buf_length(rdata);
+        struct {
+            u8 magic[4];
+            u8 guid[16]; // Unique per machine, should match .pdb
+            u32 age;
+        } rsds_pointer = { { 'R', 'S', 'D', 'S' } };
+        //rsds_pointer.guid = ; // TODO
+        rsds_pointer.age = 1; // By always setting this to 1, we only check the guid
+        str_push_str(&rdata, (u8*) &rsds_pointer, sizeof(rsds_pointer));
+        str_push_str(&rdata, pdb_path, pdb_path_length);
+        buf_push(rdata, 0);
+
+        struct {
+            u32 characteristics;
+            u32 unix_timestamp;
+            u16 major_version;
+            u16 minor_version;
+            u32 type;
+            u32 size_of_data;
+            u32 data_memory_pos;
+            u32 data_file_pos;
+        } debug_directory = {0};
+        debug_directory.unix_timestamp = unix_time();
+        debug_directory.type = 0x02;
+        debug_directory.size_of_data = sizeof(rsds_pointer) + pdb_path_length + 1;
+        debug_directory.data_memory_pos = rdata_memory_start + rsds_pointer_offset;
+        debug_directory.data_file_pos = rdata_file_start + rsds_pointer_offset;
+        str_push_str(&rdata, (u8*) &debug_directory, sizeof(debug_directory));
+
+        // These go in 'image_header.data_directories[6]'
+        rdata_debug_offset = buf_length(rdata);
+        debug_size = sizeof(debug_directory);
+    }
+
+    // Write import data into .rdata
     typedef struct Import_Entry {
         u32 lookup_table_address;
         u32 timestamp;
@@ -11738,8 +11855,8 @@ bool write_executable(u8* path, Context *context) {
         u32 address_table_address;
     } Import_Entry;
 
-    u64 idata_import_offset = buf_length(idata);
-    str_push_zeroes(&idata, (buf_length(context->imports) + 1) * sizeof(Import_Entry));
+    u64 rdata_import_offset = buf_length(rdata);
+    str_push_zeroes(&rdata, (buf_length(context->imports) + 1) * sizeof(Import_Entry));
     for (u64 i = 0; i < buf_length(context->imports); i += 1) {
         Library_Import* import = &context->imports[i];
         if (!parse_library(context, import)) {
@@ -11749,17 +11866,17 @@ bool write_executable(u8* path, Context *context) {
         assert(import->dll_name != null);
 
         u64 table_size = sizeof(u64) * (1 + buf_length(import->function_names));
-        u64 address_table_start = buf_length(idata);
+        u64 address_table_start = buf_length(rdata);
         u64 lookup_table_start = address_table_start + table_size;
 
-        str_push_zeroes(&idata, 2*table_size); // Make space for the address & lookup table
+        str_push_zeroes(&rdata, 2*table_size); // Make space for the address & lookup table
 
-        u64 name_table_start = buf_length(idata);
-        str_push_cstr(&idata, import->dll_name);
-        buf_push(idata, 0);
+        u64 name_table_start = buf_length(rdata);
+        str_push_cstr(&rdata, import->dll_name);
+        buf_push(rdata, 0);
 
         for (u64 j = 0; j < buf_length(import->function_names); j += 1) {
-            u64 function_name_address = idata_memory_start + buf_length(idata);
+            u64 function_name_address = rdata_memory_start + buf_length(rdata);
             if ((function_name_address & 0x7fffffff) != function_name_address) {
                 panic("Import data will be invalid, because it has functions at to high rvas: %x!", function_name_address);
             }
@@ -11767,21 +11884,21 @@ bool write_executable(u8* path, Context *context) {
             u8* name = string_table_access(context->string_table, import->function_names[j]);
             u16 hint = import->function_hints[j];
 
-            buf_push(idata, (u8) (hint & 0xff));
-            buf_push(idata, (u8) ((hint >> 8) & 0xff));
-            str_push_cstr(&idata, name);
-            buf_push(idata, 0);
-            if (buf_length(idata) & 1) { buf_push(idata, 0); } // align
+            buf_push(rdata, (u8) (hint & 0xff));
+            buf_push(rdata, (u8) ((hint >> 8) & 0xff));
+            str_push_cstr(&rdata, name);
+            buf_push(rdata, 0);
+            if (buf_length(rdata) & 1) { buf_push(rdata, 0); } // align
 
-            *((u64*) (idata + address_table_start + sizeof(u64)*j)) = function_name_address;
-            *((u64*) (idata + lookup_table_start  + sizeof(u64)*j)) = function_name_address;
+            *((u64*) (rdata + address_table_start + sizeof(u64)*j)) = function_name_address;
+            *((u64*) (rdata + lookup_table_start  + sizeof(u64)*j)) = function_name_address;
         }
 
         // Write into the space we prefilled before the loop
-        Import_Entry* entry = (void*) (idata + idata_import_offset + i*sizeof(Import_Entry));
-        entry->address_table_address = idata_memory_start + address_table_start;
-        entry->lookup_table_address  = idata_memory_start + lookup_table_start;
-        entry->name_address          = idata_memory_start + name_table_start;
+        Import_Entry* entry = (void*) (rdata + rdata_import_offset + i*sizeof(Import_Entry));
+        entry->address_table_address = rdata_memory_start + address_table_start;
+        entry->lookup_table_address  = rdata_memory_start + lookup_table_start;
+        entry->name_address          = rdata_memory_start + name_table_start;
 
         // Apply fixups for this library
         buf_foreach (Rip_Fixup, fixup, context->fixups) {
@@ -11789,18 +11906,18 @@ bool write_executable(u8* path, Context *context) {
             assert(fixup->rip_offset + 4 <= fixup->next_instruction);
 
             u32 function = fixup->import_index.function;
-            u64 function_address = idata_memory_start + address_table_start + sizeof(u64)*function;
+            u64 function_address = rdata_memory_start + address_table_start + sizeof(u64)*function;
 
             i32* text_value = (i32*) (context->seg_text + fixup->rip_offset);
             assert(*text_value == 0xdeadbeef);
             *text_value = function_address - (text_memory_start + fixup->next_instruction);
         }
     }
-    u64 idata_length = buf_length(idata);
+    u64 rdata_length = buf_length(rdata);
 
-    // Knowing idata size, we can compute final size
-    u64 file_image_size   = idata_file_start   + round_to_next(idata_length, in_file_alignment);
-    u64 memory_image_size = idata_memory_start + round_to_next(idata_length, in_memory_alignment);
+    // Knowing rdata size, we can compute final size
+    u64 file_image_size   = rdata_file_start   + round_to_next(rdata_length, in_file_alignment);
+    u64 memory_image_size = rdata_memory_start + round_to_next(rdata_length, in_memory_alignment);
 
     // Apply data fixups
     buf_foreach (Rip_Fixup, fixup, context->fixups) {
@@ -11837,14 +11954,14 @@ bool write_executable(u8* path, Context *context) {
         data_header->pointer_to_raw_data = data_file_start;
     }
 
-    Section_Header* idata_header = &section_headers[section_index];
+    Section_Header* rdata_header = &section_headers[section_index];
     section_index += 1;
-    mem_copy(".idata", idata_header->name, 6);
-    idata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
-    idata_header->virtual_size = idata_length;
-    idata_header->virtual_address = idata_memory_start;
-    idata_header->size_of_raw_data = round_to_next(idata_length, in_file_alignment);
-    idata_header->pointer_to_raw_data = idata_file_start;
+    mem_copy(".rdata", rdata_header->name, 6);
+    rdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
+    rdata_header->virtual_size = rdata_length;
+    rdata_header->virtual_address = rdata_memory_start;
+    rdata_header->size_of_raw_data = round_to_next(rdata_length, in_file_alignment);
+    rdata_header->pointer_to_raw_data = rdata_file_start;
 
     // Allocate space and fill in the image
     u8* output_file = alloc(file_image_size);
@@ -11856,15 +11973,15 @@ bool write_executable(u8* path, Context *context) {
         0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
         0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
         0x0, 0x0, 0x0, 0x0, // <- dos_prepend_size goes in these four bytes
-        0xe, 0x1f, 0xba, 0xe, 0x0, 0xb4, 0x9, 0xcd, 0x21, 0xb8, 0x1, 0x4c, 0xcd, 0x21, 0x54, 0x68,
+        0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd, 0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
         0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72, 0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e,
         0x6f, 0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e, 0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f,
-        0x53, 0x20, 0x6d, 0x6f, 0x64, 0x65, 0x2e, 0xd, 0xd, 0xa, 0x24, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-        0x0, 0x11, 0xba, 0x1, 0xc7, 0x55, 0xdb, 0x6f, 0x94, 0x55, 0xdb, 0x6f, 0x94, 0x55, 0xdb,
+        0x53, 0x20, 0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x0d, 0x0d, 0x0a, 0x24, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+        0x00, 0x11, 0xba, 0x01, 0xc7, 0x55, 0xdb, 0x6f, 0x94, 0x55, 0xdb, 0x6f, 0x94, 0x55, 0xdb,
         0x6f, 0x94, 0x26, 0xb9, 0x6e, 0x95, 0x56, 0xdb, 0x6f, 0x94, 0x55, 0xdb, 0x6e, 0x94, 0x56,
         0xdb, 0x6f, 0x94, 0xb2, 0xbf, 0x6b, 0x95, 0x54, 0xdb, 0x6f, 0x94, 0xb2, 0xbf, 0x6d, 0x95,
         0x54, 0xdb, 0x6f, 0x94, 0x52, 0x69, 0x63, 0x68, 0x55, 0xdb, 0x6f, 0x94, 0x0, 0x0, 0x0, 0x0,
-        0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
     mem_copy(dos_prepend, output_file, dos_prepend_size);
     *((u32*) (output_file + 60)) = dos_prepend_size;
@@ -11902,7 +12019,7 @@ bool write_executable(u8* path, Context *context) {
     coff.section_count = section_count;
 
     image.size_of_code = text_length;
-    image.size_of_initialized_data = data_length + idata_length;
+    image.size_of_initialized_data = data_length + rdata_length;
     image.size_of_uninitialized_data = 0;
 
     u32 main_fn_index = find_fn(context, string_table_search(context->string_table, "main")); 
@@ -11922,38 +12039,10 @@ bool write_executable(u8* path, Context *context) {
     image.heap_commit   = 0x100000;
 
     image.number_of_rva_and_sizes = 16;
-    image.data_directories[1].virtual_address = idata_memory_start + idata_import_offset;
+    image.data_directories[1].virtual_address = rdata_memory_start + rdata_import_offset;
     image.data_directories[1].size = (buf_length(context->imports) + 1)*sizeof(Import_Entry);
-
-    #if 0
-    if (write_debug_info) {
-        /*
-        In test project
-        debug_size = 38
-        debug_offset = 984B0
-        
-        There, we find the following raw data
-        characteristics     00 00 00 00
-        timestamp           7E 56 1E 5B         (which is a valid unix timestamp, for about now, in little endian)
-        major version       00 00
-        minor version       00 00
-        type                02 00 00 00         (visual c++ debug information)
-        size of data        34 00 00 00         (not included in the debug directory itself) - What does this mean???
-        rva of debug data   EC 8F 09 00
-        file pointer data   EC CF 06 00
-        more data           00 00 00 00 7E 56 1E 5B 00 00 (looks like the start of another debug directory, not sure if we should look at it)
-
-        This points to the following raw data, which appears to contain a reference to the .pdb file
-        "RSDS"                              52 53 44 53
-        Some UUID                           99 B3 A7 A8 D4 BB C4 41 97 67 92 E3 93 6C 08 A7
-        ????                                01 00 00 00
-        "W:\asm2\debug_test\main.pdb\0"     57 3A 5C 61 73 6D 32 5C 64 65 62 75 67 5F 74 65 73 74 5C 6D 61 69 6E 2E 70 64 62 00
-        */
-
-        image.data_directories[6].virtual_address = rdata_memory_start + rdata_debug_offset;
-        image.data_directories[6].size = debug_size;
-    }
-    #endif
+    image.data_directories[6].virtual_address = rdata_memory_start + rdata_debug_offset;
+    image.data_directories[6].size = debug_size;
 
     // Write headers
     u64 header_offset = dos_prepend_size;
@@ -11969,7 +12058,7 @@ bool write_executable(u8* path, Context *context) {
     // Write data
     mem_copy(context->seg_text, output_file + text_file_start, text_length);
     mem_copy(context->seg_data, output_file + data_file_start, data_length);
-    mem_copy(idata, output_file + idata_file_start, idata_length);
+    mem_copy(rdata, output_file + rdata_file_start, rdata_length);
 
     IO_Result result = write_entire_file(path, output_file, file_image_size);
     if (result != IO_OK) {
@@ -11977,13 +12066,12 @@ bool write_executable(u8* path, Context *context) {
         return false;
     }
 
-    buf_free(idata);
+    buf_free(rdata);
 
     return true;
 }
 
-
-bool run_executable(u8* exe_path) {
+bool run_executable(u8 *exe_path) {
     Startup_Info startup_info = {0};
     startup_info.size = sizeof(Startup_Info);
     Process_Info process_info = {0};
@@ -12019,10 +12107,21 @@ u8 *make_null_terminated(Arena *arena, u8 *str, u64 length) {
     return result;
 }
 
+u8 *str_join(Arena *arena, u8 *left, u8 *right) {
+    u64 left_length = str_length(left);
+    u64 right_length = str_length(right);
+    u8 *result = arena_alloc(arena, left_length + right_length + 1);
+    mem_copy(left, result, left_length);
+    mem_copy(right, result + left_length, left_length);
+    result[left_length + right_length] = 0;
+    return result;
+}
+
 void print_usage() {
     printf("Usage:  sea <source> <executable> [flags]\n");
     printf("Flags:\n");
     printf("    -r    Run generated executable\n");
+    printf("    -d    Generate debug info\n");
 }
 
 void main() {
@@ -12052,6 +12151,7 @@ void main() {
     }
 
     bool run_after_compile = false;
+    u8 *debug_name = null;
 
     while (true) {
         u8* flag = command_line;
@@ -12068,6 +12168,10 @@ void main() {
                     run_after_compile = true;
                 } break;
 
+                case 'd': {
+                    debug_name = str_join(&arena, exe_name, ".pdb");
+                } break;
+
                 default: {
                     found_match = false;
                 } break;
@@ -12082,6 +12186,9 @@ void main() {
     }
 
     printf("Compiling %s to %s\n", source_name, exe_name);
+    if (debug_name != null) {
+        printf("Writing debug info to %s\n", debug_name);
+    }
 
     i64 start = perf_time();
 
@@ -12090,7 +12197,7 @@ void main() {
     if (!build_ast(&context, source_name)) return;
     if (!typecheck(&context)) return;
     build_machinecode(&context);
-    if (!write_executable(exe_name, &context)) return;
+    if (!write_executable(exe_name, debug_name, &context)) return;
 
     i64 end = perf_time();
     i64 time_in_ms = (end - start)*1000 / perf_frequency;
