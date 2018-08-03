@@ -189,6 +189,7 @@ int _fltused; // To make floating point work without the c runtime
     WINAPI_PRE void WINAPI_POST GetSystemTimeAsFileTime(File_Time *time);
 
     WINAPI_PRE u8* WINAPI_POST GetCommandLineA(void);
+    WINAPI_PRE u32 WINAPI_POST GetEnvironmentVariableA(u8 *name, u8 *buffer, u32 size);
 #endif
 
 Handle stdout;
@@ -729,6 +730,39 @@ u8* string_table_access_and_get_length(u8* table, u32 index, u32* length) {
 }
 
 
+// Other utilities
+
+u64 eat_word(u8 **str) {
+    u64 length = 0;
+    while (**str != ' ' && **str != 0) {
+        length += 1;
+        *str += 1;
+    }
+    while (**str == ' ' && **str != 0) {
+        *str += 1;
+    }
+    return length;
+}
+
+
+u8 *make_null_terminated(Arena *arena, u8 *str, u64 length) {
+    u8 *result = arena_alloc(arena, length + 1);
+    result[length] = 0;
+    mem_copy(str, result, length);
+    return result;
+}
+
+u8 *str_join(Arena *arena, u8 *left, u8 *right) {
+    u64 left_length = str_length(left);
+    u64 right_length = str_length(right);
+    u8 *result = arena_alloc(arena, left_length + right_length + 1);
+    mem_copy(left, result, left_length);
+    mem_copy(right, result + left_length, left_length);
+    result[left_length + right_length] = 0;
+    return result;
+}
+
+
 // Printing
 
 void print(u8* buffer, u32 buffer_length) {
@@ -945,8 +979,12 @@ u8 *path_join(Arena *arena, u8 *a, u8 *b) {
 
     u64 b_start = a_length;
     if (a[a_length - 1] != '/' && a[a_length - 1] != '\\') {
-        new_path[b_start] = '/';
+        new_path[b_start] = '\\';
         b_start += 1;
+    }
+    if (b[0] == '/' || b[0] == '\\') {
+        b += 1;
+        b_length -= 1;
     }
 
     mem_copy(a, new_path, a_length);
@@ -1844,6 +1882,9 @@ typedef struct Context {
     Type *void_fn_signature;
     Global_Var *global_vars; // stretchy buffer
     Var *tmp_vars; // stretchy buffer, only for temporary use, we copy to arena buffers & clear
+
+    u8 **lib_paths;
+    u32 lib_path_count;
 
     // Low level representation
     u8 *seg_text;
@@ -11646,30 +11687,99 @@ bool read_archive_member_header(
     return true;
 }
 
-bool parse_library(Context *context, Library_Import* import) {
-    u8* raw_lib_name = string_table_access(context->string_table, import->lib_name);
-    u8* source_path = import->importing_source_file;
-    u8* source_folder = path_get_folder(&context->arena, source_path);
-    u8* path = path_join(&context->arena, source_folder, raw_lib_name);
+void parse_lib_paths_from_env_variable(Context *context) {
+    assert(context->lib_paths == null);
+    assert(context->lib_path_count == 0);
 
-    u8* file;
+    arena_stack_push(&context->stack);
+
+    u32 lib_string_length = 1024;
+    u8 *lib_string;
+    while (true) {
+        lib_string = arena_alloc(&context->stack, lib_string_length);
+        u32 actual_length = GetEnvironmentVariableA("LIB", lib_string, lib_string_length);
+        if (actual_length == 0) {
+            printf("%%LIB%% is not set. External libraries won't be usable");
+            context->lib_paths = (void*) arena_alloc(&context->arena, 0); // So we know we tried parsing %LIB%
+            return;
+        } else if (actual_length > lib_string_length) {
+            lib_string_length *= 2;
+            continue;
+        } else {
+            lib_string_length = actual_length;
+            break;
+        }
+    }
+
+    context->lib_path_count = 1;
+    for (u32 i = 0; i < lib_string_length; i += 1) {
+        if (lib_string[i] == ';') {
+            context->lib_path_count += 1;
+        }
+    }
+
+    context->lib_paths = (void*) arena_alloc(&context->arena, sizeof(u8*) * context->lib_path_count);
+
+    u8 *substring_start = lib_string;
+    u32 substring_length = 0;
+    u32 substring_index = 0;
+    for (u32 i = 0; /* ... */; i += 1) {
+        if (i >= lib_string_length || lib_string[i] == ';') {
+            u8 *string = substring_start;
+            u32 length = substring_length - 1;
+            while (length > 0 && (string[0] == ' ' || string[0] == '"')) {
+                string += 1;
+                length -= 1;
+            }
+            while (length > 0 && (string[length - 1] == ' ' || string[length - 1] == '"')) {
+                length -= 1;
+            }
+            if (length > 0) {
+                context->lib_paths[substring_index] = make_null_terminated(&context->arena, string, length);
+                substring_index += 1;
+            }
+
+            substring_start = &lib_string[i + 1];
+            substring_length = 0;
+
+            if (i >= lib_string_length) break;
+        }
+
+        substring_length += 1;
+    }
+
+    assert(context->lib_path_count >= substring_index);
+    context->lib_path_count = substring_index;
+
+    arena_stack_pop(&context->stack);
+}
+
+bool parse_library(Context *context, Library_Import* import) {
+    arena_stack_push(&context->stack);
+
+    u8 *raw_lib_name = string_table_access(context->string_table, import->lib_name);
+    u8 *source_path = import->importing_source_file;
+    u8 *source_folder = path_get_folder(&context->stack, source_path);
+    u8 *path = path_join(&context->stack, source_folder, raw_lib_name);
+
+    u8 *file;
     u32 file_length;
 
     IO_Result read_result;
 
     read_result = read_entire_file(path, &file, &file_length);
+
     if (read_result == IO_NOT_FOUND) {
-        // TODO TODO TODO This is a really big hack.
-        // We should check the LIB environment variable and load static libraries from there.
-        // However, if that is not set we should try to figure out a different way of locating
-        // so that we can run the compiler without having to properly configure environment
-        // variables (through the msdev scripts or otherwise) first.
+        if (context->lib_paths == null) {
+            // TODO In the future, can we figure out how to do this without checking %LIB%?
+            parse_lib_paths_from_env_variable(context);
+        }
 
-        u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.16299.0/um/x64";
-        //u8* system_lib_folder = "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.10240.0/um/x64";
-
-        path = path_join(&context->arena, system_lib_folder, raw_lib_name);
-        read_result = read_entire_file(path, &file, &file_length);
+        for (u32 i = 0; i < context->lib_path_count; i += 1) {
+            u8 *system_lib_folder = context->lib_paths[i];
+            path = path_join(&context->stack, system_lib_folder, raw_lib_name);
+            read_result = read_entire_file(path, &file, &file_length);
+        }
     }
 
     if (read_result != IO_OK) {
@@ -11712,8 +11822,6 @@ bool parse_library(Context *context, Library_Import* import) {
 
     import->function_hints = (u32*) arena_alloc(&context->arena, buf_length(import->function_names) * sizeof(u32));
     u32_fill(import->function_hints, buf_length(import->function_names), U32_MAX);
-
-    u8* other_dll_name = arena_alloc(&context->arena, 17); // NB used somewhere in an inner loop
 
     u32 s = 0;
     u32 i = 0;
@@ -11768,7 +11876,8 @@ bool parse_library(Context *context, Library_Import* import) {
 
                     import->dll_name = dll_name;
                 } else {
-                    mem_clear(other_dll_name, 17);
+                    u8 other_dll_name[17] = {0};
+
                     for (u32 l = 0; l < 16; l += 1) {
                         if (member_header->name[l] == '/' || member_header->name[l] == ' ') break;
                         other_dll_name[l] = member_header->name[l];
@@ -11797,11 +11906,13 @@ bool parse_library(Context *context, Library_Import* import) {
     }
 
     free(file);
+    arena_stack_pop(&context->stack);
     return true;
 
     invalid:
     free(file);
     printf("Couldn't load \"%s\": Invalid archive\n", path);
+    arena_stack_pop(&context->stack);
     return false;
 }
 
@@ -12175,37 +12286,6 @@ bool run_executable(u8 *exe_path) {
     WaitForSingleObject(process_info.process, U32_MAX);
 
     return true;
-}
-
-
-
-u64 eat_word(u8 **str) {
-    u64 length = 0;
-    while (**str != ' ' && **str != 0) {
-        length += 1;
-        *str += 1;
-    }
-    while (**str == ' ' && **str != 0) {
-        *str += 1;
-    }
-    return length;
-}
-
-u8 *make_null_terminated(Arena *arena, u8 *str, u64 length) {
-    u8 *result = arena_alloc(arena, length + 1);
-    result[length] = 0;
-    mem_copy(str, result, length);
-    return result;
-}
-
-u8 *str_join(Arena *arena, u8 *left, u8 *right) {
-    u64 left_length = str_length(left);
-    u64 right_length = str_length(right);
-    u8 *result = arena_alloc(arena, left_length + right_length + 1);
-    mem_copy(left, result, left_length);
-    mem_copy(right, result + left_length, left_length);
-    result[left_length + right_length] = 0;
-    return result;
 }
 
 void print_usage() {
