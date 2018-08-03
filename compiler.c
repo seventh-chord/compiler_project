@@ -1428,6 +1428,10 @@ typedef enum Binary_Op {
     BINARY_DIV,
     BINARY_MOD,
 
+    BINARY_AND,
+    BINARY_OR,
+    BINARY_XOR,
+
     BINARY_EQ,
     BINARY_NEQ,
     BINARY_GT,
@@ -1439,6 +1443,10 @@ typedef enum Binary_Op {
 } Binary_Op;
 
 u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
+    [BINARY_AND] = 3,
+    [BINARY_XOR] = 3,
+    [BINARY_OR]  = 3,
+
     [BINARY_MUL] = 2,
     [BINARY_DIV] = 2,
     [BINARY_MOD] = 2,
@@ -1454,15 +1462,13 @@ u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
     [BINARY_LTEQ] = 0,
 };
 
-bool BINARY_OP_STRICTLY_LEFT_ASSOCIATIVE[BINARY_OP_COUNT] = {
-    [BINARY_SUB] = true, [BINARY_DIV] = true, [BINARY_MOD] = true,
-    [BINARY_MUL] = false, [BINARY_ADD] = false,
-    [BINARY_NEQ] = false, [BINARY_EQ] = false, [BINARY_GT] = false, [BINARY_GTEQ] = false, [BINARY_LT] = false, [BINARY_LTEQ] = false,
-};
-
 bool BINARY_OP_COMPARATIVE[BINARY_OP_COUNT] = {
-    [BINARY_SUB] = false, [BINARY_DIV] = false, [BINARY_MOD] = false, [BINARY_MUL] = false, [BINARY_ADD] = false,
-    [BINARY_NEQ] = true, [BINARY_EQ] = true, [BINARY_GT] = true, [BINARY_GTEQ] = true, [BINARY_LT] = true, [BINARY_LTEQ] = true,
+    [BINARY_NEQ]  = true,
+    [BINARY_EQ]   = true,
+    [BINARY_GT]   = true,
+    [BINARY_GTEQ] = true,
+    [BINARY_LT]   = true,
+    [BINARY_LTEQ] = true,
 };
 
 u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
@@ -1471,6 +1477,9 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [BINARY_MUL] = "*",
     [BINARY_DIV] = "/",
     [BINARY_MOD] = "%",
+    [BINARY_AND] = "&",
+    [BINARY_OR]  = "|",
+    [BINARY_XOR] = "^",
     [BINARY_NEQ]  = "!=",
     [BINARY_EQ]   = "==",
     [BINARY_GT]   = ">",
@@ -3870,6 +3879,9 @@ Expr* parse_expr(Context *context, Token* t, u32* length) {
                         case TOKEN_MUL:                op = BINARY_MUL; break;
                         case TOKEN_DIV:                op = BINARY_DIV; break;
                         case TOKEN_MOD:                op = BINARY_MOD; break;
+                        case TOKEN_AND:                op = BINARY_AND; break;
+                        case TOKEN_OR:                 op = BINARY_OR; break;
+                        case TOKEN_XOR:                op = BINARY_XOR; break;
                         case TOKEN_GREATER:            op = BINARY_GT; break;
                         case TOKEN_GREATER_OR_EQUAL:   op = BINARY_GTEQ; break;
                         case TOKEN_LESS:               op = BINARY_LT; break;
@@ -3877,9 +3889,6 @@ Expr* parse_expr(Context *context, Token* t, u32* length) {
                         case TOKEN_EQUAL:              op = BINARY_EQ; break;
                         case TOKEN_NOT_EQUAL:          op = BINARY_NEQ; break;
 
-                        case TOKEN_AND:
-                        case TOKEN_OR:
-                        case TOKEN_XOR:
                         case TOKEN_SHIFT_LEFT:
                         case TOKEN_SHIFT_RIGHT:
                         {
@@ -5321,10 +5330,12 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
                 case '|': {
                     kind = TOKEN_OR;
+                    i += 1;
                 } break;
 
                 case '^': {
                     kind = TOKEN_XOR;
+                    i += 1;
                 } break;
             }
 
@@ -7058,12 +7069,16 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     case BINARY_MUL:  result = left *  right; break;
                     case BINARY_DIV:  result = left /  right; break;
                     case BINARY_MOD:  result = left %  right; break;
+                    case BINARY_AND:  result = left &  right; break;
+                    case BINARY_OR:   result = left |  right; break;
+                    case BINARY_XOR:  result = left ^  right; break;
                     case BINARY_EQ:   result = left == right; break;
                     case BINARY_NEQ:  result = left != right; break;
                     case BINARY_GT:   result = left >  right; break;
                     case BINARY_GTEQ: result = left >= right; break;
                     case BINARY_LT:   result = left <  right; break;
                     case BINARY_LTEQ: result = left <= right; break;
+                    default: assert(false);
                 }
             } else {
                 u64 left = left_result;
@@ -7082,12 +7097,16 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     case BINARY_MUL:  result = left *  right; break;
                     case BINARY_DIV:  result = left /  right; break;
                     case BINARY_MOD:  result = left %  right; break;
+                    case BINARY_AND:  result = left &  right; break;
+                    case BINARY_OR:   result = left |  right; break;
+                    case BINARY_XOR:  result = left ^  right; break;
                     case BINARY_EQ:   result = left == right; break;
                     case BINARY_NEQ:  result = left != right; break;
                     case BINARY_GT:   result = left >  right; break;
                     case BINARY_GTEQ: result = left >= right; break;
                     case BINARY_LT:   result = left <  right; break;
                     case BINARY_LTEQ: result = left <= right; break;
+                    default: assert(false);
                 }
             }
 
@@ -7322,8 +7341,6 @@ bool typecheck(Context *context) {
                             break;
                         }
 
-                        type->structure.members[m].offset = (i32) size;
-
                         u32 member_size = 0;
                         u32 member_align = 0;
 
@@ -7357,9 +7374,8 @@ bool typecheck(Context *context) {
                             }
                         }
 
-                        if (member_size == 0) continue;
-
                         size = round_to_next(size, member_align);
+                        type->structure.members[m].offset = (i32) size;
                         size += member_size;
 
                         max_align = max(max_align, member_align);
@@ -9943,6 +9959,9 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 switch (expr->binary.op) {
                     case BINARY_ADD:
                     case BINARY_SUB:
+                    case BINARY_AND:
+                    case BINARY_OR:
+                    case BINARY_XOR:
                     {
                         Type *type = expr->type;
 
@@ -9961,7 +9980,14 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                         }
 
                         u8 op_size = primitive_size_of(type->kind);
-                        int instruction = expr->binary.op == BINARY_ADD? INTEGER_ADD : INTEGER_SUB;
+                        int instruction;
+                        switch (expr->binary.op) {
+                            case BINARY_ADD: instruction = INTEGER_ADD; break;
+                            case BINARY_SUB: instruction = INTEGER_SUB; break;
+                            case BINARY_AND: instruction = INTEGER_AND; break;
+                            case BINARY_OR:  instruction = INTEGER_OR;  break;
+                            case BINARY_XOR: instruction = INTEGER_XOR; break;
+                        }
                         instruction_integer(context, instruction, MOVE_FROM_MEM, left_reg, x64_place_reg(right_reg), op_size);
 
                         if (expr->binary.left->type->kind == TYPE_POINTER && expr->binary.right->type->kind == TYPE_POINTER) {

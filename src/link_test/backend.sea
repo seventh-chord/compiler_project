@@ -1,6 +1,7 @@
 
 extern "build/frontend.lib" {
     fn my_add(a, b: u32) -> u32;
+    fn get_sixth(a, b, c, d, e, f, g, h: i32) -> i32;
 }
 
 extern "kernel32.lib" {
@@ -64,7 +65,11 @@ fn main() {
     let sum = my_add(9, 3);
 
     print_int(u64(sum));
-    print(" <-- Hello world!\n");
+    print(" <-- Twelve!\n");
+
+    let six = get_sixth(1, 2, 3, 4, 5, 6, 7, 8);
+    print_int(u64(six));
+    print(" <-- Six!\n");
 
     ExitProcess(0);
 }
