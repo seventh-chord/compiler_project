@@ -106,18 +106,19 @@ fn crash() -> bool {
 
 fn perform() {
     let stage = Stage {};
-    stage.on[u64(Names::Dirk)]  = true;
-    stage.on[u64(Names::Pratt)] = true;
-    stage.on[u64(Names::Lerxt)] = true;
+    // TODO why is there no memclear here???
+    stage.on[Names::Dirk]  = true;
+    stage.on[Names::Pratt] = true;
+    stage.on[Names::Lerxt] = true;
 
-    if (stage.on[u64(Names::Dirk)] && stage.on[u64(Names::Pratt)] && stage.on[u64(Names::Lerxt)]) {
+    if (stage.on[Names::Dirk] && stage.on[Names::Pratt] && stage.on[Names::Lerxt]) {
         print("A modern day warrior, mean mean stride, todays Tom Sawyer...\n");
     } else {
         print("Big bummer\n");
     }
 }
 
-enum Names { Dirk, Pratt, Lerxt }
+enum Names(i8) { Dirk = -1, Pratt = 1, Lerxt }
 
 struct Stage {
     on: [enum_length(Names)]bool;

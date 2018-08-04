@@ -25,6 +25,8 @@
 #define I16_MIN -32768
 #define I32_MAX 2147483647ull
 #define I32_MIN -2147483648ll
+#define I64_MAX 9223372036854775807ull
+#define I64_MIN -9223372036854775808ll
 
 #define max(a, b)  ((a) > (b)? (a) : (b))
 #define min(a, b)  ((a) > (b)? (b) : (a))
@@ -3357,8 +3359,8 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
         }
         t += 1;
 
-        Type* primitive = parse_primitive_name(context, type_name_index);
-        if (primitive == null || !(primitive_is_integer(primitive->kind) && !primitive_is_signed(primitive->kind))) {
+        Type *primitive = parse_primitive_name(context, type_name_index);
+        if (primitive == null || !primitive_is_integer(primitive->kind)) {
             print_file_pos(&type_start_pos);
             printf("Expected unsigned integer type, but got %s\n", string_table_access(context->string_table, type_name_index));
             *length = t - t_start;
@@ -3369,6 +3371,8 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
     } else {
         type->enumeration.value_primitive = TYPE_U32;
     }
+
+    u8 primitive_size = primitive_size_of(type->enumeration.value_primitive);
 
     if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after enum name/type")) {
         *length = t - t_start;
@@ -3390,7 +3394,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
 
     arena_stack_push(&context->stack);
 
-    u64 next_value = 0;
+    u64 value = 0;
 
     while (t->kind != TOKEN_BRACKET_CURLY_CLOSE) {
         if (t->kind != TOKEN_IDENTIFIER) {
@@ -3411,6 +3415,12 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
         if (t->kind == TOKEN_ASSIGN) {
             t += 1;
 
+            bool negate = false;
+            if (t->kind == TOKEN_SUB) {
+                t += 1;
+                negate = true;
+            }
+
             if (t->kind != TOKEN_LITERAL_INT) {
                 print_file_pos(&t->pos);
                 printf("Expected literal value, but got ");
@@ -3419,14 +3429,17 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
                 *length = t - t_start;
                 return null;
             }
-
-            next->value = t->literal_int;
+            value = t->literal_int;
             t += 1;
-        } else {
-            next->value = next_value;
+
+            if (negate) {
+                value = -value;
+            }
         }
 
-        next_value = next->value + 1;
+        next->value = value;
+        value += 1;
+        value &= size_mask(primitive_size);
 
         if (first == null) {
             first = next;
@@ -6736,9 +6749,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 return TYPECHECK_EXPR_BAD;
             }
 
-            Type_Kind index_type = expr->subscript.index->type->kind;
-            if (index_type != TYPE_U64 && index_type != TYPE_I64) {
-                // TODO should we allow other integer types and insert automatic promotions as neccesary here??
+            Type_Kind index_type = primitive_of(expr->subscript.index->type);
+            if (!primitive_is_integer(index_type)) {
                 print_file_pos(&expr->subscript.index->pos);
                 printf("Can only use %s and %s as an array index, not ", PRIMITIVE_NAMES[TYPE_U64], PRIMITIVE_NAMES[TYPE_I64]);
                 print_type(info->context, expr->subscript.index->type);
@@ -7180,7 +7192,6 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
 
             u64 array_size = type_size_of(expr->subscript.array->type);
             u64 index_size = type_size_of(expr->subscript.index->type);
-
             assert(index_size <= 8);
 
             u8* inner_data = arena_alloc(&info->context->stack, array_size);
@@ -7191,6 +7202,18 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
             u64 index = 0;
             result = eval_compile_time_expr(info, expr->subscript.index, (u8*) &index);
             if (result != EVAL_OK) return result;
+
+            if (primitive_is_signed(primitive_of(expr->subscript.index->type))) {
+                i64 signed_index;
+                switch (index_size) {
+                    case 1: signed_index = (i64) *((i8*)  &index); break;
+                    case 2: signed_index = (i64) *((i16*) &index); break;
+                    case 4: signed_index = (i64) *((i32*) &index); break;
+                    case 8: signed_index = (i64) *((i64*) &index); break;
+                    default: assert(false);
+                }
+                index = signed_index;
+            }
 
             Type* array_type = expr->subscript.array->type;
             Type_Kind array_literal_primitive = array_type->kind;
@@ -7636,20 +7659,42 @@ bool typecheck(Context *context) {
             } break;
 
             case TYPE_ENUM: {
-                u64 mask = size_mask(primitive_size_of(type->enumeration.value_primitive));
+                Type_Kind primitive = type->enumeration.value_primitive;
+                u64 mask = size_mask(primitive_size_of(primitive));
+                bool is_signed = primitive_is_signed(primitive);
                 u32 count = type->enumeration.member_count;
+
                 for (u32 i = 0; i < count; i += 1) {
                     u64 value_i = type->enumeration.members[i].value;
                     u32 name_index_i = type->enumeration.members[i].name;
 
-                    if ((value_i & mask) != value_i) {
-                        u8* member_name = string_table_access(context->string_table, name_index_i);
-                        u64 max_value = mask;
+                    bool out_of_range;
+                    if (is_signed) {
+                        i64 signed_value = value_i;
+                        i64 min, max;
+                        switch (primitive) {
+                            case TYPE_I8:  min = I8_MIN;  max = I8_MAX;  break;
+                            case TYPE_I16: min = I16_MIN; max = I16_MAX; break;
+                            case TYPE_I32: min = I32_MIN; max = I32_MAX; break;
+                            case TYPE_I64: min = I64_MIN; max = I64_MAX; break;
+                            default: assert(false);
+                        }
+                        out_of_range = signed_value < min || signed_value > max;
+                    } else {
+                        out_of_range = (value_i & mask) != value_i;
+                    }
+
+                    if (out_of_range) {
+                        u8 *member_name = string_table_access(context->string_table, name_index_i);
+                        u8 *primitive_name = PRIMITIVE_NAMES[type->enumeration.value_primitive];
+                        u8 *enum_name = string_table_access(context->string_table, type->enumeration.name);
 
                         print_file_pos(&type->enumeration.members[i].declaration_pos);
                         printf(
-                            "Member '%s' has the value %u, which is larger than the max value for the enum, %u\n",
-                            member_name, value_i, max_value
+                            is_signed?
+                                "%s = %i is out of range for enum %s(%s)\n" :
+                                "%s = %u is out of range for enum %s(%s)\n",
+                            member_name, value_i, enum_name, primitive_name
                         );
                         valid = false;
                         break;
@@ -9800,7 +9845,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *reg_allocator, X64_Address address, Expr *index, u64 stride) {
     if (index->kind == EXPR_LITERAL) {
         u64 offset = index->literal.masked_value * stride;
-        assert((((i64) address.immediate_offset) + ((i64) offset)) <= I32_MAX);
+        assert(((i64) address.immediate_offset) + offset <= I32_MAX);
         address.immediate_offset += offset;
     } else {
         Register index_reg = REGISTER_NONE;
@@ -9819,13 +9864,14 @@ X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *r
         }
         
         if (index_reg == REGISTER_NONE) {
-            // TODO I don't really understand what checking for reserves here is supposed to acomplish
+            // TODO I don't really remember what checking for reserves here is supposed to acomplish
             u32 reserves = machinecode_expr_reserves(index);
             index_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
         }
         assert(address.index == REGISTER_NONE && address.scale == 0);
 
         machinecode_for_expr(context, fn, index, reg_allocator, x64_place_reg(index_reg));
+        machinecode_cast(context, index_reg, index_reg, primitive_of(index->type), TYPE_DEFAULT_INT);
         address.index = index_reg;
 
         if (stride == 1 || stride == 2 || stride == 4 || stride == 8) {

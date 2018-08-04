@@ -1,6 +1,7 @@
 Unimplemented & bugs
     Integer division algorithm
     machinecode_move bug (documented in code, I think)
+    'enum Foo(i64) { A = I64_MIN - 1 }', with the value as a literal, does not generate an error, because we have no way of detecting the underflow happening...
 
 Other
     infer executable name if none is given on command line
