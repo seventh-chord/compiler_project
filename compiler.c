@@ -6562,8 +6562,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
             bool valid =
                 ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) ||
-                ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && to == TYPE_U64) ||
-                (from == TYPE_U64 && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) ||
+                ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && (to == TYPE_U64 || to == TYPE_I64)) ||
+                ((from == TYPE_U64 || from == TYPE_I64) && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) ||
 
                 (primitive_is_integer(from) && primitive_is_integer(to)) ||
 
