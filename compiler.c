@@ -11637,6 +11637,66 @@ typedef struct Import_Header {
     u16 extra;
 } Import_Header;
 
+void parse_lib_paths_from_env_variable(Context *context) {
+    assert(context->lib_paths == null);
+    assert(context->lib_path_count == 0);
+
+    arena_stack_push(&context->stack);
+
+    u32 lib_string_length = GetEnvironmentVariableA("LIB", null, 0);
+    if (lib_string_length == 0) {
+        printf("%%LIB%% is not set. External libraries won't be usable");
+        context->lib_paths = (void*) arena_alloc(&context->arena, 0); // So we know we tried parsing %LIB%
+        return;
+    }
+    u8 *lib_string = arena_alloc(&context->stack, lib_string_length);
+    u32 actual_length = GetEnvironmentVariableA("LIB", lib_string, lib_string_length);
+    lib_string_length -= 1;
+    assert(actual_length == lib_string_length);
+
+    context->lib_path_count = 1;
+    for (u32 i = 0; i < lib_string_length; i += 1) {
+        if (lib_string[i] == ';') {
+            context->lib_path_count += 1;
+        }
+    }
+
+    context->lib_paths = (void*) arena_alloc(&context->arena, sizeof(u8*) * context->lib_path_count);
+
+    u8 *substring_start = lib_string;
+    u32 substring_length = 0;
+    u32 substring_index = 0;
+    for (u32 i = 0; /* ... */; i += 1) {
+        if (i >= lib_string_length || lib_string[i] == ';') {
+            u8 *string = substring_start;
+            u32 length = substring_length - 1;
+            while (length > 0 && (string[0] == ' ' || string[0] == '"')) {
+                string += 1;
+                length -= 1;
+            }
+            while (length > 0 && (string[length - 1] == ' ' || string[length - 1] == '"')) {
+                length -= 1;
+            }
+            if (length > 0) {
+                context->lib_paths[substring_index] = make_null_terminated(&context->arena, string, length);
+                substring_index += 1;
+            }
+
+            substring_start = &lib_string[i + 1];
+            substring_length = 0;
+
+            if (i >= lib_string_length) break;
+        }
+
+        substring_length += 1;
+    }
+
+    assert(context->lib_path_count >= substring_index);
+    context->lib_path_count = substring_index;
+
+    arena_stack_pop(&context->stack);
+}
+
 // NB only intended for use within read_archive_member_header
 bool parse_ascii_integer(u8* string, u32 length, u64* value) {
     *value = 0;
@@ -11684,74 +11744,14 @@ bool read_archive_member_header(
     u32 total_size = sizeof(Archive_Member_Header) + member_size;
     *cursor += total_size;
     *cursor_length -= total_size;
+
+    if (*cursor_length > 0 && (member_size&1 == 1)) {
+        assert(**cursor == '\n');
+        *cursor += 1;
+        *cursor_length -= 1;
+    }
+
     return true;
-}
-
-void parse_lib_paths_from_env_variable(Context *context) {
-    assert(context->lib_paths == null);
-    assert(context->lib_path_count == 0);
-
-    arena_stack_push(&context->stack);
-
-    u32 lib_string_length = 1024;
-    u8 *lib_string;
-    while (true) {
-        lib_string = arena_alloc(&context->stack, lib_string_length);
-        u32 actual_length = GetEnvironmentVariableA("LIB", lib_string, lib_string_length);
-        if (actual_length == 0) {
-            printf("%%LIB%% is not set. External libraries won't be usable");
-            context->lib_paths = (void*) arena_alloc(&context->arena, 0); // So we know we tried parsing %LIB%
-            return;
-        } else if (actual_length > lib_string_length) {
-            lib_string_length *= 2;
-            continue;
-        } else {
-            lib_string_length = actual_length;
-            break;
-        }
-    }
-
-    context->lib_path_count = 1;
-    for (u32 i = 0; i < lib_string_length; i += 1) {
-        if (lib_string[i] == ';') {
-            context->lib_path_count += 1;
-        }
-    }
-
-    context->lib_paths = (void*) arena_alloc(&context->arena, sizeof(u8*) * context->lib_path_count);
-
-    u8 *substring_start = lib_string;
-    u32 substring_length = 0;
-    u32 substring_index = 0;
-    for (u32 i = 0; /* ... */; i += 1) {
-        if (i >= lib_string_length || lib_string[i] == ';') {
-            u8 *string = substring_start;
-            u32 length = substring_length - 1;
-            while (length > 0 && (string[0] == ' ' || string[0] == '"')) {
-                string += 1;
-                length -= 1;
-            }
-            while (length > 0 && (string[length - 1] == ' ' || string[length - 1] == '"')) {
-                length -= 1;
-            }
-            if (length > 0) {
-                context->lib_paths[substring_index] = make_null_terminated(&context->arena, string, length);
-                substring_index += 1;
-            }
-
-            substring_start = &lib_string[i + 1];
-            substring_length = 0;
-
-            if (i >= lib_string_length) break;
-        }
-
-        substring_length += 1;
-    }
-
-    assert(context->lib_path_count >= substring_index);
-    context->lib_path_count = substring_index;
-
-    arena_stack_pop(&context->stack);
 }
 
 bool parse_library(Context *context, Library_Import* import) {
