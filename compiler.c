@@ -11035,6 +11035,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
         } break;
 
         case STMT_LOOP: {
+            u32 jump_fixup_ignore = buf_length(context->jump_fixups);
             u64 loop_start = buf_length(context->seg_text);
 
             if (stmt->loop.condition != null) {
@@ -11059,7 +11060,12 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             assert(jump_by < I32_MAX);
             *((i32*) &context->seg_text[backward_jump_index]) = -((i32) jump_by);
 
+            u32 fixup_index = 0;
+
             buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
+                fixup_index += 1;
+                if (fixup_index <= jump_fixup_ignore) continue;
+
                 u64 jump_to;
                 if (fixup->jump_to == JUMP_TO_END_OF_LOOP) {
                     jump_to = loop_end;
