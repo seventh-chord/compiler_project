@@ -14,6 +14,10 @@ fn assert(condition: bool, error_message: String) {
         print("Assertion failed: ");
         print(error_message);
         print("\n");
+
+        let bell: u8 = 0x07;
+        print(String { &bell, 1 });
+
         ExitProcess(0);
     }
 }

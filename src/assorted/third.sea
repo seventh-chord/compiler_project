@@ -19,6 +19,7 @@ typedef int = i32;
 
 fn main() {
     bitwise_funkyness();
+    boolean_funkyness();
 
     let n: i32 = 7;
 
@@ -84,3 +85,20 @@ fn bitwise_funkyness() {
     if (a&b != 0)   { print("Oof, bitwise is really broken \n"); }
     if (2^3 != 1)   { print("Oof, bitwise is really really broken \n"); }
 }
+
+fn boolean_funkyness() {
+    let a = 7;
+    if (a < 8 || crash()) {}
+    if (a < 5 && crash()) { print("Short circuiting broke slightly\n"); }
+}
+
+fn crash() -> bool {
+    print("Short circuiting is not working at all\n");
+
+    let bell: u8 = 0x07;
+    print(String { &bell, 1 });
+
+    ExitProcess(-1);
+    return true;
+}
+

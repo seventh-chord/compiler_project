@@ -1120,12 +1120,12 @@ typedef struct Token {
         TOKEN_SUB = '-',
         TOKEN_MUL = '*', // also used for pointers
         TOKEN_DIV = '/',
-        TOKEN_MOD = '%', // TODO
+        TOKEN_MOD = '%',
 
         TOKEN_AND = '&',
-        TOKEN_NOT = '!', // TODO
-        TOKEN_OR  = '|', // TODO
-        TOKEN_XOR = '^', // TODO
+        TOKEN_NOT = '!',
+        TOKEN_OR  = '|',
+        TOKEN_XOR = '^',
 
         TOKEN_GREATER = '>',
         TOKEN_LESS = '<',
@@ -1141,8 +1141,11 @@ typedef struct Token {
         TOKEN_NOT_EQUAL, // "!="
         TOKEN_ARROW, // "->"
 
-        TOKEN_SHIFT_LEFT, // "<<", TODO
-        TOKEN_SHIFT_RIGHT, // ">>", TODO
+        TOKEN_SHIFT_LEFT, // "<<"
+        TOKEN_SHIFT_RIGHT, // ">>"
+
+        TOKEN_LOGICAL_AND,
+        TOKEN_LOGICAL_OR,
 
         TOKEN_ADD_ASSIGN, // "+="
         TOKEN_SUB_ASSIGN, // "-="
@@ -1218,6 +1221,8 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_ARROW]                = "->",
     [TOKEN_SHIFT_LEFT]           = "<<",
     [TOKEN_SHIFT_RIGHT]          = ">>",
+    [TOKEN_LOGICAL_AND]          = "&&",
+    [TOKEN_LOGICAL_OR]           = "||",
     [TOKEN_ADD_ASSIGN]           = "+=",
     [TOKEN_SUB_ASSIGN]           = "-=",
 
@@ -1472,6 +1477,9 @@ typedef enum Binary_Op {
     BINARY_OR,
     BINARY_XOR,
 
+    BINARY_LOGICAL_AND,
+    BINARY_LOGICAL_OR,
+
     BINARY_EQ,
     BINARY_NEQ,
     BINARY_GT,
@@ -1483,23 +1491,25 @@ typedef enum Binary_Op {
 } Binary_Op;
 
 u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
+    [BINARY_MUL] = 3,
+    [BINARY_DIV] = 3,
+    [BINARY_MOD] = 3,
     [BINARY_AND] = 3,
     [BINARY_XOR] = 3,
-    [BINARY_OR]  = 3,
 
-    [BINARY_MUL] = 2,
-    [BINARY_DIV] = 2,
-    [BINARY_MOD] = 2,
+    [BINARY_ADD] = 2,
+    [BINARY_SUB] = 2,
+    [BINARY_OR]  = 2,
 
-    [BINARY_ADD] = 1,
-    [BINARY_SUB] = 1,
+    [BINARY_NEQ] = 1,
+    [BINARY_EQ] = 1,
+    [BINARY_GT] = 1,
+    [BINARY_GTEQ] = 1,
+    [BINARY_LT] = 1,
+    [BINARY_LTEQ] = 1,
 
-    [BINARY_NEQ] = 0,
-    [BINARY_EQ] = 0,
-    [BINARY_GT] = 0,
-    [BINARY_GTEQ] = 0,
-    [BINARY_LT] = 0,
-    [BINARY_LTEQ] = 0,
+    [BINARY_LOGICAL_AND] = 0,
+    [BINARY_LOGICAL_OR] = 0,
 };
 
 bool BINARY_OP_COMPARATIVE[BINARY_OP_COUNT] = {
@@ -1517,9 +1527,14 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [BINARY_MUL] = "*",
     [BINARY_DIV] = "/",
     [BINARY_MOD] = "%",
+
     [BINARY_AND] = "&",
     [BINARY_OR]  = "|",
     [BINARY_XOR] = "^",
+
+    [BINARY_LOGICAL_AND]  = "&&",
+    [BINARY_LOGICAL_OR]   = "||",
+
     [BINARY_NEQ]  = "!=",
     [BINARY_EQ]   = "==",
     [BINARY_GT]   = ">",
@@ -3947,6 +3962,8 @@ Expr* parse_expr(Context *context, Token* t, u32* length) {
                         case TOKEN_AND:                op = BINARY_AND; break;
                         case TOKEN_OR:                 op = BINARY_OR; break;
                         case TOKEN_XOR:                op = BINARY_XOR; break;
+                        case TOKEN_LOGICAL_AND:        op = BINARY_LOGICAL_AND; break;
+                        case TOKEN_LOGICAL_OR:         op = BINARY_LOGICAL_OR; break;
                         case TOKEN_GREATER:            op = BINARY_GT; break;
                         case TOKEN_GREATER_OR_EQUAL:   op = BINARY_GTEQ; break;
                         case TOKEN_LESS:               op = BINARY_LT; break;
@@ -5354,11 +5371,6 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                     i += 1;
                 } break;
 
-                case '&': {
-                    kind = TOKEN_AND;
-                    i += 1;
-                } break;
-
                 case '>': {
                     switch (b) {
                         case '=': {
@@ -5413,9 +5425,24 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                     }
                 } break;
 
+                case '&': {
+                    if (b == '&') {
+                        kind = TOKEN_LOGICAL_AND;
+                        i += 2;
+                    } else {
+                        kind = TOKEN_AND;
+                        i += 1;
+                    }
+                } break;
+
                 case '|': {
-                    kind = TOKEN_OR;
-                    i += 1;
+                    if (b == '|') {
+                        kind = TOKEN_LOGICAL_OR;
+                        i += 2;
+                    } else {
+                        kind = TOKEN_OR;
+                        i += 1;
+                    }
                 } break;
 
                 case '^': {
@@ -6307,6 +6334,10 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                         if (primitive == TYPE_POINTER || primitive == TYPE_BOOL || primitive == TYPE_FN_POINTER) valid_types = false;
                     }
                 }
+            } else if (expr->binary.op == BINARY_LOGICAL_AND || expr->binary.op == BINARY_LOGICAL_OR) {
+                Type *type_bool = &info->context->primitive_types[TYPE_BOOL];
+                valid_types = expr->binary.left->type == type_bool && expr->binary.right->type == type_bool;
+                expr->type = type_bool;
             } else {
                 if (expr->binary.left->type == expr->binary.right->type && (primitive_is_integer(expr->binary.left->type->kind) || primitive_is_float(expr->binary.left->type->kind))) {
                     expr->type = expr->binary.left->type;
@@ -6315,7 +6346,6 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     if (expr->binary.op == BINARY_MOD && primitive_is_float(expr->binary.left->type->kind)) {
                         valid_types = false;
                     }
-
                 // Special-case pointer-pointer arithmetic
                 } else {
                     Type_Kind left_kind = expr->binary.left->type->kind;
@@ -7157,9 +7187,14 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     case BINARY_MUL:  result = left *  right; break;
                     case BINARY_DIV:  result = left /  right; break;
                     case BINARY_MOD:  result = left %  right; break;
+
                     case BINARY_AND:  result = left &  right; break;
                     case BINARY_OR:   result = left |  right; break;
                     case BINARY_XOR:  result = left ^  right; break;
+
+                    case BINARY_LOGICAL_AND: result = left && right; break;
+                    case BINARY_LOGICAL_OR:  result = left || right;
+
                     case BINARY_EQ:   result = left == right; break;
                     case BINARY_NEQ:  result = left != right; break;
                     case BINARY_GT:   result = left >  right; break;
@@ -7185,9 +7220,14 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                     case BINARY_MUL:  result = left *  right; break;
                     case BINARY_DIV:  result = left /  right; break;
                     case BINARY_MOD:  result = left %  right; break;
+
                     case BINARY_AND:  result = left &  right; break;
                     case BINARY_OR:   result = left |  right; break;
                     case BINARY_XOR:  result = left ^  right; break;
+
+                    case BINARY_LOGICAL_AND: result = left && right; break;
+                    case BINARY_LOGICAL_OR:  result = left || right;
+
                     case BINARY_EQ:   result = left == right; break;
                     case BINARY_NEQ:  result = left != right; break;
                     case BINARY_GT:   result = left >  right; break;
@@ -9930,6 +9970,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 return;
             }
 
+            // Floating point
             if (primitive_is_float(expr->binary.left->type->kind)) {
                 register_allocator_enter_frame(context, reg_allocator);
 
@@ -10030,6 +10071,34 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                     machinecode_move(context, reg_allocator, x64_place_reg(left_reg), place, single? 4 : 8);
                 }
                 register_allocator_leave_frame(context, reg_allocator);
+
+            // Short-circuiting
+            } else if (expr->binary.op == BINARY_LOGICAL_AND || expr->binary.op == BINARY_LOGICAL_OR) {
+                Condition cond;
+                if (expr->binary.op == BINARY_LOGICAL_AND) {
+                    cond = COND_E;
+                } else if (expr->binary.op == BINARY_LOGICAL_OR) {
+                    cond = COND_NE;
+                } else {
+                    assert(false);
+                }
+
+                assert(expr->type->kind == TYPE_BOOL);
+                u8 op_size = 1;
+
+                machinecode_for_expr(context, fn, expr->binary.left, reg_allocator, place);
+
+                instruction_cmp_imm(context, place, 0, op_size);
+                u64 jump_size_offset = instruction_jcc(context, cond, 1);
+                u64 jump_from = buf_length(context->seg_text);
+
+                machinecode_for_expr(context, fn, expr->binary.right, reg_allocator, place);
+
+                i64 jump_by = buf_length(context->seg_text) - jump_from;
+                assert(jump_by >= I8_MIN && jump_by <= I8_MAX); // TODO If this fails rewrite code but with a 32 bit jump
+                context->seg_text[jump_size_offset] = (i8) jump_by;
+
+            // General binary integer stuff
             } else {
                 Register left_reg = REGISTER_NONE;
                 if (place.kind == PLACE_ADDRESS) {
