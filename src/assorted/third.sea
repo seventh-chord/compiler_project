@@ -38,6 +38,7 @@ fn main() {
         print("The callback did work\n");
     }
 
+    perform();
     print_keyword();
 
     ExitProcess(0);
@@ -60,7 +61,7 @@ fn down_the_rabbit_hole() -> *fn() -> *fn(p: i32) -> int {
 typedef Keyword_Factory = *fn() -> String;
 
 fn get_keyword() -> String {
-    return "Big bummer";
+    return "...mean mean pride";
 }
 
 fn get_keyword_factory() -> Keyword_Factory {
@@ -102,3 +103,22 @@ fn crash() -> bool {
     return true;
 }
 
+
+fn perform() {
+    let stage = Stage {};
+    stage.on[u64(Names::Dirk)]  = true;
+    stage.on[u64(Names::Pratt)] = true;
+    stage.on[u64(Names::Lerxt)] = true;
+
+    if (stage.on[u64(Names::Dirk)] && stage.on[u64(Names::Pratt)] && stage.on[u64(Names::Lerxt)]) {
+        print("A modern day warrior, mean mean stride, todays Tom Sawyer...\n");
+    } else {
+        print("Big bummer\n");
+    }
+}
+
+enum Names { Dirk, Pratt, Lerxt }
+
+struct Stage {
+    on: [enum_length(Names)]bool;
+}
