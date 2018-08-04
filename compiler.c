@@ -4828,7 +4828,7 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_FN);
     bool valid = true;
 
-    Token* start = t;
+    Token* t_start = t;
     File_Pos declaration_pos = t->pos;
 
     // Estimate size of function, so we still print reasonable errors on bad function declarations
@@ -4861,19 +4861,19 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     if (other_fn_index != U32_MAX) {
         Fn* other_fn = &context->fns[other_fn_index];
         u8* name = string_table_access(context->string_table, fn.name);
-        print_file_pos(&start->pos);
+        print_file_pos(&t_start->pos);
         printf("A function called '%s' is defined both on line %u and line %u\n", name, (u64) declaration_pos.line, (u64) other_fn->declaration_pos.line);
         valid = false;
     }
 
     if (parse_primitive_name(context, fn.name) != null || context->builtin_names[BUILTIN_CAST] == fn.name) {
         u8* name = string_table_access(context->string_table, fn.name);
-        print_file_pos(&start->pos);
+        print_file_pos(&t_start->pos);
         printf("Can't use '%s' as a function name, as it is reserved for casts\n", name);
         valid = false;
     } else if (parse_builtin_fn_name(context, fn.name) != BUILTIN_INVALID) {
         u8* name = string_table_access(context->string_table, fn.name);
-        print_file_pos(&start->pos);
+        print_file_pos(&t_start->pos);
         printf("Can't use '%s' as a function name, as it would shadow a builtin function\n", name);
         valid = false;
     }
@@ -4881,6 +4881,7 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     // Functions without a body
     if (t->kind == TOKEN_SEMICOLON) {
         fn.kind = FUNC_KIND_IMPORTED;
+        t += 1;
 
     // Body
     } else {
@@ -4899,8 +4900,6 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
         u32 body_length = t->bracket_offset_to_matching - 1;
         t = t + t->bracket_offset_to_matching;
 
-        *length = (u32) (t - start) + 1;
-
         u32 stmts_length = 0;
         Stmt* first_stmt = parse_stmts(context, body, &stmts_length);
 
@@ -4909,7 +4908,14 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
         }
 
         fn.body.first_stmt = first_stmt;
+
+        if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_CLOSE, "after function body")) {
+            valid = false;
+        }
+        t += 1;
     }
+
+    *length = t - t_start;
 
     // Copy data out of temporary buffers into permanent arena storage
     fn.body.var_count = buf_length(context->tmp_vars);
