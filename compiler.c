@@ -1339,9 +1339,11 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
 
 #define TYPE_FLAG_SIZE_NOT_COMPUTED 0x01
 #define TYPE_FLAG_UNRESOLVED        0x02
+#define TYPE_FLAG_UNRESOLVED_CHILD  0x04
 
 typedef struct Type Type;
 typedef struct Type_List Type_List;
+typedef struct Expr Expr;
 
 typedef struct Fn_Signature {
     bool has_return;
@@ -1395,32 +1397,31 @@ struct Type {
         } enumeration;
         
         struct {
-            u64 length;
-            Type* of;
+            union {
+                Expr *expr; // discriminated by 'TYPE_FLAG_UNRESOLVED', must be a compile-time expr
+                u64 length;
+            };
+            Type *of;
         } array;
 
-        Type* pointer_to;
+        Type *pointer_to;
 
         Fn_Signature fn_signature;
     };
 
-    Type* pointer_type;
-    Type_List* array_types;
+    Type *pointer_type;
+    Type_List *array_types;
 };
 
 struct Type_List {
     Type type;
-    Type_List* next;
+    Type_List *next;
 };
 
 typedef struct Typedef {
     u32 name;
     Type *type;
 } Typedef;
-
-
-
-typedef struct Expr Expr;
 
 
 // When a var index has this bit set, it refers to a global rather than to a local
@@ -1430,14 +1431,14 @@ typedef struct Expr Expr;
 
 typedef struct Var {
     u32 name;
-    Type* type; // We set this to 'null' to indicate that we want to infer the type
+    Type *type; // We set this to 'null' to indicate that we want to infer the type
     File_Pos declaration_pos;
     bool is_reference; // Only used for structs as function parameters!
 } Var;
 
 typedef struct Global_Var {
     Var var;
-    Expr* initial_expr;
+    Expr *initial_expr;
 
     u32 data_offset;
 
@@ -1545,7 +1546,7 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
 
 
 typedef struct Compound_Member {
-    Expr* expr;
+    Expr *expr;
 
     enum {
         EXPR_COMPOUND_NO_NAME,
@@ -1585,7 +1586,7 @@ typedef enum Expr_Kind {
 struct Expr { // 'typedef'd earlier!
     Expr_Kind kind;
     u8 flags;
-    Type* type;
+    Type *type;
     File_Pos pos;
 
     union {
@@ -1914,28 +1915,28 @@ typedef struct Context {
 
 
 
-Type* get_pointer_type(Context *context, Type* type) {
+Type *get_pointer_type(Context *context, Type *type) {
     if (type->pointer_type == null) {
         type->pointer_type = arena_new(&context->arena, Type);
         type->pointer_type->kind = TYPE_POINTER;
         type->pointer_type->pointer_to = type;
 
-        if (type->flags & TYPE_FLAG_UNRESOLVED) {
-            type->pointer_type->flags = TYPE_FLAG_UNRESOLVED;
+        if (type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
+            type->pointer_type->flags |= TYPE_FLAG_UNRESOLVED_CHILD;
         }
     }
 
     return type->pointer_type;
 }
 
-Type* get_array_type(Context *context, Type* type, u64 length) {
+Type *get_array_type(Context *context, Type *type, u64 length) {
     for (Type_List* node = type->array_types; node != null; node = node->next) {
         if (node->type.array.length == length) {
             return &node->type;
         }
     }
 
-    Type_List* new = arena_new(&context->arena, Type_List);
+    Type_List *new = arena_new(&context->arena, Type_List);
     new->next = type->array_types;
     type->array_types = new;
 
@@ -1943,8 +1944,8 @@ Type* get_array_type(Context *context, Type* type, u64 length) {
     new->type.array.length = length;
     new->type.array.of = type;
 
-    if (type->flags & TYPE_FLAG_UNRESOLVED) {
-        new->type.flags = TYPE_FLAG_UNRESOLVED;
+    if (type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
+        new->type.flags |= TYPE_FLAG_UNRESOLVED_CHILD;
     }
 
     return &new->type;
@@ -2873,15 +2874,23 @@ Type *parse_user_type_name(Context *context, u32 name_index) {
 }
 
 Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn);
+Expr *parse_expr(Context *context, Token* t, u32* length);
+Expr  *parse_compound(Context *context, Token* t, u32* length);
+Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count);
+Expr  *parse_call(Context *context, Token* t, u32* length);
 
 Type *parse_type(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     typedef struct Prefix Prefix;
     struct Prefix {
-        enum { PREFIX_POINTER, PREFIX_ARRAY } kind;
-        u64 array_length;
-        Prefix* link;
+        enum { PREFIX_POINTER, PREFIX_ARRAY, PREFIX_ARRAY_EXPR } kind;
+        union {
+            Expr *array_length_expr;
+            u64 array_length;
+        };
+
+        Prefix *link;
     };
     Prefix* prefix = null;
 
@@ -2910,28 +2919,32 @@ Type *parse_type(Context *context, Token* t, u32* length) {
             case TOKEN_BRACKET_SQUARE_OPEN: {
                 t += 1;
 
-                if (t->kind != TOKEN_LITERAL_INT) {
-                    print_file_pos(&t->pos);
-                    printf("Expected array size, but got ");
-                    print_token(context->string_table, t);
-                    printf("\n");
-                    *length = t - t_start;
-                    return null;
+                Prefix *new = arena_new(&context->stack, Prefix);
+                new->link = prefix;
+                prefix = new;
+
+                if (t->kind == TOKEN_LITERAL_INT) {
+                    prefix->kind = PREFIX_ARRAY;
+                    prefix->array_length = t->literal_int;
+                    t += 1;
+                } else {
+                    u32 length_expr_length;
+                    Expr *length_expr = parse_expr(context, t, &length_expr_length);
+                    t += length_expr_length;
+                    if (length_expr == null) {
+                        *length = t - t_start;
+                        return null;
+                    }
+
+                    prefix->kind = PREFIX_ARRAY_EXPR;
+                    prefix->array_length_expr = length_expr;
                 }
-                u64 array_length = t->literal_int;
-                t += 1;
 
                 if (!expect_single_token(context, t, TOKEN_BRACKET_SQUARE_CLOSE, "after array size")) {
                     *length = t - t_start;
                     return null;
                 }
                 t += 1;
-
-                Prefix* new = arena_new(&context->stack, Prefix);
-                new->kind = PREFIX_ARRAY;
-                new->array_length = array_length;
-                new->link = prefix;
-                prefix = new;
             }  break;
 
             case TOKEN_MUL: {
@@ -2947,7 +2960,7 @@ Type *parse_type(Context *context, Token* t, u32* length) {
                         return null;
                     }
                 } else {
-                    Prefix* new = arena_new(&context->stack, Prefix);
+                    Prefix *new = arena_new(&context->stack, Prefix);
                     new->kind = PREFIX_POINTER;
                     new->link = prefix;
                     prefix = new;
@@ -2967,11 +2980,26 @@ Type *parse_type(Context *context, Token* t, u32* length) {
         }
     }
 
-    Type* type = base_type;
+    Type *type = base_type;
     while (prefix != null) {
         switch (prefix->kind) {
-            case PREFIX_POINTER: type = get_pointer_type(context, type); break;
-            case PREFIX_ARRAY:   type = get_array_type(context, type, prefix->array_length); break;
+            case PREFIX_POINTER: {
+                type = get_pointer_type(context, type);
+            } break;
+
+            case PREFIX_ARRAY: {
+                type = get_array_type(context, type, prefix->array_length);
+            } break;
+
+            case PREFIX_ARRAY_EXPR: {
+                Type *array_type = arena_new(&context->arena, Type);
+                array_type->kind = TYPE_ARRAY;
+                array_type->flags |= TYPE_FLAG_UNRESOLVED;
+                array_type->array.expr = prefix->array_length_expr;
+                array_type->array.of = type;
+
+                type = array_type;
+            } break;
         }
         prefix = prefix->link;
     }
@@ -3151,13 +3179,14 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
             break;
         }
     }
-    if (signature.has_return && (signature.return_type->flags & TYPE_FLAG_UNRESOLVED)) {
+
+    if (signature.has_return && (signature.return_type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD))) {
         unresolved = true;
     }
 
     if (unresolved) {
         Type *type = arena_new(&context->arena, Type);
-        type->flags |= TYPE_FLAG_UNRESOLVED;
+        type->flags |= TYPE_FLAG_UNRESOLVED_CHILD;
         type->kind = TYPE_FN_POINTER;
         type->fn_signature = signature;
         return type;
@@ -3613,11 +3642,7 @@ void shunting_yard_push_op(Context *context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
-Expr  *parse_compound(Context *context, Token* t, u32* length);
-Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count);
-Expr  *parse_call(Context *context, Token* t, u32* length);
-
-Expr* parse_expr(Context *context, Token* t, u32* length) {
+Expr *parse_expr(Context *context, Token* t, u32* length) {
     Token* t_start = t;
 
     // NB: We only pop the stack if we succesfully parse. That is, for eroneous code we leak memory.
@@ -5881,12 +5906,29 @@ void typecheck_scope_pop(Typecheck_Info *info) {
     info->scope = info->scope->parent;
 }
 
-bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
+typedef enum Eval_Result {
+    EVAL_OK,
+    EVAL_BAD,
+    EVAL_DO_AT_RUNTIME,
+} Eval_Result;
+
+// NB This will allocate on context->stack, push/pop before/after
+Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into);
+
+typedef enum Typecheck_Expr_Result {
+    TYPECHECK_EXPR_STRONG,
+    TYPECHECK_EXPR_WEAK , // Used for e.g. integer literals, which can solidify to any integer type
+    TYPECHECK_EXPR_BAD,
+} Typecheck_Expr_Result;
+
+Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to);
+
+bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
     // The reason we have a pretty complex system here is because we want types to be pointer-equal
 
     Type* type = *type_slot;
 
-    if (!(type->flags & TYPE_FLAG_UNRESOLVED)) {
+    if (!(type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD))) {
         return true;
     }
 
@@ -5898,14 +5940,17 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
     };
     Prefix* prefix = null;
 
-    arena_stack_push(&context->stack); // We allocate prefixes, if any, on the stack
+    arena_stack_push(&info->context->stack); // We allocate prefixes, if any, on the stack
 
     while (true) {
         bool done = false;
 
         switch (type->kind) {
             case TYPE_POINTER: {
-                Prefix* new = arena_new(&context->stack, Prefix);
+                assert(type->flags & TYPE_FLAG_UNRESOLVED_CHILD);
+                assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
+
+                Prefix* new = arena_new(&info->context->stack, Prefix);
                 new->kind = PREFIX_POINTER;
                 new->link = prefix;
                 prefix = new;
@@ -5914,20 +5959,76 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
             } break;
 
             case TYPE_ARRAY: {
-                Prefix* new = arena_new(&context->stack, Prefix);
-                new->kind = PREFIX_ARRAY;
-                new->array_length = type->array.length;
-                new->link = prefix;
-                prefix = new;
+                if (type->flags & TYPE_FLAG_UNRESOLVED) {
+                    Expr *length_expr = type->array.expr;
+                    Type *type_default_int = &info->context->primitive_types[TYPE_U64];
+                    Typecheck_Expr_Result check_result = typecheck_expr(info, length_expr, type_default_int);
+                    if (check_result == TYPECHECK_EXPR_BAD) {
+                        return false;
+                    }
 
-                type = type->array.of;
+                    if (!primitive_is_integer(length_expr->type->kind)) {
+                        print_file_pos(&length_expr->pos);
+                        printf("Can only use unsigned integers as array sizes\n");
+                        return false;
+                    }
+
+                    u64 length = 0;
+                    arena_stack_push(&info->context->stack);
+                    Eval_Result eval_result = eval_compile_time_expr(info, length_expr, (u8*) &length);
+                    arena_stack_pop(&info->context->stack);
+
+                    if (eval_result == EVAL_BAD) {
+                        return false;
+                    } else if (eval_result == EVAL_DO_AT_RUNTIME) {
+                        print_file_pos(&length_expr->pos);
+                        printf("Can't evaluate expression for array length at compile time\n");
+                        return false;
+                    } else if (eval_result == EVAL_OK) {
+                        if (primitive_is_signed(length_expr->type->kind)) {
+                            i64 signed_length = length;
+                            switch (length_expr->type->kind) {
+                                case TYPE_I8:  signed_length = (i64) (*((i8*)  &signed_length)); break;
+                                case TYPE_I16: signed_length = (i64) (*((i16*) &signed_length)); break;
+                                case TYPE_I32: signed_length = (i64) (*((i32*) &signed_length)); break;
+                                case TYPE_I64: break;
+                                default: assert(false);
+                            }
+
+                            if (signed_length < 0) {
+                                print_file_pos(&length_expr->pos);
+                                printf("Can't use negative array length %i\n", signed_length);
+                                return false;
+                            }
+                        }
+
+                        type = get_array_type(info->context, type->array.of, length);
+                    } else {
+                        assert(false);
+                    }
+                }
+
+                if (type->flags & TYPE_FLAG_UNRESOLVED_CHILD) {
+                    Prefix* new = arena_new(&info->context->stack, Prefix);
+                    new->kind = PREFIX_ARRAY;
+                    new->array_length = type->array.length;
+                    new->link = prefix;
+                    prefix = new;
+
+                    type = type->array.of;
+                } else {
+                    done = true;
+                }
             } break;
 
             case TYPE_UNRESOLVED_NAME: {
-                Type *new = parse_user_type_name(context, type->unresolved_name);
+                assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
+                assert(type->flags & TYPE_FLAG_UNRESOLVED);
+
+                Type *new = parse_user_type_name(info->context, type->unresolved_name);
 
                 if (new == null) {
-                    u8* name_string = string_table_access(context->string_table, type->unresolved_name);
+                    u8* name_string = string_table_access(info->context->string_table, type->unresolved_name);
                     print_file_pos(pos);
                     printf("No such type: '%s'\n", name_string);
                     return false;
@@ -5939,19 +6040,22 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
             } break;
 
             case TYPE_FN_POINTER: {
+                assert(type->flags & TYPE_FLAG_UNRESOLVED_CHILD);
+                assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
+
                 Fn_Signature signature = type->fn_signature;
 
                 for (u32 p = 0; p < signature.param_count; p += 1) {
-                    if (!resolve_type(context, &signature.params[p].type, pos)) {
+                    if (!resolve_type(info, &signature.params[p].type, pos)) {
                         return false;
                     }
                 }
 
-                if (!resolve_type(context, &signature.return_type, pos)) {
+                if (!resolve_type(info, &signature.return_type, pos)) {
                     return false;
                 }
 
-                type = fn_signature_canonicalize(context, &signature);
+                type = fn_signature_canonicalize(info->context, &signature);
                 done = true;
             } break;
 
@@ -5963,13 +6067,13 @@ bool resolve_type(Context *context, Type **type_slot, File_Pos *pos) {
 
     while (prefix != null) {
         switch (prefix->kind) {
-            case PREFIX_POINTER: type = get_pointer_type(context, type); break;
-            case PREFIX_ARRAY:   type = get_array_type(context, type, prefix->array_length); break;
+            case PREFIX_POINTER: type = get_pointer_type(info->context, type); break;
+            case PREFIX_ARRAY:   type = get_array_type(info->context, type, prefix->array_length); break;
         }
         prefix = prefix->link;
     }
 
-    arena_stack_pop(&context->stack);
+    arena_stack_pop(&info->context->stack);
 
     *type_slot = type;
     return true;
@@ -6025,12 +6129,6 @@ bool find_var_in_scope(Typecheck_Info *info, u32 name_index, File_Pos *pos, u32 
     return true;
 }
 
-
-typedef enum Typecheck_Expr_Result {
-    TYPECHECK_EXPR_STRONG,
-    TYPECHECK_EXPR_WEAK , // Used for e.g. integer literals, which can solidify to any integer type
-    TYPECHECK_EXPR_BAD,
-} Typecheck_Expr_Result;
 
 Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
     bool strong = true;
@@ -6150,7 +6248,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 expr->type = solidify_to;
             }
 
-            if (!resolve_type(info->context, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
             switch (expr->type->kind) {
                 case TYPE_ARRAY: {
@@ -6584,7 +6682,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_CAST: {
-            if (!resolve_type(info->context, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
             if (typecheck_expr(info, expr->cast_from, expr->type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
             Type_Kind from = expr->cast_from->type->kind;
@@ -6745,7 +6843,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
 
         case EXPR_TYPE_INFO_OF_TYPE: {
-            if (!resolve_type(info->context, &expr->type_info_of_type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, &expr->type_info_of_type, &expr->pos)) return TYPECHECK_EXPR_BAD;
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
@@ -6754,7 +6852,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_QUERY_TYPE_INFO: {
-            if (!resolve_type(info->context, &expr->query_type_info.type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, &expr->query_type_info.type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
             if (
                 expr->query_type_info.query == QUERY_TYPE_INFO_ENUM_LENGTH &&
@@ -6787,7 +6885,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         default: assert(false);
     }
 
-    if (!resolve_type(info->context, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+    if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
     // Autocast from '*void' to any other pointer kind
     if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && (solidify_to->kind == TYPE_POINTER || solidify_to->kind == TYPE_FN_POINTER)) {
@@ -6867,7 +6965,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 }
             } else {
                 assert(var->type != null);
-                if (!resolve_type(info->context, &var->type, &var->declaration_pos)) {
+                if (!resolve_type(info, &var->type, &var->declaration_pos)) {
                     good_types = false;
                 }
             }
@@ -6988,12 +7086,6 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
     return true;
 }
-
-typedef enum Eval_Result {
-    EVAL_OK,
-    EVAL_BAD,
-    EVAL_DO_AT_RUNTIME,
-} Eval_Result;
 
 // NB This will allocate on context->stack, push/pop before/after
 Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into) {
@@ -7476,7 +7568,7 @@ bool typecheck(Context *context) {
                         File_Pos* member_pos = &type->structure.members[m].declaration_pos;
                         Type* member_type = type->structure.members[m].type;
 
-                        if (!resolve_type(context, &member_type, member_pos)) {
+                        if (!resolve_type(&info, &member_type, member_pos)) {
                             valid = false;
                             break;
                         }
@@ -7610,10 +7702,8 @@ bool typecheck(Context *context) {
 
     // Functions
     buf_foreach (Fn, fn, context->fns) {
-        if (fn->signature_type->flags & TYPE_FLAG_UNRESOLVED) {
-            if (!resolve_type(context, &fn->signature_type, &fn->declaration_pos)) {
-                valid = false;
-            }
+        if (!resolve_type(&info, &fn->signature_type, &fn->declaration_pos)) {
+            valid = false;
         }
 
         fn->signature = &fn->signature_type->fn_signature;
@@ -7627,11 +7717,9 @@ bool typecheck(Context *context) {
 
         bool resolved_type = global->var.type != null;
 
-        if (global->var.type != null && global->var.type->flags & TYPE_FLAG_UNRESOLVED) {
-            if (!resolve_type(context, &global->var.type, &global->var.declaration_pos)) {
-                valid = false;
-                continue;
-            }
+        if (global->var.type != null && !resolve_type(&info, &global->var.type, &global->var.declaration_pos)) {
+            valid = false;
+            continue;
         }
 
         if (global->initial_expr != null) {
@@ -7740,13 +7828,13 @@ bool typecheck(Context *context) {
 
     // Function signatures
     buf_foreach (Type*, signature_type, context->fn_signatures) {
-        assert(!((*signature_type)->flags & TYPE_FLAG_UNRESOLVED));
+        assert(!((*signature_type)->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)));
 
         Fn_Signature *signature = &((*signature_type)->fn_signature);
 
         for (u32 p = 0; p < signature->param_count; p += 1) {
             Type **type = &signature->params[p].type;
-            assert(!((*type)->flags & TYPE_FLAG_UNRESOLVED));
+            assert(!((*type)->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)));
 
             if (primitive_is_compound((*type)->kind)) {
                 u32 size = type_size_of(*type);
@@ -7760,7 +7848,7 @@ bool typecheck(Context *context) {
 
         if (signature->has_return) {
             Type **return_type = &signature->return_type;
-            assert(!((*return_type)->flags & TYPE_FLAG_UNRESOLVED));
+            assert(!((*return_type)->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)));
 
             if (primitive_is_compound((*return_type)->kind)) {
                 u32 size = type_size_of(*return_type);
