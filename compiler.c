@@ -3318,16 +3318,25 @@ Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
 
     type->structure.members = (void*) arena_alloc(&context->arena, type->structure.member_count * sizeof(*type->structure.members));
 
+    bool unresolved_members = false;
+
     Member* m = first;
     for (u32 i = 0; i < type->structure.member_count; i += 1, m = m->next) {
         type->structure.members[i].name = m->name;
         type->structure.members[i].type = m->type;
         type->structure.members[i].declaration_pos = m->pos;
+
+        if (m->type->flags & (TYPE_FLAG_UNRESOLVED_CHILD|TYPE_FLAG_UNRESOLVED)) {
+            unresolved_members = true;
+        }
     }
 
     arena_stack_pop(&context->stack);
 
     type->flags |= TYPE_FLAG_SIZE_NOT_COMPUTED;
+    if (unresolved_members) {
+        type->flags |= TYPE_FLAG_UNRESOLVED_CHILD;
+    }
 
     *length = t - t_start;
 
@@ -6135,6 +6144,21 @@ bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
                 done = true;
             } break;
 
+            case TYPE_STRUCT: {
+                assert(type->flags & TYPE_FLAG_UNRESOLVED_CHILD);
+                assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
+
+                for (u32 m = 0; m < type->structure.member_count; m += 1) {
+                    if (!resolve_type(info, &type->structure.members[m].type, pos)) {
+                        return false;
+                    }
+                }
+
+                type->flags &= ~TYPE_FLAG_UNRESOLVED_CHILD;
+
+                done = true;
+            } break;
+
             default: assert(false);
         }
 
@@ -7213,7 +7237,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                 }
 
             } else {
-                Type* expected_type = info->fn->signature->return_type;
+                Type *expected_type = info->fn->signature->return_type;
 
                 if (stmt->return_stmt.value == null) {
                     u8* name = string_table_access(info->context->string_table, info->fn->name);
@@ -7740,7 +7764,7 @@ bool typecheck(Context *context) {
 
                     for (u32 m = 0; m < type->structure.member_count; m += 1) {
                         File_Pos* member_pos = &type->structure.members[m].declaration_pos;
-                        Type* member_type = type->structure.members[m].type;
+                        Type *member_type = type->structure.members[m].type;
 
                         if (!resolve_type(&info, &member_type, member_pos)) {
                             valid = false;
