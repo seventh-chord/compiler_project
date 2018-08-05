@@ -1113,10 +1113,11 @@ typedef struct Token {
         TOKEN_BRACKET_SQUARE_CLOSE = ']',
         TOKEN_BRACKET_CURLY_OPEN   = '{',
         TOKEN_BRACKET_CURLY_CLOSE  = '}',
-        TOKEN_SEMICOLON = ';',
-        TOKEN_COMMA     = ',',
-        TOKEN_DOT       = '.',
-        TOKEN_COLON     = ':',
+        TOKEN_SEMICOLON    = ';',
+        TOKEN_COMMA        = ',',
+        TOKEN_DOT          = '.',
+        TOKEN_COLON        = ':',
+        TOKEN_QUESTIONMARK = '?',
 
         TOKEN_ADD = '+',
         TOKEN_SUB = '-',
@@ -1233,6 +1234,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_SEMICOLON]            = "a semicolon ';'",
     [TOKEN_COMMA]                = "a comma ','",
     [TOKEN_COLON]                = "a colon ':'",
+    [TOKEN_QUESTIONMARK]         = "a question mark '?'",
     [TOKEN_STATIC_ACCESS]        = "::",
     [TOKEN_RANGE]                = "..",
 
@@ -1572,8 +1574,9 @@ typedef enum Expr_Kind {
     EXPR_LITERAL,
     EXPR_STRING_LITERAL,
     EXPR_COMPOUND,
-    EXPR_BINARY,
     EXPR_UNARY,
+    EXPR_BINARY,
+    EXPR_TERNARY, // <foo>? <bar> : <baz>
     EXPR_CALL,
     EXPR_CAST,
     EXPR_SUBSCRIPT,
@@ -1620,14 +1623,20 @@ struct Expr { // 'typedef'd earlier!
         } compound;
 
         struct {
+            Unary_Op op;
+            Expr *inner;
+        } unary;
+
+        struct {
             Binary_Op op;
             Expr *left, *right;
         } binary;
 
         struct {
-            Unary_Op op;
-            Expr *inner;
-        } unary;
+            Expr *condition;
+            Expr *left, *right;
+        } ternary;
+
 
         struct {
             bool pointer_call; // if true, we try to call a function at runtime computed address
@@ -2514,6 +2523,16 @@ void print_expr(Context *context, Fn* fn, Expr* expr) {
             printf("(");
             print_expr(context, fn, expr->binary.left);
             printf(" %s ", BINARY_OP_SYMBOL[expr->binary.op]);
+            print_expr(context, fn, expr->binary.right);
+            printf(")");
+        } break;
+
+        case EXPR_TERNARY: {
+            printf("(");
+            print_expr(context, fn, expr->ternary.condition);
+            printf("? ");
+            print_expr(context, fn, expr->binary.left);
+            printf(" : ");
             print_expr(context, fn, expr->binary.right);
             printf(")");
         } break;
@@ -3663,8 +3682,12 @@ void shunting_yard_collapse(Context *context, Shunting_Yard* yard) {
     expr->binary.right = yard->expr_queue[yard->expr_queue_index - 1];
     expr->binary.left = yard->expr_queue[yard->expr_queue_index - 2];
     expr->pos = expr->binary.left->pos;
+
     yard->op_queue_index -= 1;
+
     yard->expr_queue_index -= 2;
+    yard->expr_queue[yard->expr_queue_index + 1] = null;
+    yard->expr_queue[yard->expr_queue_index + 2] = null;
 
     expr->pos = expr->binary.left->pos;
 
@@ -3866,7 +3889,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                 case TOKEN_BRACKET_ROUND_OPEN: {
                     t += 1;
                     u32 inner_length = 0;
-                    Expr* inner = parse_expr(context, t, &inner_length, stop_on_open_curly);
+                    Expr* inner = parse_expr(context, t, &inner_length, false);
                     t += inner_length;
 
                     if (inner == null) {
@@ -3944,11 +3967,12 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
             }
         } else {
             switch (t->kind) {
+                // Index an array
                 case TOKEN_BRACKET_SQUARE_OPEN: {
                     t += 1;
 
                     u32 index_length = 0;
-                    Expr *index = parse_expr(context, t, &index_length, stop_on_open_curly);
+                    Expr *index = parse_expr(context, t, &index_length, false);
                     t += index_length;
 
                     if (index == null) {
@@ -3968,6 +3992,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     could_parse = true;
                 } break;
 
+                // Call a function pointer
                 case TOKEN_BRACKET_ROUND_OPEN: {
                     t += 1;
 
@@ -3986,6 +4011,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     could_parse = true;
                 } break;
 
+                // Access a structure member
                 case TOKEN_DOT: {
                     t += 1;
 
@@ -4008,6 +4034,8 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
 
                 // End of expression
                 case TOKEN_SEMICOLON:
+                case TOKEN_COLON:
+                case TOKEN_QUESTIONMARK:
                 case TOKEN_COMMA:
                 case ')': case ']': case '}':
                 case TOKEN_ASSIGN:
@@ -4087,9 +4115,46 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
         shunting_yard_collapse(context, yard);
     }
     assert(yard->expr_queue_index == 1);
-    Expr* expr = yard->expr_queue[0];
+    Expr *expr = yard->expr_queue[0];
 
     arena_stack_pop(&context->stack);
+
+
+    // Ternary operator, which has really low precedence
+    if (t->kind == TOKEN_QUESTIONMARK) {
+        t += 1;
+
+        u32 left_length = 0;
+        Expr *left = parse_expr(context, t, &left_length, false);
+        t += left_length;
+        if (left == null) {
+            *length = t - t_start;
+            return null;
+        }
+
+        if (!expect_single_token(context, t, TOKEN_COLON, "between alternatives of ternary operator")) {
+            *length = t - t_start;
+            return null;
+        }
+        t += 1;
+
+        u32 right_length = 0;
+        Expr *right = parse_expr(context, t, &right_length, false);
+        t += right_length;
+        if (right == null) {
+            *length = t - t_start;
+            return null;
+        }
+
+        Expr *ternary = arena_new(&context->arena, Expr);
+        ternary->kind = EXPR_TERNARY;
+        ternary->pos = expr->pos;
+        ternary->ternary.condition = expr;
+        ternary->ternary.left = left;
+        ternary->ternary.right = right;
+
+        expr = ternary;
+    }
 
     *length = t - t_start;
     return expr;
@@ -5755,6 +5820,11 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             buf_push(tokens, ((Token) { TOKEN_SEMICOLON, .pos = file_pos }));
         } break;
 
+        case '?': {
+            i += 1;
+            buf_push(tokens, ((Token) { TOKEN_QUESTIONMARK, .pos = file_pos }));
+        } break;
+
         case '\n':
         case '\r': {
             i += 1;
@@ -6490,6 +6560,49 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                     return TYPECHECK_EXPR_BAD;
                 } break;
             }
+        } break;
+
+        case EXPR_TERNARY: {
+            Typecheck_Expr_Result condition_result, left_result, right_result;
+
+            Type *type_bool = &info->context->primitive_types[TYPE_BOOL];;
+            condition_result = typecheck_expr(info, expr->ternary.condition, type_bool);
+            if (condition_result == TYPECHECK_EXPR_BAD) {
+                return TYPECHECK_EXPR_BAD;
+            }
+
+
+            left_result = typecheck_expr(info, expr->ternary.left, solidify_to);
+            right_result = typecheck_expr(info, expr->ternary.right, solidify_to);
+
+            if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD) {
+                return TYPECHECK_EXPR_BAD;
+            }
+
+            if (expr->ternary.left->type != expr->ternary.right->type) {
+                if (right_result == TYPECHECK_EXPR_WEAK ) {
+                    right_result = typecheck_expr(info, expr->ternary.right, expr->ternary.left->type);
+                } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
+                    left_result = typecheck_expr(info, expr->ternary.left, expr->ternary.right->type);
+                }
+            }
+
+            assert(left_result != TYPECHECK_EXPR_BAD && right_result != TYPECHECK_EXPR_BAD);
+            if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_WEAK ) {
+                strong = false;
+            }
+
+            if (expr->ternary.left->type != expr->ternary.right->type) {
+                print_file_pos(&expr->pos);
+                printf("Different types for halves of ternary operator: ");
+                print_type(info->context, expr->ternary.left->type);
+                printf(" vs ");
+                print_type(info->context, expr->ternary.right->type);
+                printf("\n");
+                return TYPECHECK_EXPR_BAD;
+            }
+
+            expr->type = expr->ternary.left->type;
         } break;
 
         case EXPR_BINARY: {
@@ -7440,6 +7553,11 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
                 }
             }
 
+            return EVAL_OK;
+        } break;
+
+        case EXPR_TERNARY: {
+            unimplemented(); // TODO TODO TODO :ternary
             return EVAL_OK;
         } break;
 
@@ -9984,6 +10102,12 @@ u32 machinecode_expr_reserves(Expr *expr) {
             }
         } break;
 
+        case EXPR_TERNARY: {
+            flags |= machinecode_expr_reserves(expr->ternary.condition);
+            flags |= machinecode_expr_reserves(expr->ternary.left);
+            flags |= machinecode_expr_reserves(expr->ternary.right);
+        } break;
+
         case EXPR_BINARY: {
             if (expr->binary.op == BINARY_MUL || expr->binary.op == BINARY_DIV || expr->binary.op == BINARY_MOD) {
                 if (primitive_is_integer(primitive_of(expr->type))) {
@@ -10295,6 +10419,28 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             }
 
             register_allocator_leave_frame(context, reg_allocator);
+        } break;
+
+        case EXPR_TERNARY: {
+            register_allocator_enter_frame(context, reg_allocator);
+            Register condition_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0);
+            machinecode_for_expr(context, fn, expr->ternary.condition, reg_allocator, x64_place_reg(condition_reg));
+            instruction_cmp_imm(context, x64_place_reg(condition_reg), 0, 1);
+            register_allocator_leave_frame(context, reg_allocator);
+
+            u64 jcc_offset = instruction_jcc(context, COND_E, 1);
+            machinecode_for_expr(context, fn, expr->ternary.left, reg_allocator, place);
+            u64 jmp_offset = instruction_jmp(context, 1);
+            u64 jcc_to = buf_length(context->seg_text);
+            machinecode_for_expr(context, fn, expr->ternary.right, reg_allocator, place);
+            u64 jmp_to = buf_length(context->seg_text);
+
+            i64 jcc_by = jcc_to - (jcc_offset + sizeof(i8));
+            i64 jmp_by = jmp_to - (jmp_offset + sizeof(i8));
+            assert(jcc_by >= 0 && jcc_by <= I8_MAX);
+            assert(jmp_by >= 0 && jmp_by <= I8_MAX); // TODO If this fails rewrite code but with a 32 bit jump
+            context->seg_text[jcc_offset] = (i8) jcc_by;
+            context->seg_text[jmp_offset] = (i8) jcc_by;
         } break;
 
         case EXPR_BINARY: {
