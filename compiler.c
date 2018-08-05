@@ -7045,34 +7045,42 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
             bool good_types = true;
 
-            if (right != null) {
-                Type* resolve_to = var->type;
-                if (resolve_to == null) resolve_to = &info->context->primitive_types[TYPE_VOID];
-
-                if (typecheck_expr(info, right, resolve_to) != TYPECHECK_EXPR_BAD) {
-                    if (var->type == null) {
-                        var->type = right->type;
-                    } else {
-                        if (!type_can_assign(var->type, right->type)) {
-                            print_file_pos(&stmt->pos);
-                            printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                            print_type(info->context, var->type);
-                            printf(" but got ");
-                            print_type(info->context, right->type);
-                            printf("\n");
-                            good_types = false;
-                        }
-                    }
-                } else {
-                    if (var->type == null) {
-                        var->type = right->type;
-                    }
-                    good_types = false;
-                }
-            } else {
-                assert(var->type != null);
+            if (var->type != null) {
                 if (!resolve_type(info, &var->type, &var->declaration_pos)) {
                     good_types = false;
+                }
+            }
+
+            if (good_types) {
+                if (right != null) {
+                    Type* resolve_to = var->type;
+                    if (resolve_to == null) resolve_to = &info->context->primitive_types[TYPE_VOID];
+
+                    if (typecheck_expr(info, right, resolve_to) != TYPECHECK_EXPR_BAD) {
+                        if (var->type == null) {
+                            var->type = right->type;
+                        } else {
+                            if (!type_can_assign(var->type, right->type)) {
+                                print_file_pos(&stmt->pos);
+                                printf("Right hand side of variable declaration doesn't have correct type. Expected ");
+                                print_type(info->context, var->type);
+                                printf(" but got ");
+                                print_type(info->context, right->type);
+                                printf("\n");
+                                good_types = false;
+                            }
+                        }
+                    } else {
+                        if (var->type == null) {
+                            var->type = right->type;
+                        }
+                        good_types = false;
+                    }
+                } else {
+                    assert(var->type != null);
+                    if (!resolve_type(info, &var->type, &var->declaration_pos)) {
+                        good_types = false;
+                    }
                 }
             }
 
