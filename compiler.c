@@ -9769,6 +9769,23 @@ void machinecode_lea(Context *context, Reg_Allocator *reg_allocator, X64_Address
     }
 }
 
+void machinecode_zero_out_struct(Context *context, Reg_Allocator *reg_allocator, X64_Address address, u64 size, u64 align) {
+    if (size != align || size > 8) {
+        register_allocator_enter_frame(context, reg_allocator);
+
+        register_allocate_specific(context, reg_allocator, RAX);
+        register_allocate_specific(context, reg_allocator, RCX);
+
+        instruction_lea(context, address, RAX);
+        instruction_mov_imm_reg(context, RCX, size, POINTER_SIZE);
+        instruction_call(context, true, RUNTIME_BUILTIN_MEM_CLEAR);
+
+        register_allocator_leave_frame(context, reg_allocator);
+    } else {
+        machinecode_immediate_to_place(context, reg_allocator, x64_place_address(address), 0, (u8) size);
+    }
+}
+
 
 u32 machinecode_expr_reserves(Expr *expr) {
     u32 flags = 0;
@@ -10072,6 +10089,12 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 } break;
 
                 case TYPE_STRUCT: {
+                    if (expr->compound.count != expr->type->structure.member_count) {
+                        u64 size = type_size_of(expr->type);
+                        u64 align = type_align_of(expr->type);
+                        machinecode_zero_out_struct(context, reg_allocator, place.address, size, align);
+                    }
+
                     for (u32 i = 0; i < expr->compound.count; i += 1) {
                         assert(expr->compound.content[i].name_mode != EXPR_COMPOUND_UNRESOLVED_NAME);
 
@@ -11137,20 +11160,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             X64_Address address = reg_allocator->var_mem_infos[stmt->declaration.var_index].address;
 
             if (stmt->declaration.right == null) {
-                if (size != align || size > 8) {
-                    register_allocator_enter_frame(context, reg_allocator);
-
-                    register_allocate_specific(context, reg_allocator, RAX);
-                    register_allocate_specific(context, reg_allocator, RCX);
-
-                    instruction_lea(context, address, RAX);
-                    instruction_mov_imm_reg(context, RCX, size, POINTER_SIZE);
-                    instruction_call(context, true, RUNTIME_BUILTIN_MEM_CLEAR);
-
-                    register_allocator_leave_frame(context, reg_allocator);
-                } else {
-                    machinecode_immediate_to_place(context, reg_allocator, x64_place_address(address), 0, (u8) size);
-                }
+                machinecode_zero_out_struct(context, reg_allocator, address, size, align);
             } else {
                 machinecode_for_expr(context, fn, stmt->declaration.right, reg_allocator, x64_place_address(address));
             }

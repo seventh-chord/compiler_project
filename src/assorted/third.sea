@@ -106,7 +106,6 @@ fn crash() -> bool {
 
 fn perform() {
     let stage = Stage {};
-    // TODO why is there no memclear here???
     stage.on[Names::Dirk]  = true;
     stage.on[Names::Pratt] = true;
     stage.on[Names::Lerxt] = true;
@@ -118,7 +117,7 @@ fn perform() {
     }
 }
 
-enum Names(i8) { Dirk = -1, Pratt = 1, Lerxt }
+enum Names(i8) { Dirk, Pratt, Lerxt }
 
 struct Stage {
     on: [enum_length(Names)]bool;
