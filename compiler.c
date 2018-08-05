@@ -6445,17 +6445,55 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                         if (primitive == TYPE_POINTER || primitive == TYPE_BOOL || primitive == TYPE_FN_POINTER) valid_types = false;
                     }
                 }
-            } else if (expr->binary.op == BINARY_LOGICAL_AND || expr->binary.op == BINARY_LOGICAL_OR) {
-                Type *type_bool = &info->context->primitive_types[TYPE_BOOL];
-                valid_types = expr->binary.left->type == type_bool && expr->binary.right->type == type_bool;
-                expr->type = type_bool;
             } else {
-                if (expr->binary.left->type == expr->binary.right->type && (primitive_is_integer(expr->binary.left->type->kind) || primitive_is_float(expr->binary.left->type->kind))) {
+                if (expr->binary.left->type == expr->binary.right->type) {
                     expr->type = expr->binary.left->type;
-                    valid_types = true;
+                    Type_Kind kind = expr->type->kind;
+                    Binary_Op op = expr->binary.op;
 
-                    if (expr->binary.op == BINARY_MOD && primitive_is_float(expr->binary.left->type->kind)) {
-                        valid_types = false;
+                    enum {
+                        INT,
+                        POINTER,
+                        FLOAT,
+                        BOOL,
+                        GROUP_COUNT,
+                    } group;
+
+                    switch (kind) {
+                        case TYPE_BOOL:
+                            group = BOOL; break;
+
+                        case TYPE_U8: case TYPE_U16: case TYPE_U32: case TYPE_U64:
+                        case TYPE_I8: case TYPE_I16: case TYPE_I32: case TYPE_I64:
+                            group = INT; break;
+
+                        case TYPE_F32: case TYPE_F64:
+                            group = FLOAT; break;
+
+                        case TYPE_POINTER: case TYPE_FN_POINTER:
+                            group = POINTER; break;
+                    }
+
+                    bool VALIDITY_MAP[BINARY_OP_COUNT][GROUP_COUNT] = {
+                                       /* int   ptr    float  bool */
+                        [BINARY_ADD] = { true,  false, true,  false },
+                        [BINARY_SUB] = { true,  true,  true,  false },
+                        [BINARY_DIV] = { true,  false, true,  false },
+                        [BINARY_MUL] = { true,  false, true,  false },
+                        [BINARY_MOD] = { true,  false, false, false },
+
+                        [BINARY_AND] = { true,  true,  false, true  },
+                        [BINARY_OR]  = { true,  true,  false, true  },
+                        [BINARY_XOR] = { true,  true,  false, true  },
+
+                        [BINARY_LOGICAL_AND] = { false, false, false, true },
+                        [BINARY_LOGICAL_OR]  = { false, false, false, true },
+                    };
+
+                    valid_types = VALIDITY_MAP[op][group];
+
+                    if (group == POINTER && op == BINARY_SUB) {
+                        expr->type = &info->context->primitive_types[TYPE_POINTER_DIFF];
                     }
                 // Special-case pointer-pointer arithmetic
                 } else {
@@ -6469,13 +6507,6 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                         }
                         if ((left_kind == TYPE_U64 || left_kind == TYPE_I64) && right_kind == TYPE_POINTER) {
                             expr->type = expr->binary.right->type;
-                            valid_types = true;
-                        }
-                    }
-
-                    if (expr->binary.op == BINARY_SUB) {
-                        if (left_kind == TYPE_POINTER && right_kind == TYPE_POINTER) {
-                            expr->type = &info->context->primitive_types[TYPE_POINTER_DIFF];
                             valid_types = true;
                         }
                     }

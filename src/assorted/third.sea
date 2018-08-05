@@ -91,6 +91,19 @@ fn boolean_funkyness() {
     let a = 7;
     if (a < 8 || crash()) {}
     if (a < 5 && crash()) { print("Short circuiting broke slightly\n"); }
+
+    if (funky_a() & funky_b()) {
+        print("This is wrong\n");
+    }
+}
+
+fn funky_a() -> bool {
+    print("I like soul, ");
+    return false;
+}
+fn funky_b() -> bool {
+    print("with a captial S\n");
+    return true;
 }
 
 fn crash() -> bool {
