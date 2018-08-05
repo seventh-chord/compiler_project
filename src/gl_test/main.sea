@@ -1,0 +1,333 @@
+
+fn main() {
+    open_window();
+    //set_vsync(true);
+    
+    Sleep(1000);
+
+    close_window();
+    ExitProcess(0);
+}
+
+let wgl_swap_function: wglSwapIntervalEXT_Type;
+let window_handle: Handle;
+let gl_context: Handle;
+
+fn open_window() {
+    print("Creating window and initializing OpenGL\n");
+
+    let class_name  = "help im trapped in a window class factory";
+    let window_name = "Sea window test";
+
+    let instance = GetModuleHandleA(null);
+
+    let window_class_description = Window_Class {
+        style: 32, // CS_OWNDC
+        window_procedure: &event_callback,
+        instance: instance,
+        class_name: class_name.data,
+    };
+    let window_class = RegisterClassA(&window_class_description);
+    assert(window_class != 0, "Failed to register window class");
+
+    window_handle = CreateWindowExA(
+        0, class_name.data, window_name.data,
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        null, null, instance, null
+    );
+    assert(window_handle != null, "Couldn't open window");
+
+    let device_context = GetDC(window_handle);
+    let pixel_format_description = Pixel_Format_Descriptor {
+        size: u16(size_of(Pixel_Format_Descriptor)),
+        version: 1,
+        flags: PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+        pixel_type: PFD_TYPE_RGBA,
+        color_bits: 24,
+        alpha_bits: 8,
+        layer_type: PFD_MAIN_PLANE,
+    };
+    let i = ChoosePixelFormat(device_context, &pixel_format_description);
+    assert(SetPixelFormat(device_context, i, &pixel_format_description) != 0, "Couldn't set pixel format");
+
+    let gl32_lib = LoadLibraryA("opengl32.dll".data);
+    assert(gl32_lib != null, "Couldn't load opengl32.dll");
+
+    let legacy_gl_context = wglCreateContext(device_context);
+    wglMakeCurrent(device_context, legacy_gl_context);
+
+    let has_extensions: [enum_length(WGL_Extensions)]bool;
+    {
+        let wglGetExtensionsStringARB = cast(wglGetExtensionsStringARB_Type, get_gl_proc_address(gl32_lib, "wglGetExtensionsStringARB".data));
+        assert(wglGetExtensionsStringARB != null, "WGL_ARB_extensions_string is not supported");
+        let extensions = wglGetExtensionsStringARB(device_context);
+
+        let substring = extensions;
+        let length = 0;
+        for (*extensions != 0) {
+            if (*extensions == ' ') {
+                let string = String { substring, length };
+
+                for e : 0..enum_length(WGL_Extensions) {
+                    let extension_name = enum_member_name(cast(WGL_Extensions, e));
+                    if string_cmp(extension_name, string) {
+                        has_extensions[e] = true;
+                    }
+                }
+
+                for (*extensions == ' ') { extensions += 1; }
+
+                substring = extensions;
+                length = 0;
+            } else {
+                extensions += 1;
+                length += 1;
+            }
+        }
+
+        print("Detected GL extensions: ");
+        for f : 0..enum_length(WGL_Extensions) {
+            if (has_extensions[f]) {
+                if f > 0 { print(", "); }
+                print(enum_member_name(cast(WGL_Extensions, f)));
+            }
+        }
+        print("\n");
+    }
+
+    assert(
+        has_extensions[WGL_Extensions::WGL_ARB_create_context] && has_extensions[WGL_Extensions::WGL_ARB_create_context_profile],
+        "Missing extensions WGL_ARB_create_context or WGL_ARB_create_context_profile",
+    );
+    let wglCreateContextAttribsARB = cast(wglCreateContextAttribsARB_Type, get_gl_proc_address(gl32_lib, "wglCreateContextAttribsARB".data));
+
+    let context_attributes = [9]i32 {
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+        WGL_CONTEXT_FLAGS_ARB, 0,
+        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+        0,
+    };
+    gl_context = wglCreateContextAttribsARB(device_context, null, &context_attributes);
+    assert(gl_context != null, "Could not create modern GL context.");
+
+    wglDeleteContext(legacy_gl_context);
+    wglMakeCurrent(device_context, gl_context);
+
+    wgl_swap_function = null;
+    if has_extensions[WGL_Extensions::WGL_EXT_swap_control] {
+        wgl_swap_function = cast(wglSwapIntervalEXT_Type, get_gl_proc_address(gl32_lib, "wglSwapIntervalEXT".data));
+        assert(wgl_swap_function != null, "No wglSwapIntervalEXT, even though WGL_EXT_swap_control is supported");
+    }
+
+    // TODO load opengl functions
+
+    print("Showing window!\n");
+    ShowWindow(window_handle, SW_SHOW);
+}
+
+fn close_window() {
+    wglDeleteContext(gl_context);
+    DestroyWindow(window_handle);
+}
+
+fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
+    // TODO
+    return DefWindowProcA(window, message, w, l);
+}
+
+
+fn set_vsync(vsync: bool) {
+    if wgl_swap_function != null {
+        wgl_swap_function(vsync? 1 : 0);
+    }
+}
+
+typedef Handle = *void;
+typedef Atom = u16;
+typedef Window_Procedure = *fn(window: Handle, a: u32, b: u64, c: i64) -> i64;
+
+struct Window_Class {
+    style: u32;
+    window_procedure: Window_Procedure;
+    cbClsExtra: i32;
+    cbWndExtra: i32;
+    instance: Handle;
+    icon: Handle;
+    cursor: Handle;
+    background: Handle;
+    menu_name: *u8;
+    class_name: *u8;
+}
+
+struct Pixel_Format_Descriptor {
+    size: u16;
+    version: u16;
+    flags: u32;
+    pixel_type: u8;
+    color_bits: u8;
+
+    red_bits,   red_shift: u8;
+    green_bits, green_shift: u8;
+    blue_bits,  blue_shift: u8;
+    alpha_bits, alpha_shift: u8;
+
+    accum_bits: u8;
+    accum_red_bits: u8;
+    accum_green_bits: u8;
+    accum_blue_bits: u8;
+    accum_alpha_bits: u8;
+
+    depth_bits: u8;
+    stencil_bits: u8;
+
+    aux_buffers: u8;
+    layer_type: u8;
+    reserved: u8;
+    layer_mask: u32;
+    visible_mask: u32;
+    damage_mask: u32;
+}
+
+extern "kernel32.lib" {
+    fn ExitProcess(exit_code: u32);
+    fn GetStdHandle(key: u32) -> u64;
+    fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
+    fn GetProcessHeap() -> u64;
+    fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> *void;
+    fn GetModuleHandleA(name: *u8) -> Handle;
+    fn LoadLibraryA(name: *u8) -> Handle;
+    fn GetProcAddress(library: Handle, name: *u8) -> *fn();
+    fn Sleep(millis: u32);
+}
+
+extern "user32.lib" {
+    fn RegisterClassA(class: *Window_Class) -> Atom;
+    fn CreateWindowExA(
+        ex_style: u32,
+        class_name, window_name: *u8,
+        style: u32,
+        x, y, width, height: i32,
+        parent, menu, instance: Handle,
+        param: *void,
+    ) -> Handle;
+    fn GetDC(window: Handle) -> Handle;
+    fn DefWindowProcA(window: Handle, msg: u32, w: u64, l: i64) -> i64;
+    fn ShowWindow(window: Handle, cmd: i32) -> i32;
+    fn DestroyWindow(window: Handle) -> i32;
+}
+
+extern "gdi32.lib" {
+    fn ChoosePixelFormat(device_context: Handle, pfd: *Pixel_Format_Descriptor) -> i32;
+    fn SetPixelFormat(device_context: Handle, index: i32, pfd: *Pixel_Format_Descriptor) -> i32;
+}
+
+extern "opengl32.lib" {
+    fn wglCreateContext(device_context: Handle) -> Handle;
+    fn wglDeleteContext(gl_context: Handle) -> i32;
+    fn wglMakeCurrent(device_context: Handle, gl_context: Handle) -> i32;
+    fn wglGetProcAddress(name: *u8) -> *fn();
+}
+
+typedef wglGetExtensionsStringARB_Type  = *fn(device_context: Handle) -> *u8;
+typedef wglCreateContextAttribsARB_Type = *fn(device_context: Handle, gl_context: Handle, attributes: *i32) -> Handle;
+typedef wglSwapIntervalEXT_Type         = *fn(interval: i32) -> i32;
+
+let WS_OVERLAPPED: u32   = 0x00000000;
+let WS_CAPTION: u32      = 0x00C00000;
+let WS_SYSMENU: u32      = 0x00080000;
+let WS_THICKFRAME: u32   = 0x00040000;
+let WS_MINIMIZEBOX: u32  = 0x00020000;
+let WS_MAXIMIZEBOX: u32  = 0x00010000;
+let WS_POPUP: u32        = 0x80000000;
+let WS_CHILD: u32        = 0x40000000;
+let WS_MINIMIZE: u32     = 0x20000000;
+let WS_VISIBLE: u32      = 0x10000000;
+let WS_DISABLED: u32     = 0x08000000;
+let WS_CLIPSIBLINGS: u32 = 0x04000000;
+let WS_CLIPCHILDREN: u32 = 0x02000000;
+let WS_MAXIMIZE: u32     = 0x01000000;
+let WS_BORDER: u32       = 0x00800000;
+let WS_DLGFRAME: u32     = 0x00400000;
+let WS_VSCROLL: u32      = 0x00200000;
+let WS_HSCROLL: u32      = 0x00100000;
+let WS_GROUP: u32        = 0x00020000;
+let WS_TABSTOP: u32      = 0x00010000;
+let WS_OVERLAPPEDWINDOW  = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
+let CW_USEDEFAULT: i32   = 0x80000000;
+
+let PFD_DRAW_TO_WINDOW: u32 = 0x00000004;
+let PFD_SUPPORT_OPENGL: u32 = 0x00000020;
+let PFD_DOUBLEBUFFER: u32   = 0x00000001;
+let PFD_TYPE_RGBA: u8       = 0;
+let PFD_MAIN_PLANE: u8      = 0;
+
+let WGL_CONTEXT_MAJOR_VERSION_ARB:    i32 = 0x2091;
+let WGL_CONTEXT_MINOR_VERSION_ARB:    i32 = 0x2092;
+let WGL_CONTEXT_FLAGS_ARB:            i32 = 0x2094;
+let WGL_CONTEXT_PROFILE_MASK_ARB:     i32 = 0x9126;
+let WGL_CONTEXT_CORE_PROFILE_BIT_ARB: i32 = 0x00000001;
+
+let SW_HIDE: i32            = 0;
+let SW_SHOWNORMAL: i32      = 1;
+let SW_NORMAL: i32          = 1;
+let SW_SHOWMINIMIZED: i32   = 2;
+let SW_SHOWMAXIMIZED: i32   = 3;
+let SW_MAXIMIZE: i32        = 3;
+let SW_SHOWNOACTIVATE: i32  = 4;
+let SW_SHOW: i32            = 5;
+let SW_MINIMIZE: i32        = 6;
+let SW_SHOWMINNOACTIVE: i32 = 7;
+let SW_SHOWNA: i32          = 8;
+let SW_RESTORE: i32         = 9;
+let SW_SHOWDEFAULT: i32     = 10;
+let SW_FORCEMINIMIZE: i32   = 11;
+
+// TODO 'enum WGL_Extensions' and 'fn get_gl_proc_address' should be inline
+// in the main function which actually uses them.
+// NB this is only the subset of extensions I care about
+enum WGL_Extensions {
+    WGL_ARB_create_context,
+    WGL_ARB_create_context_profile,
+    WGL_EXT_swap_control
+}
+
+fn get_gl_proc_address(gl32_lib: Handle, name: *u8) -> *fn() {
+    let address = wglGetProcAddress(name);
+
+    let error_code = i64(address);
+    if (error_code >= -1 && error_code <= 3) {
+        address = GetProcAddress(gl32_lib, name);
+    }
+
+    return address;
+}
+
+fn string_cmp(a, b: String) -> bool {
+    if a.length != b.length { return false; }
+
+    for i : 0..a.length {
+        if a[i] != b[i] {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+let stdout_handle = GetStdHandle(u32(-11));
+fn print(string: String) {
+    let written: u32;
+    WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
+}
+
+fn assert(condition: bool, message: String) {
+    if (!condition) {
+        print("Assertion failed: ");
+        print(message);
+        print("\n");
+        ExitProcess(-1);
+    }
+}
