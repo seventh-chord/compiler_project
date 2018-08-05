@@ -102,9 +102,15 @@ fn funky_a() -> bool {
     return false;
 }
 fn funky_b() -> bool {
-    print("with a captial S\n");
+    if capital_what != 'S' {
+        print("but thats the wrong letter...");
+    } else {
+        print("with a capital S!");
+    }
+    print("\n");
     return true;
 }
+let capital_what = false? 'F' : 'S';
 
 fn crash() -> bool {
     print("Short circuiting is not working at all\n");

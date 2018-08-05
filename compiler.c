@@ -6068,7 +6068,7 @@ typedef enum Eval_Result {
 } Eval_Result;
 
 // NB This will allocate on context->stack, push/pop before/after
-Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_into);
+Eval_Result eval_compile_time_expr(Typecheck_Info *info, Expr *expr, u8 *result_into);
 
 typedef enum Typecheck_Expr_Result {
     TYPECHECK_EXPR_STRONG,
@@ -7557,8 +7557,12 @@ Eval_Result eval_compile_time_expr(Typecheck_Info* info, Expr* expr, u8* result_
         } break;
 
         case EXPR_TERNARY: {
-            unimplemented(); // TODO TODO TODO :ternary
-            return EVAL_OK;
+            u8 condition;
+            Eval_Result eval_result = eval_compile_time_expr(info, expr->ternary.condition, &condition);
+            if (eval_result != EVAL_OK) return eval_result;
+
+            Expr *inner = condition? expr->ternary.left : expr->ternary.right;
+            return eval_compile_time_expr(info, inner, result_into);
         } break;
 
         case EXPR_BINARY: {
