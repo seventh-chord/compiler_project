@@ -24,7 +24,7 @@ fn assert(condition: bool, error_message: String) {
 
 fn c_string_length(string: *u8) -> i64 {
     let length = 0;
-    for (*string != 0) {
+    for *string != 0 {
         length += 1;
         string = 1 + string;
     }
@@ -32,7 +32,7 @@ fn c_string_length(string: *u8) -> i64 {
 }
 
 fn mem_copy(src, dest: *u8, length: i64) {
-    for (length > 0) {
+    for length > 0 {
         *dest = *src;
         src += 1;
         dest += 1;
@@ -54,15 +54,15 @@ fn print_cstr(string: *u8) {
 fn print_u64(value: u64, base: u64) {
     let buffer: [30]u8;
 
-    if (value == 0) {
+    if value == 0 {
         buffer[0] = 0x30; // TODO character literals
     } else {
         let i: u64 = 0;
-        for (value > 0) {
+        for value > 0 {
             let char = u8(value % base);
             value = value / base; // TODO operator /=
 
-            if (char <= 9) {
+            if char <= 9 {
                 buffer[i] = 0x30 + char;
             } else {
                 buffer[i] = 0x61 + (char - 10);
@@ -72,7 +72,7 @@ fn print_u64(value: u64, base: u64) {
         i -= 1;
 
         let j: u64 = 0;
-        for (j < i) {
+        for j < i {
             let temp = buffer[j];
             buffer[j] = buffer[i];
             buffer[i] = temp;
@@ -95,8 +95,9 @@ fn nine() -> u16 { return 3 * 3; }
 fn main() {
     float_test(3.0, 0.1415);
 
-    //let nasty = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
-    //let nasty = [3]u8 { 1, 2, 3 }[2];
+    let nasty_1 = [3][3]u8 { { 1, 2, 3 }, { 4, 5, 6 }, { 7, 8, 9 } }[2][1];
+    let nasty_2 = [3]u8 { 1, 2, 3 }[2];
+    assert(nasty_1 == 8 && nasty_2 == 3, "Nasty");
 
     let bread_and_butter = [2]String { "bread\n", "butter\n" };
     print(bread_and_butter[0]);
@@ -108,8 +109,8 @@ fn main() {
     let ho = "Ho";
 
     let a: u8 = 10;
-    for (a > 0) {
-        if (a % 2 == 0) {
+    for a > 0 {
+        if a % 2 == 0 {
             print(hi);
         } else {
             print(ho);
@@ -120,11 +121,11 @@ fn main() {
 
     print("\n");
 
-    if (global) { print("Dude, "); }
+    if global { print("Dude, "); }
     sidewinder();
-    if (global) { print("thats not "); }
+    if global { print("thats not "); }
     sidewinder();
-    if (global) { print("nice\n"); }
+    if global { print("nice\n"); }
 
     print_u64(16045690984503098046, 16); print("\n");
     print_u64(u64(SEVEN), 10); print(", ");
@@ -221,7 +222,7 @@ fn test_fancy_casts() {
 
     print("0x");
     print_u64(u64(foo), 16);
-    if (foo != 0x6f59) {
+    if foo != 0x6f59 {
         print(" (Should be 0x6f59)");
     }
     print("\n");
@@ -250,8 +251,8 @@ fn is_prime(a: u64) -> bool {
     let is_prime = true;
 
     let b = a - 1;
-    for (b > 1) {
-        if (a % b == 0) {
+    for b > 1 {
+        if a % b == 0 {
             is_prime = false;
             break;
         }
@@ -266,7 +267,7 @@ fn no_escaping_mister_bones_wild_ride() -> u8 {
 }
 
 fn does_return_but_somewhat_sneakily() -> u8 {
-    if (true) {
+    if true {
         return 1;
     } else {
         return 2;
@@ -361,7 +362,7 @@ let HOW_LONG_BRO = enum_length(Direction);
 fn enum_test() {
     let kind = cast(Type_Kind, u64(DEFAULT_TYPE_KIND) + 1); // Hmm, this is a bit gnarly...
   
-    if (kind == Type_Kind::POINTER) {
+    if kind == Type_Kind::POINTER {
         print("Its pointy and sharp\n");
     } else {
         print("You don't know what that is\n");
@@ -375,8 +376,8 @@ fn enum_test() {
     print("!\n");
 
     let a = 0;
-    for (a < enum_length(Type_Kind)) {
-        if (a > 0) { print(", "); }
+    for a < enum_length(Type_Kind) {
+        if a > 0 { print(", "); }
 
         let invalid = cast(Type_Kind, a);
         print(enum_member_name(invalid));
@@ -447,7 +448,7 @@ struct Arena {
 }
 
 fn arena_new(arena: *Arena, size: i64) -> *u8 {
-    if (arena.data == null) {
+    if arena.data == null {
         arena.data = HeapAlloc(heap, 0, u64(ARENA_BLOCK_SIZE));
         arena.used = 0;
         arena.capacity = ARENA_BLOCK_SIZE;

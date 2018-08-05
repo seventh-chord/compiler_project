@@ -32,7 +32,7 @@ fn main() {
 
     n = down_the_rabbit_hole()()(n);
 
-    if (n != 10) {
+    if n != 10 {
         print("The callback DID NOT WORK\n");
     } else {
         print("The callback did work\n");
@@ -82,17 +82,17 @@ fn bitwise_funkyness() {
     let b = 2;
     let c = 4;
 
-    if (a|b != a+b) { print("Oof, bitwise is broken \n"); }
-    if (a&b != 0)   { print("Oof, bitwise is really broken \n"); }
-    if (2^3 != 1)   { print("Oof, bitwise is really really broken \n"); }
+    if a|b != a+b { print("Oof, bitwise is broken \n"); }
+    if a&b != 0   { print("Oof, bitwise is really broken \n"); }
+    if 2^3 != 1   { print("Oof, bitwise is really really broken \n"); }
 }
 
 fn boolean_funkyness() {
     let a = 7;
-    if (a < 8 || crash()) {}
-    if (a < 5 && crash()) { print("Short circuiting broke slightly\n"); }
+    if a < 8 || crash() {}
+    if a < 5 && crash() { print("Short circuiting broke slightly\n"); }
 
-    if (funky_a() & funky_b()) {
+    if funky_a() & funky_b() {
         print("This is wrong\n");
     }
 }
@@ -123,7 +123,7 @@ fn perform() {
     stage.on[Names::Pratt] = true;
     stage.on[Names::Lerxt] = true;
 
-    if (stage.on[Names::Dirk] && stage.on[Names::Pratt] && stage.on[Names::Lerxt]) {
+    if stage.on[Names::Dirk] && stage.on[Names::Pratt] && stage.on[Names::Lerxt] {
         print("A modern day warrior, mean mean stride, todays Tom Sawyer...\n");
     } else {
         print("Big bummer\n");

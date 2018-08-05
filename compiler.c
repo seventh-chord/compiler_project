@@ -2876,7 +2876,7 @@ Type *parse_user_type_name(Context *context, u32 name_index) {
 }
 
 Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn);
-Expr *parse_expr(Context *context, Token* t, u32* length);
+Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curly);
 Expr  *parse_compound(Context *context, Token* t, u32* length);
 Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count);
 Expr  *parse_call(Context *context, Token* t, u32* length);
@@ -2931,7 +2931,7 @@ Type *parse_type(Context *context, Token* t, u32* length) {
                     t += 1;
                 } else {
                     u32 length_expr_length;
-                    Expr *length_expr = parse_expr(context, t, &length_expr_length);
+                    Expr *length_expr = parse_expr(context, t, &length_expr_length, false);
                     t += length_expr_length;
                     if (length_expr == null) {
                         *length = t - t_start;
@@ -3655,7 +3655,7 @@ void shunting_yard_push_op(Context *context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
-Expr *parse_expr(Context *context, Token* t, u32* length) {
+Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curly) {
     Token* t_start = t;
 
     // NB: We only pop the stack if we succesfully parse. That is, for eroneous code we leak memory.
@@ -3671,91 +3671,86 @@ Expr *parse_expr(Context *context, Token* t, u32* length) {
         bool reached_end = false;
 
         if (expect_value) {
-            switch (t->kind) {
+            switch (t[0].kind) {
                 // Variable, function call, structure literal
                 case TOKEN_IDENTIFIER: {
                     File_Pos start_pos = t->pos;
 
                     u32 name_index = t->identifier_string_table_index;
 
-                    switch ((t + 1)->kind) {
-                        // Some call (either a function or a builtin)
-                        case TOKEN_BRACKET_ROUND_OPEN: {
-                            u32 call_length = 0;
-                            Expr* expr = parse_call(context, t, &call_length);
-                            t += call_length;
+                    // Some call (either a function or a builtin)
+                    if (t[1].kind == TOKEN_BRACKET_ROUND_OPEN) {
+                        u32 call_length = 0;
+                        Expr* expr = parse_call(context, t, &call_length);
+                        t += call_length;
 
-                            if (expr == null) {
-                                *length = t - t_start;
-                                return null;
-                            }
+                        if (expr == null) {
+                            *length = t - t_start;
+                            return null;
+                        }
 
-                            shunting_yard_push_expr(context, yard, expr);
-                        } break;
+                        shunting_yard_push_expr(context, yard, expr);
 
-                        // Structure literal
-                        case TOKEN_BRACKET_CURLY_OPEN: {
-                            File_Pos start_pos = t->pos;
+                    // Structure literal
+                    } else if (t[1].kind == TOKEN_BRACKET_CURLY_OPEN && !stop_on_open_curly) {
+                        File_Pos start_pos = t->pos;
 
-                            Type *type = parse_user_type_name(context, t->identifier_string_table_index);
-                            if (type == null) {
-                                type = arena_new(&context->arena, Type);
-                                type->kind = TYPE_UNRESOLVED_NAME;
-                                type->unresolved_name = t->identifier_string_table_index;
-                                type->flags |= TYPE_FLAG_UNRESOLVED;
-                            }
-                            t += 1;
+                        Type *type = parse_user_type_name(context, t->identifier_string_table_index);
+                        if (type == null) {
+                            type = arena_new(&context->arena, Type);
+                            type->kind = TYPE_UNRESOLVED_NAME;
+                            type->unresolved_name = t->identifier_string_table_index;
+                            type->flags |= TYPE_FLAG_UNRESOLVED;
+                        }
+                        t += 1;
 
-                            u32 struct_length = 0;
-                            Expr* expr = parse_compound(context, t, &struct_length);
-                            t += struct_length;
+                        u32 struct_length = 0;
+                        Expr* expr = parse_compound(context, t, &struct_length);
+                        t += struct_length;
 
-                            if (expr == null) {
-                                *length = t - t_start;
-                                return null;
-                            }
+                        if (expr == null) {
+                            *length = t - t_start;
+                            return null;
+                        }
 
-                            expr->type = type;
-                            shunting_yard_push_expr(context, yard, expr);
-                        } break;
+                        expr->type = type;
+                        shunting_yard_push_expr(context, yard, expr);
 
-                        case TOKEN_STATIC_ACCESS: {
-                            File_Pos start_pos = t->pos;
-                            t += 2;
+                    } else if (t[1].kind == TOKEN_STATIC_ACCESS) {
+                        File_Pos start_pos = t->pos;
+                        t += 2;
 
-                            if (t->kind != TOKEN_IDENTIFIER) {
-                                print_file_pos(&t->pos);
-                                printf("Expected struct name, but got ");
-                                print_token(context->string_table, t);
-                                printf("\n");
-                                *length = t - t_start;
-                                return null;
-                            }
+                        if (t->kind != TOKEN_IDENTIFIER) {
+                            print_file_pos(&t->pos);
+                            printf("Expected struct name, but got ");
+                            print_token(context->string_table, t);
+                            printf("\n");
+                            *length = t - t_start;
+                            return null;
+                        }
 
-                            u32 member_name_index = t->identifier_string_table_index;
-                            t += 1;
+                        u32 member_name_index = t->identifier_string_table_index;
+                        t += 1;
 
-                            Expr* expr = arena_new(&context->arena, Expr);
-                            expr->kind = EXPR_STATIC_MEMBER_ACCESS;
-                            expr->static_member_access.parent_name = name_index;;
-                            expr->static_member_access.member_name = member_name_index;;
-                            expr->flags |= EXPR_FLAG_UNRESOLVED;
-                            expr->pos = start_pos;
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = EXPR_STATIC_MEMBER_ACCESS;
+                        expr->static_member_access.parent_name = name_index;;
+                        expr->static_member_access.member_name = member_name_index;;
+                        expr->flags |= EXPR_FLAG_UNRESOLVED;
+                        expr->pos = start_pos;
 
-                            shunting_yard_push_expr(context, yard, expr);
-                        } break;
+                        shunting_yard_push_expr(context, yard, expr);
 
-                        default: {
-                            Expr* expr = arena_new(&context->arena, Expr);
-                            expr->kind = EXPR_VARIABLE;
-                            expr->variable.unresolved_name = name_index;
-                            expr->flags |= EXPR_FLAG_UNRESOLVED;
-                            expr->pos = t->pos;
+                    } else {
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = EXPR_VARIABLE;
+                        expr->variable.unresolved_name = name_index;
+                        expr->flags |= EXPR_FLAG_UNRESOLVED;
+                        expr->pos = t->pos;
 
-                            shunting_yard_push_expr(context, yard, expr);
+                        shunting_yard_push_expr(context, yard, expr);
 
-                            t += 1;
-                        } break;
+                        t += 1;
                     }
 
                     could_parse = true;
@@ -3836,7 +3831,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length) {
                 case TOKEN_BRACKET_ROUND_OPEN: {
                     t += 1;
                     u32 inner_length = 0;
-                    Expr* inner = parse_expr(context, t, &inner_length);
+                    Expr* inner = parse_expr(context, t, &inner_length, stop_on_open_curly);
                     t += inner_length;
 
                     if (inner == null) {
@@ -3918,7 +3913,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     u32 index_length = 0;
-                    Expr *index = parse_expr(context, t, &index_length);
+                    Expr *index = parse_expr(context, t, &index_length, stop_on_open_curly);
                     t += index_length;
 
                     if (index == null) {
@@ -3987,6 +3982,12 @@ Expr *parse_expr(Context *context, Token* t, u32* length) {
                 case TOKEN_SUB_ASSIGN:
                 {
                     reached_end = true;
+                } break;
+
+                case TOKEN_BRACKET_CURLY_OPEN: {
+                    if (stop_on_open_curly) {
+                        reached_end = true;
+                    }
                 } break;
 
                 default: {
@@ -4088,7 +4089,7 @@ Expr* parse_compound(Context *context, Token* t, u32* length) {
         }
 
         u32 member_length = 0;
-        Expr* member = parse_expr(context, t, &member_length);
+        Expr* member = parse_expr(context, t, &member_length, false);
         t += member_length;
 
         if (member == null) {
@@ -4172,7 +4173,7 @@ Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count)
 
     while (t->kind != TOKEN_BRACKET_ROUND_CLOSE) {
         u32 param_length = 0;
-        Expr* param = parse_expr(context, t, &param_length);
+        Expr* param = parse_expr(context, t, &param_length, false);
         t += param_length;
 
         if (param == null) {
@@ -4263,7 +4264,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
 
         case BUILTIN_TYPE_INFO_OF_VALUE: {
             u32 inner_length = 0;
-            Expr* inner = parse_expr(context, t, &inner_length);
+            Expr* inner = parse_expr(context, t, &inner_length, false);
             t += inner_length;
 
             if (inner == null) {
@@ -4327,7 +4328,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
 
         case BUILTIN_ENUM_MEMBER_NAME: {
             u32 inner_expr_length = 0;
-            Expr* inner = parse_expr(context, t, &inner_expr_length);
+            Expr* inner = parse_expr(context, t, &inner_expr_length, false);
             t += inner_expr_length;
 
             if (inner == null) {
@@ -4368,7 +4369,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
             t += 1;
 
             u32 inner_length = 0;
-            Expr* cast_from = parse_expr(context, t, &inner_length);
+            Expr* cast_from = parse_expr(context, t, &inner_length, false);
             t += inner_length;
 
             if (cast_from == null) {
@@ -4523,30 +4524,15 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
                 while (true) {
                     if_stmt->kind = STMT_IF;
-
-                    t += 1;
-
-                    if (!expect_single_token(context, t, '(', "before condition")) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-
                     t += 1;
 
                     u32 condition_length = 0;
-                    if_stmt->conditional.condition = parse_expr(context, t, &condition_length);
+                    if_stmt->conditional.condition = parse_expr(context, t, &condition_length, true);
                     t += condition_length;
                     if (if_stmt->conditional.condition == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
-
-                    if (!expect_single_token(context, t, ')', "after condition")) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-
-                    t += 1;
 
                     u32 block_length = 0;
                     if_stmt->conditional.then = parse_basic_block(context, t, &block_length);
@@ -4599,62 +4585,45 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
             case TOKEN_KEYWORD_FOR: {
                 t += 1;
 
-                switch (t->kind) {
-                    // Infinite loop
-                    case '{': {
-                        u32 body_length = 0;
-                        Stmt* body = parse_basic_block(context, t, &body_length);
-                        t += body_length;
-                        if (body == null) {
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-
-                        stmt->kind = STMT_LOOP;
-                        stmt->loop.condition = null;
-                        stmt->loop.body = body;
-                    } break;
-
-                    case '(': {
-                        t += 1;
-
-                        u32 first_length = 0;
-                        Expr* first = parse_expr(context, t, &first_length);
-                        t += first_length;
-                        if (first == null) {
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-                        
-                        // TODO for-each and c-style loops
-
-                        if (!expect_single_token(context, t, ')', "after loop condition")) {
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-                        t += 1;
-
-                        u32 body_length = 0;
-                        Stmt* body = parse_basic_block(context, t, &body_length);
-                        t += body_length;
-                        if (body == null) {
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-
-                        stmt->kind = STMT_LOOP;
-                        stmt->loop.condition = first;
-                        stmt->loop.body = body;
-                    } break;
-
-                    default: {
-                        print_file_pos(&t->pos);
-                        printf("Expected opening parenthesis '(' or curly brace '{' after for, but got ");
-                        print_token(context->string_table, t);
-                        printf("\n");
+                // for {}
+                if (t->kind == TOKEN_BRACKET_CURLY_OPEN) {
+                    u32 body_length = 0;
+                    Stmt *body = parse_basic_block(context, t, &body_length);
+                    t += body_length;
+                    if (body == null) {
                         *length = t - t_first_stmt_start;
                         return null;
-                    } break;
+                    }
+
+                    stmt->kind = STMT_LOOP;
+                    stmt->loop.condition = null;
+                    stmt->loop.body = body;
+
+                // for foo : bar {}
+                } else if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
+                    unimplemented();
+
+                // for <condition> {}
+                } else {
+                    u32 first_length = 0;
+                    Expr* first = parse_expr(context, t, &first_length, true);
+                    t += first_length;
+                    if (first == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    u32 body_length = 0;
+                    Stmt* body = parse_basic_block(context, t, &body_length);
+                    t += body_length;
+                    if (body == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    stmt->kind = STMT_LOOP;
+                    stmt->loop.condition = first;
+                    stmt->loop.body = body;
                 }
             } break;
 
@@ -4664,7 +4633,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
                 if (t->kind != TOKEN_SEMICOLON) {
                     u32 expr_length = 0;
-                    stmt->return_stmt.value = parse_expr(context, t, &expr_length);
+                    stmt->return_stmt.value = parse_expr(context, t, &expr_length, false);
                     t += expr_length;
                     if (stmt->return_stmt.value == null) {
                         *length = t - t_first_stmt_start;
@@ -4744,7 +4713,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     u32 right_length = 0;
-                    expr = parse_expr(context, t, &right_length); 
+                    expr = parse_expr(context, t, &right_length, false); 
                     if (expr == null) {
                         *length = t - t_first_stmt_start;
                         return null;
@@ -4793,7 +4762,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
             default: {
                 u32 left_length = 0;
-                Expr* left = parse_expr(context, t, &left_length);
+                Expr* left = parse_expr(context, t, &left_length, false);
                 t += left_length;
 
                 if (left == null) {
@@ -4806,7 +4775,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                         t += 1;
 
                         u32 right_length = 0;
-                        Expr* right = parse_expr(context, t, &right_length);
+                        Expr* right = parse_expr(context, t, &right_length, false);
                         t += right_length;
 
                         if (right == null) {
@@ -4832,7 +4801,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                         t += 1;
 
                         u32 right_length = 0;
-                        Expr* right = parse_expr(context, t, &right_length);
+                        Expr* right = parse_expr(context, t, &right_length, false);
                         t += right_length;
 
                         if (right == null) {
@@ -5793,7 +5762,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 t += 1;
 
                 u32 right_length = 0;
-                expr = parse_expr(context, t, &right_length); 
+                expr = parse_expr(context, t, &right_length, false); 
                 if (expr == null) {
                     valid = false;
                     break;

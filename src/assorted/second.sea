@@ -12,7 +12,7 @@ fn print(string: String) {
 }
 
 fn assert(condition: bool, message: String) {
-    if (!condition) {
+    if !condition {
         print("Assertion failed: ");
         print(message);
         print("\n");
@@ -113,7 +113,7 @@ fn wont_work_for_now() {
     let b = a() + a() + a();
     let c = 2 * 12 * 3;
 
-    if (b == -c) {
+    if b == -c {
         print("Nice\n");
     } else {
         print("Something is borked\n");
@@ -210,7 +210,7 @@ fn big_bummer() {
 
     let q = true;
     let r = false;
-    if (q == r) { assert(false, "Bigger bummer"); }
+    if q == r { assert(false, "Bigger bummer"); }
 }
 
 
@@ -239,9 +239,9 @@ fn get_second_word(string: String) -> String {
     let result: String;
 
     let i = 0;
-    for (i < string.length) {
-        if (string[i] == ' ') {
-            if (result.data == null) {
+    for i < string.length {
+        if string[i] == ' ' {
+            if result.data == null {
                 result.data = string.data + i + 1;
                 result.length = 0;
             } else {
@@ -329,21 +329,21 @@ fn floating_away() {
     c = -3.0;
 
     {
-        if (c != -3.0) { assert(false, "False"); }
-        if (c == -2.0) { assert(false, "Pretty untrue"); }
-        if (c < -3.0)  { assert(false, "Very false"); }
+        if c != -3.0 { assert(false, "False"); }
+        if c == -2.0 { assert(false, "Pretty untrue"); }
+        if c < -3.0  { assert(false, "Very false"); }
     }
 
     let nan = 0.0 / 0.0;
-    if (nan == nan) { assert(false, "Nan-man"); }
-    if (nan != nan) {} else { assert(false, "Nan-nan-man"); }
+    if nan == nan { assert(false, "Nan-man"); }
+    if nan != nan {} else { assert(false, "Nan-nan-man"); }
 
-    for (nan == nan) {
+    for nan == nan {
         assert(false, "Loops are hosed");
     }
 
     let i = 0;
-    for (nan != nan) {
+    for nan != nan {
         i += 1;
         break;
     }
