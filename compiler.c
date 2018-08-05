@@ -1136,6 +1136,7 @@ typedef struct Token {
         __TOKEN_SEPARATOR = 128, // Values before this use literal ascii character codes, to simplify some parsing
 
         TOKEN_STATIC_ACCESS, // "::"
+        TOKEN_RANGE, // ".."
 
         TOKEN_GREATER_OR_EQUAL, // ">="
         TOKEN_LESS_OR_EQUAL, // "<="
@@ -1233,6 +1234,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_COMMA]                = "a comma ','",
     [TOKEN_COLON]                = "a colon ':'",
     [TOKEN_STATIC_ACCESS]        = "::",
+    [TOKEN_RANGE]                = "..",
 
     [TOKEN_BRACKET_ROUND_OPEN]   = "an opening parenthesis '('",
     [TOKEN_BRACKET_ROUND_CLOSE]  = "a closing parenthesis ')'",
@@ -1715,7 +1717,20 @@ struct Stmt {
         } conditional;
 
         struct {
-            Expr *condition;
+            enum {
+                LOOP_INFINITE,
+                LOOP_CONDITIONAL,
+                LOOP_RANGE,
+            } kind;
+
+            union {
+                Expr *condition;
+                struct {
+                    u32 var;
+                    Expr *start, *end;
+                } range;
+            };
+
             Stmt *body;
         } loop;
 
@@ -2654,8 +2669,8 @@ void print_stmt(Context *context, Fn* fn, Stmt* stmt, u32 indent_level) {
         } break;
 
         case STMT_DECLARATION: {
-            Var* var = &fn->body.vars[stmt->declaration.var_index];
-            u8* name = string_table_access(context->string_table, var->name);
+            Var *var = &fn->body.vars[stmt->declaration.var_index];
+            u8 *name = string_table_access(context->string_table, var->name);
             printf("let %s: ", name);
 
             print_type(context, var->type);
@@ -2704,12 +2719,23 @@ void print_stmt(Context *context, Fn* fn, Stmt* stmt, u32 indent_level) {
         } break;
 
         case STMT_LOOP: {
-            if (stmt->loop.condition != null) {
-                printf("for (");
+            if (stmt->loop.kind == LOOP_CONDITIONAL) {
+                printf("for ");
                 print_expr(context, fn, stmt->loop.condition);
-                printf(") {\n");
-            } else {
+                printf(" {\n");
+            } else if (stmt->loop.kind == LOOP_INFINITE) {
                 printf("for {\n");
+            } else if (stmt->loop.kind == LOOP_RANGE) {
+                Var *var = &fn->body.vars[stmt->loop.range.var];
+                u8 *var_name = string_table_access(context->string_table, var->name);
+
+                printf("for %s : ", var_name);
+                print_expr(context, fn, stmt->loop.range.start);
+                printf("..");
+                print_expr(context, fn, stmt->loop.range.end);
+                printf(" {\n");
+            } else {
+                assert(false);
             }
 
             for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
@@ -3980,6 +4006,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                 case TOKEN_KEYWORD_FN:
                 case TOKEN_ADD_ASSIGN:
                 case TOKEN_SUB_ASSIGN:
+                case TOKEN_RANGE:
                 {
                     reached_end = true;
                 } break;
@@ -4586,7 +4613,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                 t += 1;
 
                 // for {}
-                if (t->kind == TOKEN_BRACKET_CURLY_OPEN) {
+                if (t[0].kind == TOKEN_BRACKET_CURLY_OPEN) {
                     u32 body_length = 0;
                     Stmt *body = parse_basic_block(context, t, &body_length);
                     t += body_length;
@@ -4596,12 +4623,69 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     }
 
                     stmt->kind = STMT_LOOP;
-                    stmt->loop.condition = null;
+                    stmt->loop.kind = LOOP_INFINITE;
                     stmt->loop.body = body;
 
-                // for foo : bar {}
+                // for item : <range> {}
                 } else if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-                    unimplemented();
+                    u32 var_name = t[0].identifier_string_table_index;
+                    File_Pos var_pos = t[0].pos;
+                    t += 2;
+
+                    u32 start_length;
+                    Expr *start = parse_expr(context, t, &start_length, false);
+                    t += start_length;
+                    if (start == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    if (!expect_single_token(context, t, TOKEN_RANGE, "after lower bound")) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+                    t += 1;
+
+                    u32 end_length;
+                    Expr *end = parse_expr(context, t, &end_length, true);
+                    t += end_length;
+                    if (end == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    buf_foreach (Var, old_var, context->tmp_vars) {
+                        if (old_var->name == var_name) {
+                            u8* name_string = string_table_access(context->string_table, var_name);
+                            u32 initial_decl_line = old_var->declaration_pos.line;
+                            print_file_pos(&stmt->pos);
+                            printf("Redeclaration of variable '%s'. Initial declaration on line %u\n", name_string, (u64) initial_decl_line);
+                            *length = t - t_first_stmt_start;
+                            return null;
+                        }
+                    }
+
+                    u32 body_length = 0;
+                    Stmt *body = parse_basic_block(context, t, &body_length);
+                    t += body_length;
+                    if (body == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    u32 var_index = buf_length(context->tmp_vars);
+                    buf_push(context->tmp_vars, ((Var) {
+                        .name = var_name,
+                        .declaration_pos = var_pos,
+                        .type = null,
+                    }));
+
+                    stmt->kind = STMT_LOOP;
+                    stmt->loop.kind = LOOP_RANGE;
+                    stmt->loop.range.var = var_index;
+                    stmt->loop.range.start = start;
+                    stmt->loop.range.end = end;
+                    stmt->loop.body = body;
 
                 // for <condition> {}
                 } else {
@@ -4614,7 +4698,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     }
 
                     u32 body_length = 0;
-                    Stmt* body = parse_basic_block(context, t, &body_length);
+                    Stmt *body = parse_basic_block(context, t, &body_length);
                     t += body_length;
                     if (body == null) {
                         *length = t - t_first_stmt_start;
@@ -4622,6 +4706,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     }
 
                     stmt->kind = STMT_LOOP;
+                    stmt->loop.kind = LOOP_CONDITIONAL;
                     stmt->loop.condition = first;
                     stmt->loop.body = body;
                 }
@@ -5250,7 +5335,11 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                         } break;
 
                         case '.': {
-                            floating_point = true;
+                            if (i + 1 < file_length && file[i + 1] >= '0' && file[i + 1] <= '9') {
+                                floating_point = true;
+                            } else {
+                                goto done_with_literal;
+                            }
                         } break;
 
                         default: goto done_with_literal;
@@ -5633,8 +5722,13 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
         } break;
 
         case '.': {
-            i += 1;
-            buf_push(tokens, ((Token) { TOKEN_DOT, .pos = file_pos }));
+            if (i + 1 < file_length && file[i + 1] == '.') {
+                i += 2;
+                buf_push(tokens, ((Token) { TOKEN_RANGE, .pos = file_pos }));
+            } else {
+                i += 1;
+                buf_push(tokens, ((Token) { TOKEN_DOT, .pos = file_pos }));
+            }
         } break;
 
         case ':': {
@@ -6388,12 +6482,12 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 return TYPECHECK_EXPR_BAD;
             }
 
-            if (left_result == TYPECHECK_EXPR_WEAK && right_result == TYPECHECK_EXPR_WEAK ) {
-                right_result = typecheck_expr(info, expr->binary.right, expr->binary.left->type);
-            } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
-                left_result = typecheck_expr(info, expr->binary.left, expr->binary.right->type);
-            } else if (left_result == TYPECHECK_EXPR_STRONG && right_result == TYPECHECK_EXPR_WEAK ) {
-                right_result = typecheck_expr(info, expr->binary.right, expr->binary.left->type);
+            if (expr->binary.left->type != expr->binary.right->type) {
+                if (right_result == TYPECHECK_EXPR_WEAK ) {
+                    right_result = typecheck_expr(info, expr->binary.right, expr->binary.left->type);
+                } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
+                    left_result = typecheck_expr(info, expr->binary.left, expr->binary.right->type);
+                }
             }
 
             assert(left_result != TYPECHECK_EXPR_BAD && right_result != TYPECHECK_EXPR_BAD);
@@ -7003,8 +7097,8 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case STMT_IF: {
-            Type* bool_type = &info->context->primitive_types[TYPE_BOOL];
-            if (typecheck_expr(info, stmt->conditional.condition, bool_type) == TYPECHECK_EXPR_BAD) return false;
+            Type* type_bool = &info->context->primitive_types[TYPE_BOOL];
+            if (typecheck_expr(info, stmt->conditional.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
 
             Type_Kind condition_primitive = stmt->conditional.condition->type->kind;
             if (condition_primitive != TYPE_BOOL) {
@@ -7031,9 +7125,11 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case STMT_LOOP: {
-            if (stmt->loop.condition != null) {
-                Type* bool_type = &info->context->primitive_types[TYPE_BOOL];
-                if (typecheck_expr(info, stmt->loop.condition, bool_type) == TYPECHECK_EXPR_BAD) return false;
+            typecheck_scope_push(info);
+
+            if (stmt->loop.kind == LOOP_CONDITIONAL) {
+                Type *type_bool = &info->context->primitive_types[TYPE_BOOL];
+                if (typecheck_expr(info, stmt->loop.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
 
                 Type_Kind condition_primitive = stmt->loop.condition->type->kind;
                 if (condition_primitive != TYPE_BOOL) {
@@ -7043,9 +7139,56 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     printf(" in 'for'-loop\n");
                     return false;
                 }
+            } else if (stmt->loop.kind == LOOP_RANGE) {
+                Expr *start = stmt->loop.range.start;
+                Expr *end   = stmt->loop.range.end;
+
+                Type *type_default_int = &info->context->primitive_types[TYPE_DEFAULT_INT];
+                Typecheck_Expr_Result start_result, end_result;
+                start_result = typecheck_expr(info, start, type_default_int);
+                end_result   = typecheck_expr(info, end,   type_default_int);
+
+                if (start_result == TYPECHECK_EXPR_BAD || end_result == TYPECHECK_EXPR_BAD) return false;
+
+                if (start->type != end->type) {
+                    if (end_result == TYPECHECK_EXPR_WEAK) {
+                        end_result = typecheck_expr(info, end, start->type);
+                    } else if (start_result == TYPECHECK_EXPR_WEAK && end_result == TYPECHECK_EXPR_STRONG) {
+                        start_result = typecheck_expr(info, start, end->type);
+                    }
+                }
+
+                if (start->type != end->type) {
+                    print_file_pos(&stmt->loop.range.start->pos);
+                    printf("Ends of range have different type: ");
+                    print_type(info->context, start->type);
+                    printf(" vs ");
+                    print_type(info->context, end->type);
+                    printf("\n");
+                    return false;
+                }
+
+                Type *index_type = start->type;
+                if (!primitive_is_integer(primitive_of(index_type))) {
+                    print_file_pos(&stmt->loop.range.start->pos);
+                    printf("Can't iterate over a range of ");
+                    print_type(info->context, index_type);
+                    printf("\n");
+                    return false;
+                }
+
+                u32 var_index = stmt->loop.range.var;
+                Var *var = &info->fn->body.vars[var_index];
+                var->type = index_type;
+
+                assert(!info->scope->map[var_index]);
+                info->scope->map[var_index] = true;
+            } else if (stmt->loop.kind == LOOP_INFINITE) {
+                // No special checking
+            } else {
+                assert(false);
             }
 
-            typecheck_scope_push(info);
             for (Stmt* inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
                 if (!typecheck_stmt(info, inner)) return false;
             }
@@ -8751,8 +8894,8 @@ void instruction_lea_call(Context *context, u32 fn_index, Register reg) {
     #endif
 }
 
-void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size) {
-    assert(is_gpr(reg));
+void instruction_inc_or_dec(Context *context, bool inc, X64_Place place, u8 op_size) {
+    if (place.kind == PLACE_REGISTER) assert(is_gpr(place.reg));
 
     u8 rex = REX_BASE;
     u8 opcode = 0xff;
@@ -8765,10 +8908,12 @@ void instruction_inc_or_dec(Context *context, bool inc, Register reg, u8 op_size
         default: assert(false);
     }
 
-    encode_instruction_modrm(context, rex, opcode, op_size == 1, x64_place_reg(reg), inc? REGISTER_OPCODE_0 : REGISTER_OPCODE_1);
+    encode_instruction_modrm(context, rex, opcode, op_size == 1, place, inc? REGISTER_OPCODE_0 : REGISTER_OPCODE_1);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s %s\n", inc? "inc" : "dec", register_name(reg, op_size));
+    printf("%s ", inc? "inc" : "dec");
+    print_x64_place(place, op_size);
+    printf("\n");
     #endif
 }
 
@@ -11249,9 +11394,11 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
         case STMT_LOOP: {
             u32 jump_fixup_ignore = buf_length(context->jump_fixups);
-            u64 loop_start = buf_length(context->seg_text);
 
-            if (stmt->loop.condition != null) {
+            u64 loop_start;
+            if (stmt->loop.kind == LOOP_CONDITIONAL) {
+                loop_start = buf_length(context->seg_text);
+
                 Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->loop.condition, reg_allocator);
 
                 if (jump_info.first_from != 0) {
@@ -11260,10 +11407,43 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 if (jump_info.second_from != 0) {
                     buf_push(context->jump_fixups, ((Jump_Fixup) { .text_location = jump_info.second_text_location, .jump_from = jump_info.second_from, .jump_to = JUMP_TO_END_OF_LOOP }));
                 }
+            } else if (stmt->loop.kind == LOOP_RANGE) {
+                Var *var = &fn->body.vars[stmt->loop.range.var];
+                X64_Address index_address = reg_allocator->var_mem_infos[stmt->loop.range.var].address;
+                machinecode_for_expr(context, fn, stmt->loop.range.start, reg_allocator, x64_place_address(index_address));
+
+                loop_start = buf_length(context->seg_text);
+
+                register_allocator_enter_frame(context, reg_allocator);
+
+                Register end_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0xffffffff);
+                machinecode_for_expr(context, fn, stmt->loop.range.end, reg_allocator, x64_place_reg(end_reg));
+
+                instruction_cmp(context, x64_place_address(index_address), end_reg, type_size_of(var->type));
+                u64 jump_text_location = instruction_jcc(context, COND_GE, sizeof(i32));
+
+                register_allocator_leave_frame(context, reg_allocator);
+
+                buf_push(context->jump_fixups, ((Jump_Fixup) {
+                    .text_location = jump_text_location,
+                    .jump_from = buf_length(context->seg_text),
+                    .jump_to = JUMP_TO_END_OF_LOOP
+                }));
+
+            } else if (stmt->loop.kind == LOOP_INFINITE) {
+                loop_start = buf_length(context->seg_text);
+            } else {
+                assert(false);
             }
 
             for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
                 machinecode_for_stmt(context, fn, inner, reg_allocator);
+            }
+
+            if (stmt->loop.kind == LOOP_RANGE) {
+                Var *var = &fn->body.vars[stmt->loop.range.var];
+                X64_Address index_address = reg_allocator->var_mem_infos[stmt->loop.range.var].address;
+                instruction_inc_or_dec(context, true, x64_place_address(index_address), type_size_of(var->type));
             }
 
             u64 backward_jump_index = instruction_jmp(context, sizeof(i32));
@@ -11376,8 +11556,8 @@ void build_machinecode(Context *context) {
         u64 loop_start = buf_length(context->seg_text);
 
         instruction_mov_imm_mem(context, (X64_Address) { .base = RAX }, 0, 1);
-        instruction_inc_or_dec(context, true, RAX, POINTER_SIZE);
-        instruction_inc_or_dec(context, false, RCX, POINTER_SIZE);
+        instruction_inc_or_dec(context, true, x64_place_reg(RAX), POINTER_SIZE);
+        instruction_inc_or_dec(context, false, x64_place_reg(RCX), POINTER_SIZE);
 
         u64 backward_jump_index = instruction_jmp(context, sizeof(i8));
         u64 loop_end = buf_length(context->seg_text);
@@ -11405,9 +11585,9 @@ void build_machinecode(Context *context) {
 
         instruction_mov_reg_mem(context, MOVE_FROM_MEM, (X64_Address) { .base = RAX }, RBX, 1);
         instruction_mov_reg_mem(context, MOVE_TO_MEM,   (X64_Address) { .base = RDX }, RBX, 1);
-        instruction_inc_or_dec(context, true, RAX, POINTER_SIZE);
-        instruction_inc_or_dec(context, true, RDX, POINTER_SIZE);
-        instruction_inc_or_dec(context, false, RCX, POINTER_SIZE);
+        instruction_inc_or_dec(context, true, x64_place_reg(RAX), POINTER_SIZE);
+        instruction_inc_or_dec(context, true, x64_place_reg(RDX), POINTER_SIZE);
+        instruction_inc_or_dec(context, false, x64_place_reg(RCX), POINTER_SIZE);
 
         u64 backward_jump_index = instruction_jmp(context, sizeof(i8));
         u64 loop_end = buf_length(context->seg_text);

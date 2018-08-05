@@ -32,11 +32,8 @@ fn c_string_length(string: *u8) -> i64 {
 }
 
 fn mem_copy(src, dest: *u8, length: i64) {
-    for length > 0 {
-        *dest = *src;
-        src += 1;
-        dest += 1;
-        length -= 1;
+    for i : 0..length {
+        *(dest + i) = *(src + i);
     }
 }
 

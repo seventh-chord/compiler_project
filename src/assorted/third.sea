@@ -123,7 +123,15 @@ fn perform() {
     stage.on[Names::Pratt] = true;
     stage.on[Names::Lerxt] = true;
 
-    if stage.on[Names::Dirk] && stage.on[Names::Pratt] && stage.on[Names::Lerxt] {
+    let all_on_stage = true;
+    for name : 0..enum_length(Names) {
+        if !stage.on[name] {
+            all_on_stage = false;
+            break;
+        }
+    }
+
+    if all_on_stage {
         print("A modern day warrior, mean mean stride, todays Tom Sawyer...\n");
     } else {
         print("Big bummer\n");

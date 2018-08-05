@@ -1,5 +1,6 @@
 Unimplemented & bugs
-    Integer division algorithm
+    proper error message when 'fn main' is missing
+    integer division algorithm
     machinecode_move bug (documented in code, I think)
     'enum Foo(i64) { A = I64_MIN - 1 }', with the value as a literal, does not generate an error, because we have no way of detecting the underflow happening...
 
@@ -23,7 +24,6 @@ Language features
     variable shadowing
     taking the address of temporaries (c doesn't support this though, and it messes with potential optimization)
     a defer statement
-    figure out how to do no parentheses in loops/conditionals
     maybe a better parser for floats? The current one is pretty accurate for f32 at least though
     structure definitions inside functions
     casts from/to bool
@@ -35,7 +35,6 @@ Compiler internals
     debug info
     growing the stack? __chkstk
     static libraries (currently we only support dynamic libraries) (Although both static and dynamic libraries have a .lib file on windows, I think explicitly stating whether we expect to load a file as static or dynamic in code is good, as it serves to avoid confusion)
-    proper error message when 'fn main' is missing
     can we toggle fp exceptions? Should we expose that?
 
 Optimized code-gen
