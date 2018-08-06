@@ -10471,7 +10471,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             assert(jcc_by >= 0 && jcc_by <= I8_MAX);
             assert(jmp_by >= 0 && jmp_by <= I8_MAX); // TODO If this fails rewrite code but with a 32 bit jump
             context->seg_text[jcc_offset] = (i8) jcc_by;
-            context->seg_text[jmp_offset] = (i8) jcc_by;
+            context->seg_text[jmp_offset] = (i8) jmp_by;
         } break;
 
         case EXPR_BINARY: {
