@@ -2100,13 +2100,22 @@ Type *fn_signature_canonicalize(Context *context, Fn_Signature *fn_signature) {
     return canonicalized;
 }
  
-// Says '*[3]Foo' is equal to '*Foo'
+// Compares types for equality, with the following exceptions
+//      '*[N]Foo' is equal to '*Foo'
+//      '*void' is equal to '*Foo', for all pointer types
+// Note that this can not be used to e.g. compare structs or fn signatures
+// for equality. We canonicalize those and expect them to be pointer equal.
 bool type_can_assign(Type* a, Type* b) {
     if (a == b) return true;
 
     while (true) {
-        Type_Kind a_primitive = a->kind;
-        Type_Kind b_primitive = b->kind;
+        // Make void pointers equal all other pointers
+        if ((a->kind == TYPE_POINTER && a->pointer_to->kind == TYPE_VOID) && (b->kind == TYPE_POINTER || b->kind == TYPE_FN_POINTER)) {
+            return true;
+        }
+        if ((b->kind == TYPE_POINTER && b->pointer_to->kind == TYPE_VOID) && (a->kind == TYPE_POINTER || a->kind == TYPE_FN_POINTER)) {
+            return true;
+        }
 
         if (a->kind != b->kind) {
             return false;
@@ -2116,18 +2125,24 @@ bool type_can_assign(Type* a, Type* b) {
             if (a->array.length != b->array.length) return false;
             a = a->array.of;
             b = b->array.of;
-        } else if (a->kind == TYPE_POINTER) {
+            continue;
+        }
+
+        if (a->kind == TYPE_POINTER) {
             a = a->pointer_to;
             b = b->pointer_to;
 
+            // Make pointers to arrays of foo equal pointers to foo
             if (a->kind == TYPE_ARRAY && b->kind != TYPE_ARRAY) {
                 a = a->array.of;
             } else if (a->kind != TYPE_ARRAY && b->kind == TYPE_ARRAY) {
                 b = b->array.of;
             }
-        } else {
-            return a == b;
+
+            continue;
         }
+
+        return a == b;
     }
 
     assert(false);
@@ -2382,6 +2397,7 @@ void print_type(Context *context, Type* type) {
 
                 printf("*fn(");
                 for (u32 i = 0; i < signature->param_count; i += 1) {
+                    if (i > 0) printf(", ");
                     print_type(context, signature->params[i].type);
                 }
                 printf(")");
@@ -7129,11 +7145,6 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
     }
 
     if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
-
-    // Autocast from '*void' to any other pointer kind
-    if (expr->type == info->context->void_pointer_type && expr->type != solidify_to && (solidify_to->kind == TYPE_POINTER || solidify_to->kind == TYPE_FN_POINTER)) {
-        expr->type = solidify_to;
-    }
 
     if (strong) {
         return TYPECHECK_EXPR_STRONG;
