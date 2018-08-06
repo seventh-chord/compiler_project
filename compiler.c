@@ -6899,7 +6899,23 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 }
 
                 callee_signature = &t->fn_signature;
-                callee_name = "<unkown pointer>";
+
+                if (expr->call.pointer_expr->kind == EXPR_VARIABLE) {
+                    // This is such a mess because we implemented scopes in what is turning out
+                    // to be a messy way. Nasty code like this will be my motivation to fix scope
+                    // stuff, and add a bunch of nice stuff in the process, hopefully...
+                    assert(!(expr->call.pointer_expr->flags & EXPR_FLAG_UNRESOLVED));
+                    u32 var_index = expr->call.pointer_expr->variable.index;
+                    Var *var;
+                    if (var_index & VAR_INDEX_GLOBAL_FLAG) {
+                        var = &info->context->global_vars[var_index & ~VAR_INDEX_GLOBAL_FLAG].var;
+                    } else {
+                        var = &info->fn->body.vars[var_index];
+                    }
+                    callee_name = string_table_access(info->context->string_table, var->name);
+                } else {
+                    callee_name = "<unkown pointer>";
+                }
             } else {
                 Fn *callee = &info->context->fns[expr->call.fn_index];
                 callee_signature = callee->signature;
