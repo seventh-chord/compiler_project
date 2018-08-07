@@ -164,7 +164,7 @@ int _fltused; // To make floating point work without the c runtime
 
     typedef struct System_Info {
         union {
-            u32  oem_id;
+            u32 oem_id;
             struct {
                 u16 processor_architecture;
                 u16 reserved;
@@ -1350,6 +1350,35 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
 typedef struct Type Type;
 typedef struct Type_List Type_List;
 typedef struct Expr Expr;
+typedef struct Stmt Stmt;
+typedef struct Fn Fn;
+typedef struct Var Var;
+
+typedef struct Decl {
+    enum {
+        DECL_VAR,
+        DECL_FN,
+        DECL_TYPE,
+    } kind;
+
+    u32 name;
+    File_Pos pos;
+
+    union {
+        Var *var;
+        Fn *fn;
+        Type *type;
+    };
+} Decl;
+
+typedef struct Scope Scope;
+struct Scope {
+    Scope *parent;
+
+    Decl *decls;
+    u32 decls_length, decls_allocated;
+};
+
 
 typedef struct Fn_Signature {
     bool has_return;
@@ -1435,12 +1464,12 @@ typedef struct Typedef {
 #define VAR_INDEX_GLOBAL_FLAG 0x80000000
 #define MAX_LOCAL_VARS        0x7fffffff
 
-typedef struct Var {
+struct Var {
     u32 name;
     Type *type; // We set this to 'null' to indicate that we want to infer the type
     File_Pos declaration_pos;
     bool is_reference; // Only used for structs as function parameters!
-} Var;
+};
 
 typedef struct Global_Var {
     Var var;
@@ -1684,7 +1713,6 @@ struct Expr { // 'typedef'd earlier!
     };
 };
 
-typedef struct Stmt Stmt;
 struct Stmt {
     enum {
         STMT_END = 0, // Sentinel, returned to mark that no more statements can be parsed
@@ -1717,12 +1745,15 @@ struct Stmt {
             Expr *right;
         } assignment;
 
-        Stmt* block;
+        struct {
+            Stmt *stmt;
+            Scope scope;
+        } block;
 
         struct {
             Expr *condition;
-            Stmt *then;
-            Stmt *else_then;
+            Stmt *then, *else_then;
+            Scope then_scope, else_then_scope;
         } conditional;
 
         struct {
@@ -1741,6 +1772,7 @@ struct Stmt {
             };
 
             Stmt *body;
+            Scope scope;
         } loop;
 
         struct {
@@ -1828,12 +1860,50 @@ typedef struct Library_Import {
 
     u8* importing_source_file;
     u32 lib_name;
-    u32* function_names; // stretchy-buffer TODO make this a hashtable (?)
+    u32* function_names; // stretchy-buffer
 
     // Set in  'parse_library'
     u8* dll_name;
     u32* function_hints;
 } Library_Import;
+
+struct Fn {
+    u32 name;
+    File_Pos declaration_pos;
+
+    Type *signature_type;
+    Fn_Signature *signature; // NB this should always be a pointer into 'signature_type'
+
+    enum {
+        FUNC_KIND_NORMAL, // use '.body'
+        FUNC_KIND_IMPORTED, // use '.import_info'
+    } kind;
+
+    union {
+        struct {
+            Import_Index index;
+        } import_info;
+
+        struct {
+            Scope *scope; // TODO :scope This doesnt need to be a pointer.
+            // For now, because we store fn's in a stretchy-buffer, we make it
+            // an arena-allocated pointer so that it has a constant address. We
+            // plan on just keeping track of functions in Scope.decls, which
+            // means we will arena_alloc the 'Fn' itself, so 'scope' will have
+            // a constant address without being separately allocated.
+
+            Var* vars;
+            u32 var_count;
+            u32 *param_var_mappings;
+
+            Stmt* first_stmt;
+
+            u32 text_start;
+        } body;
+    };
+};
+
+
 
 typedef struct Rip_Fixup {
     // Both values are indices to 'context.seg_text'
@@ -1876,35 +1946,6 @@ typedef struct Jump_Fixup {
     } jump_to;
 } Jump_Fixup;
 
-typedef struct Fn {
-    u32 name;
-    File_Pos declaration_pos;
-
-    Type *signature_type;
-    Fn_Signature *signature; // NB this should always be a pointer into 'signature_type'
-
-    enum {
-        FUNC_KIND_NORMAL, // use '.body'
-        FUNC_KIND_IMPORTED, // use '.import_info'
-    } kind;
-
-    union {
-        struct {
-            Import_Index index;
-        } import_info;
-
-        struct {
-            Var* vars;
-            u32 var_count;
-            u32 *param_var_mappings;
-
-            Stmt* first_stmt;
-
-            u32 text_start;
-        } body;
-    };
-} Fn;
-
 
 typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
@@ -1914,15 +1955,19 @@ typedef struct Context {
     u32 builtin_names[BUILTIN_COUNT];
 
     // AST & intermediate representation
+    Scope global_scope;
+
+    // TODO :scope remove these buffers, just use scopes
     Fn *fns; // stretchy buffer
+    Type **user_types; // stretchy buffer
+    Global_Var *global_vars; // stretchy buffer
+    Typedef *typedefs; // stretchy buffer
+
+    Type **fn_signatures; // stretchy buffer
 
     Type primitive_types[TYPE_KIND_COUNT];
     Type *void_pointer_type, *string_type, *type_info_type, *char_type;
-    Type **user_types; // stretchy buffer
-    Typedef *typedefs; // stretchy buffer
-    Type **fn_signatures; // stretchy buffer
     Type *void_fn_signature;
-    Global_Var *global_vars; // stretchy buffer
     Var *tmp_vars; // stretchy buffer, only for temporary use, we copy to arena buffers & clear
 
     u8 **lib_paths;
@@ -1940,6 +1985,43 @@ typedef struct Context {
 } Context;
 
 
+#define DECL_ANY_KIND (-1)
+Decl *find_declaration(Scope *scope, u32 name_index, int kind) {
+    while (true) {
+        for (u32 i = 0; i < scope->decls_length; i += 1) {
+            Decl *decl = &scope->decls[i];
+            if (decl->name == name_index && (decl->kind == kind || kind == DECL_ANY_KIND)) {
+                return decl;
+            }
+        }
+
+        if (scope->parent != null) {
+            scope = scope->parent;
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    return null;
+}
+
+Decl *add_declaration(Arena *arena, Scope *scope) {
+    if (scope->decls_length >= scope->decls_allocated) {
+        u32 new_allocated = scope->decls_allocated * 2;
+        if (new_allocated == 0) { new_allocated = 16; }
+
+        Decl *new_decls = (void*) arena_alloc(arena, new_allocated * sizeof(Decl));
+        mem_copy((u8*) scope->decls, (u8*) new_decls, scope->decls_length * sizeof(Decl));
+        scope->decls_allocated = new_allocated;
+        scope->decls = new_decls;
+    }
+
+    Decl *result = &scope->decls[scope->decls_length];
+    scope->decls_length += 1;
+    assert(scope->decls_allocated > scope->decls_length);
+    return result;
+}
 
 Type *get_pointer_type(Context *context, Type *type) {
     if (type->pointer_type == null) {
@@ -2721,7 +2803,7 @@ void print_stmt(Context *context, Fn* fn, Stmt* stmt, u32 indent_level) {
         case STMT_BLOCK: {
             printf("{\n");
 
-            for (Stmt *inner = stmt->block; inner->kind != STMT_END; inner = inner->next) {
+            for (Stmt *inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
                 print_stmt(context, fn, inner, indent_level + 1);
             }
 
@@ -2909,40 +2991,22 @@ Builtin_Fn parse_builtin_fn_name(Context *context, u32 name_index) {
     return BUILTIN_INVALID;
 }
 
-Type *parse_user_type_name(Context *context, u32 name_index) {
-    buf_foreach (Type*, user_type, context->user_types) {
-        u32 user_type_name = 0;
-        switch ((*user_type)->kind) {
-            case TYPE_STRUCT: {
-                user_type_name = (*user_type)->structure.name;
-            } break;
-            case TYPE_ENUM: {
-                user_type_name = (*user_type)->enumeration.name;
-            } break;
-            default: assert(false);
-        }
-
-        if (name_index == user_type_name) {
-            return *user_type;
-        }
+Type *parse_user_type_name(Scope *scope, u32 name_index) {
+    Decl *decl = find_declaration(scope, name_index, DECL_TYPE);
+    if (decl != null) {
+        return decl->type;
+    } else {
+        return null;
     }
-
-    buf_foreach (Typedef, def, context->typedefs) {
-        if (def->name == name_index)  {
-            return def->type;
-        }
-    }
-
-    return null;
 }
 
-Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn);
-Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curly);
-Expr  *parse_compound(Context *context, Token* t, u32* length);
-Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count);
-Expr  *parse_call(Context *context, Token* t, u32* length);
+Type *parse_fn_signature    (Context *context, Scope *scope, Token *t, u32 *length, Fn *fn);
+Expr *parse_expr            (Context *context, Scope *scope, Token* t, u32* length, bool stop_on_open_curly);
+Expr  *parse_compound       (Context *context, Scope *scope, Token* t, u32* length);
+Expr **parse_parameter_list (Context *context, Scope *scope, Token* t, u32* length, u32* count);
+Expr  *parse_call           (Context *context, Scope *scope, Token* t, u32* length);
 
-Type *parse_type(Context *context, Token* t, u32* length) {
+Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
     Token* t_start = t;
 
     typedef struct Prefix Prefix;
@@ -2966,7 +3030,7 @@ Type *parse_type(Context *context, Token* t, u32* length) {
                 base_type = parse_primitive_name(context, t->identifier_string_table_index);
 
                 if (base_type == null) {
-                    base_type = parse_user_type_name(context, t->identifier_string_table_index);
+                    base_type = parse_user_type_name(scope, t->identifier_string_table_index);
                 }
 
                 if (base_type == null) {
@@ -2992,7 +3056,7 @@ Type *parse_type(Context *context, Token* t, u32* length) {
                     t += 1;
                 } else {
                     u32 length_expr_length;
-                    Expr *length_expr = parse_expr(context, t, &length_expr_length, false);
+                    Expr *length_expr = parse_expr(context, scope, t, &length_expr_length, false);
                     t += length_expr_length;
                     if (length_expr == null) {
                         *length = t - t_start;
@@ -3015,7 +3079,7 @@ Type *parse_type(Context *context, Token* t, u32* length) {
 
                 if (t->kind == TOKEN_KEYWORD_FN) {
                     u32 signature_length;
-                    base_type = parse_fn_signature(context, t, &signature_length, null);
+                    base_type = parse_fn_signature(context, scope, t, &signature_length, null);
                     t += signature_length;
 
                     if (base_type == null) {
@@ -3073,7 +3137,7 @@ Type *parse_type(Context *context, Token* t, u32* length) {
     return type;
 }
 
-Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
+Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, Fn *fn) {
     Token *t_start = t;
     assert(t->kind == TOKEN_KEYWORD_FN);
     t += 1;
@@ -3157,7 +3221,7 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
             t += 1;
 
             u32 type_length = 0;
-            Type* param_type = parse_type(context, t, &type_length);
+            Type* param_type = parse_type(context, scope, t, &type_length);
             t += type_length;
             if (param_type == null) {
                 *length = t - t_start;
@@ -3216,7 +3280,7 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
         t += 1;
 
         u32 type_length;
-        Type *return_type = parse_type(context, t, &type_length);
+        Type *return_type = parse_type(context, scope, t, &type_length);
         t += type_length;
 
         if (return_type == null) {
@@ -3258,7 +3322,7 @@ Type *parse_fn_signature(Context *context, Token *t, u32 *length, Fn *fn) {
     }
 }
 
-Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
+bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* length) {
     File_Pos declaration_pos = t->pos;
     Token* t_start = t;
 
@@ -3273,12 +3337,12 @@ Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
         printf("Expected struct name, but got ");
         print_token(context->string_table, t);
         printf("\n");
-        return null;
+        return false;
     }
     type->structure.name = t->identifier_string_table_index;
     t += 1;
 
-    if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after struct name")) return null;
+    if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after struct name")) return false;
     t += 1;
 
 
@@ -3303,7 +3367,7 @@ Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
                 printf("Expected a member name, but got ");
                 print_token(context->string_table, t);
                 printf("\n");
-                return null;
+                return false;
             }
 
             Member* next = arena_new(&context->stack, Member);
@@ -3331,15 +3395,15 @@ Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
             }
         }
 
-        if (!expect_single_token(context, t, TOKEN_COLON, names_given > 1? "after member names" : "after member name")) return null;
+        if (!expect_single_token(context, t, TOKEN_COLON, names_given > 1? "after member names" : "after member name")) return false;
         t += 1;
 
         u32 type_length = 0;
-        Type* member_type = parse_type(context, t, &type_length);
+        Type* member_type = parse_type(context, scope, t, &type_length);
         t += type_length;
-        if (member_type == null) return null;
+        if (member_type == null) return false;
 
-        if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after member declaration")) return null;
+        if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after member declaration")) return false;
 
         Member* m = last;
         for (u32 i = 0; i < names_given; i += 1) {
@@ -3375,18 +3439,26 @@ Type *parse_struct_declaration(Context *context, Token* t, u32* length) {
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(context, type->enumeration.name);
+    Type *old_type = parse_user_type_name(scope, type->enumeration.name);
     if (old_type != null) {
         u8 *name = string_table_access(context->string_table, type->structure.name);
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
-        return null;
-    } else {
-        return type;
+        return false;
     }
+
+    Decl *decl = add_declaration(&context->arena, scope);
+    decl->kind = DECL_TYPE;
+    decl->name = type->enumeration.name;
+    decl->pos = declaration_pos;
+    decl->type = type;
+
+    buf_push(context->user_types, type);
+
+    return true;
 }
 
-Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
+bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* length) {
     File_Pos declaration_pos = t->pos;
     Token *t_start = t;
 
@@ -3403,7 +3475,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
         print_token(context->string_table, t);
         printf("\n");
         *length = t - t_start;
-        return null;
+        return false;
     }
     type->enumeration.name = t->identifier_string_table_index;
     t += 1;
@@ -3418,14 +3490,14 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
             print_token(context->string_table, t);
             printf("\n");
             *length = t - t_start;
-            return null;
+            return false;
         }
         u32 type_name_index = t->identifier_string_table_index;
         t += 1;
 
         if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_CLOSE, "after enum primitive")) {
             *length = t - t_start;
-            return null;
+            return false;
         }
         t += 1;
 
@@ -3434,7 +3506,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
             print_file_pos(&type_start_pos);
             printf("Expected unsigned integer type, but got %s\n", string_table_access(context->string_table, type_name_index));
             *length = t - t_start;
-            return null;
+            return false;
         }
 
         type->enumeration.value_primitive = primitive->kind;
@@ -3446,7 +3518,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
 
     if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after enum name/type")) {
         *length = t - t_start;
-        return null;
+        return false;
     }
     t += 1;
 
@@ -3473,7 +3545,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
             print_token(context->string_table, t);
             printf("\n");
             *length = t - t_start;
-            return null;
+            return false;
         }
 
         Member* next = arena_new(&context->stack, Member);
@@ -3497,7 +3569,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
                 print_token(context->string_table, t);
                 printf("\n");
                 *length = t - t_start;
-                return null;
+                return false;
             }
             value = t->literal_int;
             t += 1;
@@ -3530,7 +3602,7 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
                 print_token(context->string_table, t);
                 printf("\n");
                 *length = t - t_start;
-                return null;
+                return false;
             }
         }
     }
@@ -3549,15 +3621,21 @@ Type *parse_enum_declaration(Context *context, Token* t, u32* length) {
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(context, type->enumeration.name);
+    Type *old_type = parse_user_type_name(scope, type->enumeration.name);
     if (old_type != null) {
         u8 *name = string_table_access(context->string_table, type->enumeration.name);
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
-        return null;
-    } else {
-        return type;
+        return false;
     }
+
+    Decl *decl = add_declaration(&context->arena, scope);
+    decl->kind = DECL_TYPE;
+    decl->name = type->enumeration.name;
+    decl->pos = declaration_pos;
+    decl->type = type;
+
+    return true;
 }
 
 typedef struct Shunting_Yard {
@@ -3729,7 +3807,7 @@ void shunting_yard_push_op(Context *context, Shunting_Yard* yard, Binary_Op new_
     yard->op_queue_index += 1;
 }
 
-Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curly) {
+Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool stop_on_open_curly) {
     Token* t_start = t;
 
     // NB: We only pop the stack if we succesfully parse. That is, for eroneous code we leak memory.
@@ -3755,7 +3833,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     // Some call (either a function or a builtin)
                     if (t[1].kind == TOKEN_BRACKET_ROUND_OPEN) {
                         u32 call_length = 0;
-                        Expr* expr = parse_call(context, t, &call_length);
+                        Expr* expr = parse_call(context, scope, t, &call_length);
                         t += call_length;
 
                         if (expr == null) {
@@ -3769,7 +3847,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     } else if (t[1].kind == TOKEN_BRACKET_CURLY_OPEN && !stop_on_open_curly) {
                         File_Pos start_pos = t->pos;
 
-                        Type *type = parse_user_type_name(context, t->identifier_string_table_index);
+                        Type *type = parse_user_type_name(scope, t->identifier_string_table_index);
                         if (type == null) {
                             type = arena_new(&context->arena, Type);
                             type->kind = TYPE_UNRESOLVED_NAME;
@@ -3779,7 +3857,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                         t += 1;
 
                         u32 struct_length = 0;
-                        Expr* expr = parse_compound(context, t, &struct_length);
+                        Expr* expr = parse_compound(context, scope, t, &struct_length);
                         t += struct_length;
 
                         if (expr == null) {
@@ -3905,7 +3983,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                 case TOKEN_BRACKET_ROUND_OPEN: {
                     t += 1;
                     u32 inner_length = 0;
-                    Expr* inner = parse_expr(context, t, &inner_length, false);
+                    Expr* inner = parse_expr(context, scope, t, &inner_length, false);
                     t += inner_length;
 
                     if (inner == null) {
@@ -3932,7 +4010,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     Type* type = null;
                     if (t->kind == TOKEN_BRACKET_SQUARE_OPEN) {
                         u32 type_length = 0;
-                        type = parse_type(context, t, &type_length);
+                        type = parse_type(context, scope, t, &type_length);
                         t += type_length;
 
                         if (type == null) {
@@ -3942,7 +4020,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     }
 
                     u32 array_literal_length = 0;
-                    Expr* expr = parse_compound(context, t, &array_literal_length);
+                    Expr* expr = parse_compound(context, scope, t, &array_literal_length);
                     t += array_literal_length;
 
                     if (expr == null) {
@@ -3988,7 +4066,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
                     t += 1;
 
                     u32 index_length = 0;
-                    Expr *index = parse_expr(context, t, &index_length, false);
+                    Expr *index = parse_expr(context, scope, t, &index_length, false);
                     t += index_length;
 
                     if (index == null) {
@@ -4014,7 +4092,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
 
                     u32 param_list_length = 0;
                     u32 param_count = 0;
-                    Expr **params = parse_parameter_list(context, t, &param_list_length, &param_count);
+                    Expr **params = parse_parameter_list(context, scope, t, &param_list_length, &param_count);
                     t += param_list_length;
                     if (params == null) {
                         *length = t - t_start;
@@ -4141,7 +4219,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
         t += 1;
 
         u32 left_length = 0;
-        Expr *left = parse_expr(context, t, &left_length, false);
+        Expr *left = parse_expr(context, scope, t, &left_length, false);
         t += left_length;
         if (left == null) {
             *length = t - t_start;
@@ -4155,7 +4233,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
         t += 1;
 
         u32 right_length = 0;
-        Expr *right = parse_expr(context, t, &right_length, false);
+        Expr *right = parse_expr(context, scope, t, &right_length, false);
         t += right_length;
         if (right == null) {
             *length = t - t_start;
@@ -4176,7 +4254,7 @@ Expr *parse_expr(Context *context, Token* t, u32* length, bool stop_on_open_curl
     return expr;
 }
 
-Expr* parse_compound(Context *context, Token* t, u32* length) {
+Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
     Token* t_start = t;
 
     if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after type of array literal")) {
@@ -4206,7 +4284,7 @@ Expr* parse_compound(Context *context, Token* t, u32* length) {
         }
 
         u32 member_length = 0;
-        Expr* member = parse_expr(context, t, &member_length, false);
+        Expr* member = parse_expr(context, scope, t, &member_length, false);
         t += member_length;
 
         if (member == null) {
@@ -4273,7 +4351,7 @@ Expr* parse_compound(Context *context, Token* t, u32* length) {
     return expr;
 }
 
-Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count) {
+Expr **parse_parameter_list(Context *context, Scope *scope, Token* t, u32* length, u32* count) {
     Token* t_start = t;
 
     typedef struct Param_Expr Param_Expr;
@@ -4290,7 +4368,7 @@ Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count)
 
     while (t->kind != TOKEN_BRACKET_ROUND_CLOSE) {
         u32 param_length = 0;
-        Expr* param = parse_expr(context, t, &param_length, false);
+        Expr* param = parse_expr(context, scope, t, &param_length, false);
         t += param_length;
 
         if (param == null) {
@@ -4339,7 +4417,7 @@ Expr **parse_parameter_list(Context *context, Token* t, u32* length, u32* count)
     return exprs;
 }
 
-Expr* parse_call(Context *context, Token* t, u32* length) {
+Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
     assert(t->kind == TOKEN_IDENTIFIER);
     u32 name_index = t->identifier_string_table_index;
 
@@ -4355,7 +4433,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
     switch (builtin_name) {
         case BUILTIN_TYPE_INFO_OF_TYPE: {
             u32 type_length = 0;
-            Type* type = parse_type(context, t, &type_length);
+            Type* type = parse_type(context, scope, t, &type_length);
             t += type_length;
 
             if (type == null) {
@@ -4381,7 +4459,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
 
         case BUILTIN_TYPE_INFO_OF_VALUE: {
             u32 inner_length = 0;
-            Expr* inner = parse_expr(context, t, &inner_length, false);
+            Expr* inner = parse_expr(context, scope, t, &inner_length, false);
             t += inner_length;
 
             if (inner == null) {
@@ -4418,7 +4496,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
             }
 
             u32 type_length = 0;
-            Type* type = parse_type(context, t, &type_length);
+            Type* type = parse_type(context, scope, t, &type_length);
             t += type_length;
 
             if (type == null) {
@@ -4445,7 +4523,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
 
         case BUILTIN_ENUM_MEMBER_NAME: {
             u32 inner_expr_length = 0;
-            Expr* inner = parse_expr(context, t, &inner_expr_length, false);
+            Expr* inner = parse_expr(context, scope, t, &inner_expr_length, false);
             t += inner_expr_length;
 
             if (inner == null) {
@@ -4471,7 +4549,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
 
         case BUILTIN_CAST: {
             u32 type_length = 0;
-            Type* cast_to = parse_type(context, t, &type_length);
+            Type* cast_to = parse_type(context, scope, t, &type_length);
             t += type_length;
 
             if (cast_to == null) {
@@ -4486,7 +4564,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
             t += 1;
 
             u32 inner_length = 0;
-            Expr* cast_from = parse_expr(context, t, &inner_length, false);
+            Expr* cast_from = parse_expr(context, scope, t, &inner_length, false);
             t += inner_length;
 
             if (cast_from == null) {
@@ -4514,7 +4592,7 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
         case BUILTIN_INVALID: {
             u32 param_list_length = 0;
             u32 param_count = 0;
-            Expr** params = parse_parameter_list(context, t, &param_list_length, &param_count);
+            Expr** params = parse_parameter_list(context, scope, t, &param_list_length, &param_count);
             t += param_list_length;
             if (params == null) {
                 *length = t - t_start;
@@ -4569,9 +4647,9 @@ Expr* parse_call(Context *context, Token* t, u32* length) {
     return null;
 }
 
-Stmt* parse_stmts(Context *context, Token* t, u32* length);
+Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length);
 
-Stmt* parse_basic_block(Context *context, Token* t, u32* length) {
+Stmt* parse_basic_block(Context *context, Scope *scope, Token* t, u32* length) {
     Token* t_start = t;
 
     if (!expect_single_token(context, t, '{', "before block")) {
@@ -4581,7 +4659,7 @@ Stmt* parse_basic_block(Context *context, Token* t, u32* length) {
     t += 1;
 
     u32 inner_length = 0;
-    Stmt* stmts = parse_stmts(context, t, &inner_length);
+    Stmt* stmts = parse_stmts(context, scope, t, &inner_length);
     t += inner_length;
     *length = inner_length + 1;
 
@@ -4600,13 +4678,13 @@ Stmt* parse_basic_block(Context *context, Token* t, u32* length) {
     return stmts;
 }
 
-Stmt* parse_stmts(Context *context, Token* t, u32* length) {
+Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
     Token* t_first_stmt_start = t;
 
-    Stmt* first_stmt = arena_new(&context->arena, Stmt);
+    Stmt *first_stmt = arena_new(&context->arena, Stmt);
     first_stmt->pos = t->pos;
 
-    Stmt* stmt = first_stmt;
+    Stmt *stmt = first_stmt;
 
     while (true) {
         // Semicolons are just empty statements, skip them
@@ -4624,16 +4702,16 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
             } break;
 
             case TOKEN_BRACKET_CURLY_OPEN: {
+                stmt->kind = STMT_BLOCK;
+                stmt->block.scope.parent = scope;
+
                 u32 block_length = 0;
-                Stmt* inner = parse_basic_block(context, t, &block_length);
+                stmt->block.stmt = parse_basic_block(context, &stmt->block.scope, t, &block_length);
                 t += block_length;
-                if (inner == null) {
+                if (stmt->block.stmt == null) {
                     *length = t - t_first_stmt_start;
                     return null;
                 }
-
-                stmt->kind = STMT_BLOCK;
-                stmt->block = inner;
             } break;
 
             case TOKEN_KEYWORD_IF: {
@@ -4641,10 +4719,12 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
                 while (true) {
                     if_stmt->kind = STMT_IF;
+                    if_stmt->conditional.then_scope.parent = scope;
+                    if_stmt->conditional.else_then_scope.parent = scope;
                     t += 1;
 
                     u32 condition_length = 0;
-                    if_stmt->conditional.condition = parse_expr(context, t, &condition_length, true);
+                    if_stmt->conditional.condition = parse_expr(context, scope, t, &condition_length, true);
                     t += condition_length;
                     if (if_stmt->conditional.condition == null) {
                         *length = t - t_first_stmt_start;
@@ -4652,7 +4732,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     }
 
                     u32 block_length = 0;
-                    if_stmt->conditional.then = parse_basic_block(context, t, &block_length);
+                    if_stmt->conditional.then = parse_basic_block(context, &if_stmt->conditional.then_scope, t, &block_length);
                     t += block_length;
                     if (if_stmt->conditional.then == null) {
                         *length = t - t_first_stmt_start;
@@ -4666,7 +4746,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                         switch (t->kind) {
                             case TOKEN_BRACKET_CURLY_OPEN: {
                                 u32 block_length = 0;
-                                if_stmt->conditional.else_then = parse_basic_block(context, t, &block_length);
+                                if_stmt->conditional.else_then = parse_basic_block(context, &if_stmt->conditional.else_then_scope, t, &block_length);
                                 t += block_length;
                                 if (if_stmt->conditional.else_then == null) {
                                     *length = t - t_first_stmt_start;
@@ -4704,28 +4784,32 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
                 // for {}
                 if (t[0].kind == TOKEN_BRACKET_CURLY_OPEN) {
+                    stmt->kind = STMT_LOOP;
+                    stmt->loop.kind = LOOP_INFINITE;
+                    stmt->loop.scope.parent = scope;
+
                     u32 body_length = 0;
-                    Stmt *body = parse_basic_block(context, t, &body_length);
+                    stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
                     t += body_length;
-                    if (body == null) {
+                    if (stmt->loop.body == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
-                    stmt->kind = STMT_LOOP;
-                    stmt->loop.kind = LOOP_INFINITE;
-                    stmt->loop.body = body;
-
                 // for item : <range> {}
                 } else if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-                    u32 var_name = t[0].identifier_string_table_index;
-                    File_Pos var_pos = t[0].pos;
+                    stmt->kind = STMT_LOOP;
+                    stmt->loop.kind = LOOP_RANGE;
+                    stmt->loop.scope.parent = scope;
+
+                    u32 index_var_name = t[0].identifier_string_table_index;
+                    File_Pos index_var_pos = t[0].pos;
                     t += 2;
 
                     u32 start_length;
-                    Expr *start = parse_expr(context, t, &start_length, false);
+                    stmt->loop.range.start = parse_expr(context, scope, t, &start_length, false);
                     t += start_length;
-                    if (start == null) {
+                    if (stmt->loop.range.start == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
@@ -4737,68 +4821,56 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     u32 end_length;
-                    Expr *end = parse_expr(context, t, &end_length, true);
+                    stmt->loop.range.end = parse_expr(context, scope, t, &end_length, true);
                     t += end_length;
-                    if (end == null) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-
-                    buf_foreach (Var, old_var, context->tmp_vars) {
-                        if (old_var->name == var_name) {
-                            u8* name_string = string_table_access(context->string_table, var_name);
-                            u32 initial_decl_line = old_var->declaration_pos.line;
-                            print_file_pos(&stmt->pos);
-                            printf("Redeclaration of variable '%s'. Initial declaration on line %u\n", name_string, (u64) initial_decl_line);
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-                    }
-
-                    u32 body_length = 0;
-                    Stmt *body = parse_basic_block(context, t, &body_length);
-                    t += body_length;
-                    if (body == null) {
+                    if (stmt->loop.range.end == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
                     u32 var_index = buf_length(context->tmp_vars);
                     buf_push(context->tmp_vars, ((Var) {
-                        .name = var_name,
-                        .declaration_pos = var_pos,
+                        .name = index_var_name,
+                        .declaration_pos = index_var_pos,
                         .type = null,
                     }));
-
-                    stmt->kind = STMT_LOOP;
-                    stmt->loop.kind = LOOP_RANGE;
                     stmt->loop.range.var = var_index;
-                    stmt->loop.range.start = start;
-                    stmt->loop.range.end = end;
-                    stmt->loop.body = body;
+
+                    Decl *index_decl = add_declaration(&context->arena, &stmt->loop.scope);
+                    index_decl->kind = DECL_VAR;
+                    index_decl->name = index_var_name;
+                    index_decl->pos = index_var_pos;
+                    index_decl->var = null; // TODO this won't work :scope
+
+                    u32 body_length = 0;
+                    stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
+                    t += body_length;
+                    if (stmt->loop.body == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
 
                 // for <condition> {}
                 } else {
+                    stmt->kind = STMT_LOOP;
+                    stmt->loop.kind = LOOP_CONDITIONAL;
+                    stmt->loop.scope.parent = scope;
+
                     u32 first_length = 0;
-                    Expr* first = parse_expr(context, t, &first_length, true);
+                    stmt->loop.condition = parse_expr(context, scope, t, &first_length, true);
                     t += first_length;
-                    if (first == null) {
+                    if (stmt->loop.condition == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
                     u32 body_length = 0;
-                    Stmt *body = parse_basic_block(context, t, &body_length);
+                    stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
                     t += body_length;
-                    if (body == null) {
+                    if (stmt->loop.body == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
-
-                    stmt->kind = STMT_LOOP;
-                    stmt->loop.kind = LOOP_CONDITIONAL;
-                    stmt->loop.condition = first;
-                    stmt->loop.body = body;
                 }
             } break;
 
@@ -4808,7 +4880,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
                 if (t->kind != TOKEN_SEMICOLON) {
                     u32 expr_length = 0;
-                    stmt->return_stmt.value = parse_expr(context, t, &expr_length, false);
+                    stmt->return_stmt.value = parse_expr(context, scope, t, &expr_length, false);
                     t += expr_length;
                     if (stmt->return_stmt.value == null) {
                         *length = t - t_first_stmt_start;
@@ -4875,7 +4947,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     u32 type_length = 0;
-                    type = parse_type(context, t, &type_length);
+                    type = parse_type(context, scope, t, &type_length);
                     if (type == null) {
                         *length = t - t_first_stmt_start;
                         return null;
@@ -4888,7 +4960,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                     t += 1;
 
                     u32 right_length = 0;
-                    expr = parse_expr(context, t, &right_length, false); 
+                    expr = parse_expr(context, scope, t, &right_length, false); 
                     if (expr == null) {
                         *length = t - t_first_stmt_start;
                         return null;
@@ -4937,7 +5009,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
 
             default: {
                 u32 left_length = 0;
-                Expr* left = parse_expr(context, t, &left_length, false);
+                Expr* left = parse_expr(context, scope, t, &left_length, false);
                 t += left_length;
 
                 if (left == null) {
@@ -4950,7 +5022,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                         t += 1;
 
                         u32 right_length = 0;
-                        Expr* right = parse_expr(context, t, &right_length, false);
+                        Expr* right = parse_expr(context, scope, t, &right_length, false);
                         t += right_length;
 
                         if (right == null) {
@@ -4976,7 +5048,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
                         t += 1;
 
                         u32 right_length = 0;
-                        Expr* right = parse_expr(context, t, &right_length, false);
+                        Expr* right = parse_expr(context, scope, t, &right_length, false);
                         t += right_length;
 
                         if (right == null) {
@@ -5023,7 +5095,7 @@ Stmt* parse_stmts(Context *context, Token* t, u32* length) {
     return first_stmt;
 }
 
-Fn *parse_fn(Context *context, Token *t, u32 *length) {
+Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_FN);
     bool valid = true;
 
@@ -5048,7 +5120,7 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     fn.declaration_pos = t->pos;
 
     u32 signature_length = 0;
-    Type *signature_type = parse_fn_signature(context, t, &signature_length, &fn);
+    Type *signature_type = parse_fn_signature(context, scope, t, &signature_length, &fn);
     t += signature_length;
 
     if (signature_type == null) return null;
@@ -5085,6 +5157,8 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     // Body
     } else {
         fn.kind = FUNC_KIND_NORMAL;
+        fn.body.scope = arena_new(&context->arena, Scope);
+        fn.body.scope->parent = scope;
 
         if (t->kind != TOKEN_BRACKET_CURLY_OPEN) {
             u8* name = string_table_access(context->string_table, fn.name);
@@ -5100,7 +5174,7 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
         t = t + t->bracket_offset_to_matching;
 
         u32 stmts_length = 0;
-        Stmt* first_stmt = parse_stmts(context, body, &stmts_length);
+        Stmt* first_stmt = parse_stmts(context, fn.body.scope, body, &stmts_length);
 
         if (first_stmt == null || stmts_length != body_length) {
             valid = false;
@@ -5129,7 +5203,7 @@ Fn *parse_fn(Context *context, Token *t, u32 *length) {
     }
 }
 
-bool parse_typedef(Context *context, Token *t, u32 *length) {
+bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
     File_Pos declaration_pos = t->pos;
     Token *t_start = t;
 
@@ -5156,7 +5230,7 @@ bool parse_typedef(Context *context, Token *t, u32 *length) {
     t += 1;
 
     u32 type_length = 0;
-    Type *type = parse_type(context, t, &type_length);
+    Type *type = parse_type(context, scope, t, &type_length);
     t += type_length;
 
     if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after type")) return false;
@@ -5164,23 +5238,23 @@ bool parse_typedef(Context *context, Token *t, u32 *length) {
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(context, name_index);
+    Type *old_type = parse_user_type_name(scope, name_index);
     if (old_type != null) {
         u8 *name = string_table_access(context->string_table, name_index);
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
         return false;
     } else {
-        Typedef def = {
-            .name = name_index,
-            .type = type,
-        };
-        buf_push(context->typedefs, def);
+        Decl *decl = add_declaration(&context->arena, scope);
+        decl->kind = DECL_TYPE;
+        decl->name = name_index;
+        decl->pos  = declaration_pos;
+        decl->type = type;
         return true;
     }
 }
 
-bool parse_extern(Context *context, u8 *source_path, Token *t, u32 *length) {
+bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_EXTERN);
 
     Token *start = t;
@@ -5226,7 +5300,7 @@ bool parse_extern(Context *context, u8 *source_path, Token *t, u32 *length) {
         switch (body[i].kind) {
             case TOKEN_KEYWORD_FN: {
                 u32 length;
-                Fn* fn = parse_fn(context, &body[i], &length);
+                Fn* fn = parse_fn(context, scope, &body[i], &length);
 
                 if (fn == null) {
                     valid = false;
@@ -5281,11 +5355,11 @@ bool build_ast(Context *context, u8* file_name) {
     assert(lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text)));
 
     u32 string_type_name_index = string_table_intern_cstr(&context->string_table, "String");
-    context->string_type = parse_user_type_name(context, string_type_name_index);
+    context->string_type = parse_user_type_name(&context->global_scope, string_type_name_index);
     assert(context->string_type != null && context->string_type->kind == TYPE_STRUCT);
 
     u32 type_kind_name_index = string_table_intern_cstr(&context->string_table, "Type_Kind");
-    context->type_info_type = parse_user_type_name(context, type_kind_name_index);
+    context->type_info_type = parse_user_type_name(&context->global_scope, type_kind_name_index);
     assert(context->type_info_type != null && context->type_info_type->kind == TYPE_ENUM);
 
 
@@ -5892,7 +5966,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
     while (t->kind != TOKEN_END_OF_STREAM && valid) switch (t->kind) {
         case TOKEN_KEYWORD_FN: {
             u32 length = 0;
-            Fn* fn = parse_fn(context, t, &length);
+            Fn* fn = parse_fn(context, &context->global_scope, t, &length);
 
             if (fn == null) {
                 valid = false;
@@ -5908,13 +5982,13 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
         case TOKEN_KEYWORD_EXTERN: {
             u32 length = 0;
-            valid &= parse_extern(context, file_name, t, &length);
+            valid &= parse_extern(context, &context->global_scope, file_name, t, &length);
             t += length;
         } break;
 
         case TOKEN_KEYWORD_TYPEDEF: {
             u32 length = 0;
-            valid &= parse_typedef(context, t, &length);
+            valid &= parse_typedef(context, &context->global_scope, t, &length);
             t += length;
         } break;
 
@@ -5938,7 +6012,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 t += 1;
 
                 u32 type_length = 0;
-                type = parse_type(context, t, &type_length);
+                type = parse_type(context, &context->global_scope, t, &type_length);
                 t += type_length;
                 if (type == null) {
                     valid = false;
@@ -5951,7 +6025,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 t += 1;
 
                 u32 right_length = 0;
-                expr = parse_expr(context, t, &right_length, false); 
+                expr = parse_expr(context, &context->global_scope, t, &right_length, false); 
                 if (expr == null) {
                     valid = false;
                     break;
@@ -6000,25 +6074,16 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             }
         } break;
 
-        case TOKEN_KEYWORD_ENUM:
-        case TOKEN_KEYWORD_STRUCT:
-        {
-            File_Pos start_pos = t->pos;
-
+        case TOKEN_KEYWORD_ENUM: {
             u32 length = 0;
-            Type* type;
-            switch (t->kind) {
-                case TOKEN_KEYWORD_ENUM:   type = parse_enum_declaration(context, t, &length); break;
-                case TOKEN_KEYWORD_STRUCT: type = parse_struct_declaration(context, t, &length); break;
-                default: assert(false);
-            }
+            valid &= parse_enum_declaration(context, &context->global_scope, t, &length);
             t += length;
+        } break;
 
-            if (type == null) {
-                valid = false;
-            } else {
-                buf_push(context->user_types, type);
-            }
+        case TOKEN_KEYWORD_STRUCT: {
+            u32 length = 0;
+            valid &= parse_struct_declaration(context, &context->global_scope, t, &length);
+            t += length;
         } break;
 
         case TOKEN_KEYWORD_UNION: {
@@ -6039,22 +6104,22 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 }
 
 
-typedef struct Scope Scope;
-struct Scope {
+typedef struct Old_Scope Old_Scope;
+struct Old_Scope {
     u32 var_count;
     u8 *map; // list of booleans, for marking which variables currently are in scope
 
-    Scope *child, *parent;
+    Old_Scope *child, *parent;
 };
 
 typedef struct Typecheck_Info {
     Context *context;
     Fn *fn;
-    Scope *scope;
+    Old_Scope *scope;
 } Typecheck_Info;
 
-Scope* scope_new(Context *context, u32 var_count) {
-    Scope* scope = arena_new(&context->stack, Scope);
+Old_Scope* scope_new(Context *context, u32 var_count) {
+    Old_Scope* scope = arena_new(&context->stack, Old_Scope);
     scope->var_count = var_count;
     scope->map = arena_alloc(&context->stack, var_count);
     mem_clear(scope->map, var_count);
@@ -6092,9 +6157,9 @@ typedef enum Typecheck_Expr_Result {
     TYPECHECK_EXPR_BAD,
 } Typecheck_Expr_Result;
 
-Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to);
+Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Scope *scope, Expr* expr, Type* solidify_to);
 
-bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
+bool resolve_type(Typecheck_Info *info, Scope *scope, Type **type_slot, File_Pos *pos) {
     // The reason we have a pretty complex system here is because we want types to be pointer-equal
 
     Type* type = *type_slot;
@@ -6133,7 +6198,7 @@ bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
                 if (type->flags & TYPE_FLAG_UNRESOLVED) {
                     Expr *length_expr = type->array.expr;
                     Type *type_default_int = &info->context->primitive_types[TYPE_U64];
-                    Typecheck_Expr_Result check_result = typecheck_expr(info, length_expr, type_default_int);
+                    Typecheck_Expr_Result check_result = typecheck_expr(info, scope, length_expr, type_default_int);
                     if (check_result == TYPECHECK_EXPR_BAD) {
                         return false;
                     }
@@ -6196,7 +6261,7 @@ bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
                 assert(type->flags & TYPE_FLAG_UNRESOLVED);
 
-                Type *new = parse_user_type_name(info->context, type->unresolved_name);
+                Type *new = parse_user_type_name(scope, type->unresolved_name);
 
                 if (new == null) {
                     u8* name_string = string_table_access(info->context->string_table, type->unresolved_name);
@@ -6217,12 +6282,12 @@ bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
                 Fn_Signature signature = type->fn_signature;
 
                 for (u32 p = 0; p < signature.param_count; p += 1) {
-                    if (!resolve_type(info, &signature.params[p].type, pos)) {
+                    if (!resolve_type(info, scope, &signature.params[p].type, pos)) {
                         return false;
                     }
                 }
 
-                if (!resolve_type(info, &signature.return_type, pos)) {
+                if (!resolve_type(info, scope, &signature.return_type, pos)) {
                     return false;
                 }
 
@@ -6235,7 +6300,7 @@ bool resolve_type(Typecheck_Info *info, Type **type_slot, File_Pos *pos) {
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
 
                 for (u32 m = 0; m < type->structure.member_count; m += 1) {
-                    if (!resolve_type(info, &type->structure.members[m].type, pos)) {
+                    if (!resolve_type(info, scope, &type->structure.members[m].type, pos)) {
                         return false;
                     }
                 }
@@ -6316,7 +6381,7 @@ bool find_var_in_scope(Typecheck_Info *info, u32 name_index, File_Pos *pos, u32 
 }
 
 
-Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* solidify_to) {
+Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Scope *scope, Expr* expr, Type* solidify_to) {
     bool strong = true;
 
     switch (expr->kind) {
@@ -6434,7 +6499,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 expr->type = solidify_to;
             }
 
-            if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
             switch (expr->type->kind) {
                 case TYPE_ARRAY: {
@@ -6461,7 +6526,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                             return TYPECHECK_EXPR_BAD;
                         }
 
-                        if (typecheck_expr(info, member->expr, expected_child_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+                        if (typecheck_expr(info, scope, member->expr, expected_child_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
                         if (expected_child_type != member->expr->type) {
                             print_file_pos(&expr->pos);
@@ -6527,7 +6592,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                         u32 m = expr->compound.content[i].member_index;
                         Type* member_type = expr->type->structure.members[m].type;
                         
-                        if (typecheck_expr(info, child, member_type) == TYPECHECK_EXPR_BAD) {
+                        if (typecheck_expr(info, scope, child, member_type) == TYPECHECK_EXPR_BAD) {
                             return TYPECHECK_EXPR_BAD;
                         }
 
@@ -6582,14 +6647,14 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             Typecheck_Expr_Result condition_result, left_result, right_result;
 
             Type *type_bool = &info->context->primitive_types[TYPE_BOOL];;
-            condition_result = typecheck_expr(info, expr->ternary.condition, type_bool);
+            condition_result = typecheck_expr(info, scope, expr->ternary.condition, type_bool);
             if (condition_result == TYPECHECK_EXPR_BAD) {
                 return TYPECHECK_EXPR_BAD;
             }
 
 
-            left_result = typecheck_expr(info, expr->ternary.left, solidify_to);
-            right_result = typecheck_expr(info, expr->ternary.right, solidify_to);
+            left_result = typecheck_expr(info, scope, expr->ternary.left, solidify_to);
+            right_result = typecheck_expr(info, scope, expr->ternary.right, solidify_to);
 
             if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD) {
                 return TYPECHECK_EXPR_BAD;
@@ -6597,9 +6662,9 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
             if (expr->ternary.left->type != expr->ternary.right->type) {
                 if (right_result == TYPECHECK_EXPR_WEAK ) {
-                    right_result = typecheck_expr(info, expr->ternary.right, expr->ternary.left->type);
+                    right_result = typecheck_expr(info, scope, expr->ternary.right, expr->ternary.left->type);
                 } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
-                    left_result = typecheck_expr(info, expr->ternary.left, expr->ternary.right->type);
+                    left_result = typecheck_expr(info, scope, expr->ternary.left, expr->ternary.right->type);
                 }
             }
 
@@ -6628,8 +6693,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
             Typecheck_Expr_Result left_result, right_result;
 
-            left_result = typecheck_expr(info, expr->binary.left, solidify_to);
-            right_result = typecheck_expr(info, expr->binary.right, solidify_to);
+            left_result = typecheck_expr(info, scope, expr->binary.left, solidify_to);
+            right_result = typecheck_expr(info, scope, expr->binary.right, solidify_to);
 
             if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD) {
                 return TYPECHECK_EXPR_BAD;
@@ -6637,9 +6702,9 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
             if (expr->binary.left->type != expr->binary.right->type) {
                 if (right_result == TYPECHECK_EXPR_WEAK ) {
-                    right_result = typecheck_expr(info, expr->binary.right, expr->binary.left->type);
+                    right_result = typecheck_expr(info, scope, expr->binary.right, expr->binary.left->type);
                 } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
-                    left_result = typecheck_expr(info, expr->binary.left, expr->binary.right->type);
+                    left_result = typecheck_expr(info, scope, expr->binary.left, expr->binary.right->type);
                 }
             }
 
@@ -6784,7 +6849,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
                 } break;
             }
 
-            Typecheck_Expr_Result inner_result = typecheck_expr(info, expr->unary.inner, solidify_to);
+            Typecheck_Expr_Result inner_result = typecheck_expr(info, scope, expr->unary.inner, solidify_to);
             if (inner_result == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
             if (inner_result == TYPECHECK_EXPR_WEAK) strong = false;
 
@@ -6887,7 +6952,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             u8 *callee_name;
 
             if (expr->call.pointer_call) {
-                if (typecheck_expr(info, expr->call.pointer_expr, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+                if (typecheck_expr(info, scope, expr->call.pointer_expr, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
                 Type *t = expr->call.pointer_expr->type;
                 if (t->kind != TYPE_FN_POINTER) {
@@ -6941,7 +7006,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
                 Type *expected_type = callee_signature->params[p].type;
 
-                if (typecheck_expr(info, param_expr, expected_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+                if (typecheck_expr(info, scope, param_expr, expected_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
                 Type *actual_type = param_expr->type;
                 if (!type_can_assign(expected_type, actual_type)) {
@@ -6958,8 +7023,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_CAST: {
-            if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
-            if (typecheck_expr(info, expr->cast_from, expr->type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (typecheck_expr(info, scope, expr->cast_from, expr->type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
             Type_Kind from = expr->cast_from->type->kind;
             Type_Kind to   = expr->type->kind;
@@ -6990,8 +7055,8 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_SUBSCRIPT: {
-            if (typecheck_expr(info, expr->subscript.array, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
-            if (typecheck_expr(info, expr->subscript.index, &info->context->primitive_types[TYPE_DEFAULT_INT]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (typecheck_expr(info, scope, expr->subscript.array, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (typecheck_expr(info, scope, expr->subscript.index, &info->context->primitive_types[TYPE_DEFAULT_INT]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
             if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE) {
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
@@ -7026,7 +7091,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
             Expr* parent = expr->member_access.parent;
 
             bool bad_but_keep_on_going = false;
-            if (typecheck_expr(info, parent, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) {
+            if (typecheck_expr(info, scope, parent, &info->context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) {
                 if (parent->type == null) {
                     return TYPECHECK_EXPR_BAD;
                 } else {
@@ -7074,7 +7139,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
         case EXPR_STATIC_MEMBER_ACCESS: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                Type *parent = parse_user_type_name(info->context, expr->static_member_access.parent_name);
+                Type *parent = parse_user_type_name(scope, expr->static_member_access.parent_name);
 
                 if (parent == null) {
                     u8* name_string = string_table_access(info->context->string_table, expr->static_member_access.parent_name);
@@ -7118,16 +7183,16 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
 
 
         case EXPR_TYPE_INFO_OF_TYPE: {
-            if (!resolve_type(info, &expr->type_info_of_type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, scope, &expr->type_info_of_type, &expr->pos)) return TYPECHECK_EXPR_BAD;
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
             Type *void_type = &info->context->primitive_types[TYPE_VOID];
-            if (typecheck_expr(info, expr->type_info_of_value, void_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (typecheck_expr(info, scope, expr->type_info_of_value, void_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
         } break;
 
         case EXPR_QUERY_TYPE_INFO: {
-            if (!resolve_type(info, &expr->query_type_info.type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(info, scope, &expr->query_type_info.type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
             if (
                 expr->query_type_info.query == QUERY_TYPE_INFO_ENUM_LENGTH &&
@@ -7142,7 +7207,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
-            if (typecheck_expr(info, expr->enum_member, &info->context->primitive_types[TYPE_INVALID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (typecheck_expr(info, scope, expr->enum_member, &info->context->primitive_types[TYPE_INVALID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
 
             if (expr->enum_member->type->kind != TYPE_ENUM) {
                 print_file_pos(&expr->enum_member->pos);
@@ -7160,7 +7225,7 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
         default: assert(false);
     }
 
-    if (!resolve_type(info, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+    if (!resolve_type(info, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
 
     if (strong) {
         return TYPECHECK_EXPR_STRONG;
@@ -7169,14 +7234,14 @@ Typecheck_Expr_Result typecheck_expr(Typecheck_Info* info, Expr* expr, Type* sol
     }
 }
 
-bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
+bool typecheck_stmt(Typecheck_Info* info, Scope *scope, Stmt* stmt) {
     Type *void_type = &info->context->primitive_types[TYPE_VOID];
 
     switch (stmt->kind) {
         case STMT_ASSIGNMENT: {
-            if (typecheck_expr(info, stmt->assignment.left, void_type) == TYPECHECK_EXPR_BAD) return false;
+            if (typecheck_expr(info, scope, stmt->assignment.left, void_type) == TYPECHECK_EXPR_BAD) return false;
             Type* left_type = stmt->assignment.left->type;
-            if (typecheck_expr(info, stmt->assignment.right, left_type) == TYPECHECK_EXPR_BAD) return false;
+            if (typecheck_expr(info, scope, stmt->assignment.right, left_type) == TYPECHECK_EXPR_BAD) return false;
             Type* right_type = stmt->assignment.right->type;
 
             if (!type_can_assign(right_type, left_type)) {
@@ -7199,7 +7264,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
         } break;
 
         case STMT_EXPR: {
-            if (typecheck_expr(info, stmt->expr, void_type) == TYPECHECK_EXPR_BAD) return false;
+            if (typecheck_expr(info, scope, stmt->expr, void_type) == TYPECHECK_EXPR_BAD) return false;
         } break;
 
         case STMT_DECLARATION: {
@@ -7210,7 +7275,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             bool good_types = true;
 
             if (var->type != null) {
-                if (!resolve_type(info, &var->type, &var->declaration_pos)) {
+                if (!resolve_type(info, scope, &var->type, &var->declaration_pos)) {
                     good_types = false;
                 }
             }
@@ -7220,7 +7285,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     Type* resolve_to = var->type;
                     if (resolve_to == null) resolve_to = &info->context->primitive_types[TYPE_VOID];
 
-                    if (typecheck_expr(info, right, resolve_to) != TYPECHECK_EXPR_BAD) {
+                    if (typecheck_expr(info, scope, right, resolve_to) != TYPECHECK_EXPR_BAD) {
                         if (var->type == null) {
                             var->type = right->type;
                         } else {
@@ -7242,7 +7307,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     }
                 } else {
                     assert(var->type != null);
-                    if (!resolve_type(info, &var->type, &var->declaration_pos)) {
+                    if (!resolve_type(info, scope, &var->type, &var->declaration_pos)) {
                         good_types = false;
                     }
                 }
@@ -7262,15 +7327,15 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
         case STMT_BLOCK: {
             typecheck_scope_push(info);
-            for (Stmt* inner = stmt->block; inner->kind != STMT_END; inner = inner->next) {
-                if (!typecheck_stmt(info, inner)) return false;
+            for (Stmt* inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
+                if (!typecheck_stmt(info, &stmt->block.scope, inner)) return false;
             }
             typecheck_scope_pop(info);
         } break;
 
         case STMT_IF: {
             Type* type_bool = &info->context->primitive_types[TYPE_BOOL];
-            if (typecheck_expr(info, stmt->conditional.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
+            if (typecheck_expr(info, scope, stmt->conditional.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
 
             Type_Kind condition_primitive = stmt->conditional.condition->type->kind;
             if (condition_primitive != TYPE_BOOL) {
@@ -7283,14 +7348,14 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
             typecheck_scope_push(info);
             for (Stmt* inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
-                if (!typecheck_stmt(info, inner)) return false;
+                if (!typecheck_stmt(info, &stmt->conditional.then_scope, inner)) return false;
             }
             typecheck_scope_pop(info);
 
             if (stmt->conditional.else_then != null) {
                 typecheck_scope_push(info);
                 for (Stmt* inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    if (!typecheck_stmt(info, inner)) return false;
+                    if (!typecheck_stmt(info, &stmt->conditional.else_then_scope, inner)) return false;
                 }
                 typecheck_scope_pop(info);
             }
@@ -7301,7 +7366,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
             if (stmt->loop.kind == LOOP_CONDITIONAL) {
                 Type *type_bool = &info->context->primitive_types[TYPE_BOOL];
-                if (typecheck_expr(info, stmt->loop.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
+                if (typecheck_expr(info, scope, stmt->loop.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
 
                 Type_Kind condition_primitive = stmt->loop.condition->type->kind;
                 if (condition_primitive != TYPE_BOOL) {
@@ -7317,16 +7382,16 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
 
                 Type *type_default_int = &info->context->primitive_types[TYPE_DEFAULT_INT];
                 Typecheck_Expr_Result start_result, end_result;
-                start_result = typecheck_expr(info, start, type_default_int);
-                end_result   = typecheck_expr(info, end,   type_default_int);
+                start_result = typecheck_expr(info, scope, start, type_default_int);
+                end_result   = typecheck_expr(info, scope, end,   type_default_int);
 
                 if (start_result == TYPECHECK_EXPR_BAD || end_result == TYPECHECK_EXPR_BAD) return false;
 
                 if (start->type != end->type) {
                     if (end_result == TYPECHECK_EXPR_WEAK) {
-                        end_result = typecheck_expr(info, end, start->type);
+                        end_result = typecheck_expr(info, scope, end, start->type);
                     } else if (start_result == TYPECHECK_EXPR_WEAK && end_result == TYPECHECK_EXPR_STRONG) {
-                        start_result = typecheck_expr(info, start, end->type);
+                        start_result = typecheck_expr(info, scope, start, end->type);
                     }
                 }
 
@@ -7362,7 +7427,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
             }
 
             for (Stmt* inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
-                if (!typecheck_stmt(info, inner)) return false;
+                if (!typecheck_stmt(info, &stmt->loop.scope, inner)) return false;
             }
             typecheck_scope_pop(info);
         } break;
@@ -7388,7 +7453,7 @@ bool typecheck_stmt(Typecheck_Info* info, Stmt* stmt) {
                     return false;
                 }
 
-                if (typecheck_expr(info, stmt->return_stmt.value, expected_type) == TYPECHECK_EXPR_BAD) return false;
+                if (typecheck_expr(info, scope, stmt->return_stmt.value, expected_type) == TYPECHECK_EXPR_BAD) return false;
 
                 if (!type_can_assign(expected_type, stmt->return_stmt.value->type)) {
                     u8* name = string_table_access(info->context->string_table, info->fn->name);
@@ -7833,7 +7898,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             {} break;
 
             case STMT_BLOCK: {
-                Control_Flow_Result result = check_control_flow(stmt->block, parent_loop, return_would_be_trailing && is_last_stmt);
+                Control_Flow_Result result = check_control_flow(stmt->block.stmt, parent_loop, return_would_be_trailing && is_last_stmt);
                 switch (result) {
                     case CONTROL_FLOW_WILL_RETURN: has_returned = true; break;
                     case CONTROL_FLOW_MIGHT_RETURN: break;
@@ -7915,7 +7980,7 @@ bool typecheck(Context *context) {
                         File_Pos* member_pos = &type->structure.members[m].declaration_pos;
                         Type *member_type = type->structure.members[m].type;
 
-                        if (!resolve_type(&info, &member_type, member_pos)) {
+                        if (!resolve_type(&info, &context->global_scope, &member_type, member_pos)) {
                             valid = false;
                             break;
                         }
@@ -8071,7 +8136,7 @@ bool typecheck(Context *context) {
 
     // Functions
     buf_foreach (Fn, fn, context->fns) {
-        if (!resolve_type(&info, &fn->signature_type, &fn->declaration_pos)) {
+        if (!resolve_type(&info, &context->global_scope, &fn->signature_type, &fn->declaration_pos)) {
             valid = false;
         }
 
@@ -8086,7 +8151,7 @@ bool typecheck(Context *context) {
 
         bool resolved_type = global->var.type != null;
 
-        if (global->var.type != null && !resolve_type(&info, &global->var.type, &global->var.declaration_pos)) {
+        if (global->var.type != null && !resolve_type(&info, &context->global_scope, &global->var.type, &global->var.declaration_pos)) {
             valid = false;
             continue;
         }
@@ -8097,7 +8162,7 @@ bool typecheck(Context *context) {
             Type* resolve_to = global->var.type;
             if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
-            if (typecheck_expr(&info, global->initial_expr, resolve_to) != TYPECHECK_EXPR_BAD) {
+            if (typecheck_expr(&info, &context->global_scope, global->initial_expr, resolve_to) != TYPECHECK_EXPR_BAD) {
                 if (global->var.type == null) {
                     global->var.type = global->initial_expr->type;
                     resolved_type = true;
@@ -8176,7 +8241,7 @@ bool typecheck(Context *context) {
 
         // Body types
         for (Stmt* stmt = info.fn->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
-            if (!typecheck_stmt(&info, stmt)) {
+            if (!typecheck_stmt(&info, info.fn->body.scope, stmt)) {
                 valid = false;
             }
         }
@@ -11553,7 +11618,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
         } break;
 
         case STMT_BLOCK: {
-            for (Stmt *inner = stmt->block; inner->kind != STMT_END; inner = inner->next) {
+            for (Stmt *inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
                 machinecode_for_stmt(context, fn, inner, reg_allocator);
             }
         } break;
