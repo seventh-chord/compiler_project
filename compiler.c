@@ -4849,13 +4849,15 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
             } break;
 
             case TOKEN_KEYWORD_FOR: {
+                stmt->kind = STMT_LOOP;
+                stmt->loop.scope.parent = scope;
+                stmt->loop.scope.fn = scope->fn;
+
                 t += 1;
 
                 // for {}
                 if (t[0].kind == TOKEN_BRACKET_CURLY_OPEN) {
-                    stmt->kind = STMT_LOOP;
                     stmt->loop.kind = LOOP_INFINITE;
-                    stmt->loop.scope.parent = scope;
 
                     u32 body_length = 0;
                     stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
@@ -4867,9 +4869,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
 
                 // for item : <range> {}
                 } else if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-                    stmt->kind = STMT_LOOP;
                     stmt->loop.kind = LOOP_RANGE;
-                    stmt->loop.scope.parent = scope;
 
                     u32 index_var_name = t[0].identifier_string_table_index;
                     File_Pos index_var_pos = t[0].pos;
@@ -4922,9 +4922,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
 
                 // for <condition> {}
                 } else {
-                    stmt->kind = STMT_LOOP;
                     stmt->loop.kind = LOOP_CONDITIONAL;
-                    stmt->loop.scope.parent = scope;
 
                     u32 first_length = 0;
                     stmt->loop.condition = parse_expr(context, scope, t, &first_length, true);
@@ -5050,7 +5048,8 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 var->name = name_index;
                 var->declaration_pos = stmt->pos,
                 var->type = type;
-                var->global_index = U32_MAX;
+                var->local_index = scope->fn->body.var_count;
+                scope->fn->body.var_count += 1;
 
                 Decl *decl = add_declaration(&context->arena, scope);
                 decl->kind = DECL_VAR;
@@ -6118,6 +6117,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             }
             t += 1;
 
+            // TODO Only scan the current scope for conflicting global variable names
             bool redeclaration = false;
             buf_foreach (Global_Var, old_global, context->global_vars) {
                 if (old_global->var->name == name_index) {
@@ -6145,6 +6145,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 var->name = name_index;
                 var->declaration_pos = start_pos;
                 var->type = type;
+                var->is_global = true;
                 var->global_index = global_index;
 
                 Decl *decl = add_declaration(&context->arena, &context->global_scope);
@@ -6188,20 +6189,29 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 typedef enum Eval_Result {
     EVAL_OK,
     EVAL_BAD,
+    EVAL_DEPENDENT,
     EVAL_DO_AT_RUNTIME,
 } Eval_Result;
 
 // NB This will allocate on context->stack, push/pop before/after
 Eval_Result eval_compile_time_expr(Context *context, Expr *expr, u8 *result_into);
 
+typedef enum Typecheck_Result {
+    TYPECHECK_RESULT_DONE,
+    TYPECHECK_RESULT_DEPENDENT,
+    TYPECHECK_RESULT_BAD,
+} Typecheck_Result;
+
 typedef enum Typecheck_Expr_Result {
+    TYPECHECK_EXPR_DEPENDENT = TYPECHECK_RESULT_DEPENDENT,
+    TYPECHECK_EXPR_BAD = TYPECHECK_RESULT_BAD,
     TYPECHECK_EXPR_STRONG,
-    TYPECHECK_EXPR_WEAK , // Used for e.g. integer literals, which can solidify to any integer type
-    TYPECHECK_EXPR_BAD,
+    TYPECHECK_EXPR_WEAK, // Used for e.g. integer literals, which can solidify to any integer type
 } Typecheck_Expr_Result;
 
 Typecheck_Expr_Result typecheck_expr(Context* info, Scope *scope, Expr* expr, Type* solidify_to);
 
+// TODO should return 'Typecheck_Result', so we can do out of order stuff
 bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *pos) {
     // The reason we have a pretty complex system here is because we want types to be pointer-equal
 
@@ -6242,8 +6252,8 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                     Expr *length_expr = type->array.expr;
                     Type *type_default_int = &context->primitive_types[TYPE_U64];
                     Typecheck_Expr_Result check_result = typecheck_expr(context, scope, length_expr, type_default_int);
-                    if (check_result == TYPECHECK_EXPR_BAD) {
-                        return false;
+                    if (check_result == TYPECHECK_EXPR_BAD || check_result == TYPECHECK_EXPR_DEPENDENT) {
+                        return check_result;
                     }
 
                     if (!primitive_is_integer(length_expr->type->kind)) {
@@ -6257,33 +6267,38 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                     Eval_Result eval_result = eval_compile_time_expr(context, length_expr, (u8*) &length);
                     arena_stack_pop(&context->stack);
 
-                    if (eval_result == EVAL_BAD) {
-                        return false;
-                    } else if (eval_result == EVAL_DO_AT_RUNTIME) {
-                        print_file_pos(&length_expr->pos);
-                        printf("Can't evaluate expression for array length at compile time\n");
-                        return false;
-                    } else if (eval_result == EVAL_OK) {
-                        if (primitive_is_signed(length_expr->type->kind)) {
-                            i64 signed_length = length;
-                            switch (length_expr->type->kind) {
-                                case TYPE_I8:  signed_length = (i64) (*((i8*)  &signed_length)); break;
-                                case TYPE_I16: signed_length = (i64) (*((i16*) &signed_length)); break;
-                                case TYPE_I32: signed_length = (i64) (*((i32*) &signed_length)); break;
-                                case TYPE_I64: break;
-                                default: assert(false);
+                    switch (eval_result) {
+                        case EVAL_BAD:       return false;
+                        case EVAL_DEPENDENT: unimplemented();
+
+                        case EVAL_DO_AT_RUNTIME: {
+                            print_file_pos(&length_expr->pos);
+                            printf("Can't evaluate expression for array length at compile time\n");
+                            return false;
+                        } break;
+
+                        case EVAL_OK: {
+                            if (primitive_is_signed(length_expr->type->kind)) {
+                                i64 signed_length = length;
+                                switch (length_expr->type->kind) {
+                                    case TYPE_I8:  signed_length = (i64) (*((i8*)  &signed_length)); break;
+                                    case TYPE_I16: signed_length = (i64) (*((i16*) &signed_length)); break;
+                                    case TYPE_I32: signed_length = (i64) (*((i32*) &signed_length)); break;
+                                    case TYPE_I64: break;
+                                    default: assert(false);
+                                }
+
+                                if (signed_length < 0) {
+                                    print_file_pos(&length_expr->pos);
+                                    printf("Can't use negative array length %i\n", signed_length);
+                                    return false;
+                                }
                             }
 
-                            if (signed_length < 0) {
-                                print_file_pos(&length_expr->pos);
-                                printf("Can't use negative array length %i\n", signed_length);
-                                return false;
-                            }
-                        }
+                            type = get_array_type(context, type->array.of, length);
+                        } break;
 
-                        type = get_array_type(context, type->array.of, length);
-                    } else {
-                        assert(false);
+                        default: assert(false);
                     }
                 }
 
@@ -6389,6 +6404,13 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     return TYPECHECK_EXPR_BAD;
                 }
 
+                if (var->is_global) {
+                    Global_Var *global = &context->global_vars[var->global_index];
+                    if (!global->checked) {
+                        return TYPECHECK_EXPR_DEPENDENT;
+                    }
+                }
+
                 expr->variable.var = var;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
@@ -6483,7 +6505,13 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 expr->type = solidify_to;
             }
 
-            if (!resolve_type(context, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            if (!resolve_type(context, scope, &expr->type, &expr->pos)) {
+                return TYPECHECK_EXPR_BAD;
+            }
+
+            if (expr->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                return TYPECHECK_EXPR_DEPENDENT;
+            }
 
             switch (expr->type->kind) {
                 case TYPE_ARRAY: {
@@ -6510,7 +6538,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                             return TYPECHECK_EXPR_BAD;
                         }
 
-                        if (typecheck_expr(context, scope, member->expr, expected_child_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+                        Typecheck_Expr_Result r = typecheck_expr(context, scope, member->expr, expected_child_type);
+                        if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                         if (expected_child_type != member->expr->type) {
                             print_file_pos(&expr->pos);
@@ -6574,11 +6603,10 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         }
 
                         u32 m = expr->compound.content[i].member_index;
-                        Type* member_type = expr->type->structure.members[m].type;
+                        Type *member_type = expr->type->structure.members[m].type;
                         
-                        if (typecheck_expr(context, scope, child, member_type) == TYPECHECK_EXPR_BAD) {
-                            return TYPECHECK_EXPR_BAD;
-                        }
+                        Typecheck_Expr_Result r = typecheck_expr(context, scope, child, member_type);
+                        if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                         if (!type_can_assign(member_type, child->type)) {
                             u8* member_name = string_table_access(context->string_table, expr->type->structure.members[m].name);
@@ -6632,17 +6660,14 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
             Type *type_bool = &context->primitive_types[TYPE_BOOL];;
             condition_result = typecheck_expr(context, scope, expr->ternary.condition, type_bool);
-            if (condition_result == TYPECHECK_EXPR_BAD) {
-                return TYPECHECK_EXPR_BAD;
-            }
+            if (condition_result == TYPECHECK_EXPR_BAD || condition_result == TYPECHECK_EXPR_DEPENDENT) return condition_result;
 
 
             left_result = typecheck_expr(context, scope, expr->ternary.left, solidify_to);
             right_result = typecheck_expr(context, scope, expr->ternary.right, solidify_to);
 
-            if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD) {
-                return TYPECHECK_EXPR_BAD;
-            }
+            if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD)  return TYPECHECK_EXPR_BAD;
+            if (left_result == TYPECHECK_EXPR_DEPENDENT || right_result == TYPECHECK_EXPR_DEPENDENT) return TYPECHECK_EXPR_DEPENDENT;
 
             if (expr->ternary.left->type != expr->ternary.right->type) {
                 if (right_result == TYPECHECK_EXPR_WEAK ) {
@@ -6652,7 +6677,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
             }
 
-            assert(left_result != TYPECHECK_EXPR_BAD && right_result != TYPECHECK_EXPR_BAD);
+            assert(left_result != TYPECHECK_EXPR_BAD && left_result != TYPECHECK_EXPR_DEPENDENT);
+            assert(right_result != TYPECHECK_EXPR_BAD && right_result != TYPECHECK_EXPR_DEPENDENT);
             if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_WEAK ) {
                 strong = false;
             }
@@ -6677,12 +6703,11 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
             Typecheck_Expr_Result left_result, right_result;
 
-            left_result = typecheck_expr(context, scope, expr->binary.left, solidify_to);
+            left_result  = typecheck_expr(context, scope, expr->binary.left, solidify_to);
             right_result = typecheck_expr(context, scope, expr->binary.right, solidify_to);
 
-            if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD) {
-                return TYPECHECK_EXPR_BAD;
-            }
+            if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD)  return TYPECHECK_EXPR_BAD;
+            if (left_result == TYPECHECK_EXPR_DEPENDENT || right_result == TYPECHECK_EXPR_DEPENDENT) return TYPECHECK_EXPR_DEPENDENT;
 
             if (expr->binary.left->type != expr->binary.right->type) {
                 if (right_result == TYPECHECK_EXPR_WEAK ) {
@@ -6692,7 +6717,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
             }
 
-            assert(left_result != TYPECHECK_EXPR_BAD && right_result != TYPECHECK_EXPR_BAD);
+            assert(left_result != TYPECHECK_EXPR_BAD && left_result != TYPECHECK_EXPR_DEPENDENT);
+            assert(right_result != TYPECHECK_EXPR_BAD && right_result != TYPECHECK_EXPR_DEPENDENT);
             if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_WEAK ) {
                 strong = false;
             }
@@ -6833,7 +6859,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             }
 
             Typecheck_Expr_Result inner_result = typecheck_expr(context, scope, expr->unary.inner, solidify_to);
-            if (inner_result == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            if (inner_result == TYPECHECK_EXPR_BAD || inner_result == TYPECHECK_EXPR_DEPENDENT) return inner_result;
             if (inner_result == TYPECHECK_EXPR_WEAK) strong = false;
 
             switch (expr->unary.op) {
@@ -6928,11 +6954,12 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            Fn_Signature *callee_signature;
+            Type *callee_signature_type;
             u8 *callee_name;
 
             if (expr->call.pointer_call) {
-                if (typecheck_expr(context, scope, expr->call.pointer_expr, &context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->call.pointer_expr, &context->primitive_types[TYPE_VOID]);
+                if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 Type *t = expr->call.pointer_expr->type;
                 if (t->kind != TYPE_FN_POINTER) {
@@ -6943,7 +6970,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     return TYPECHECK_EXPR_BAD;
                 }
 
-                callee_signature = &t->fn_signature;
+                callee_signature_type = t;
 
                 if (expr->call.pointer_expr->kind == EXPR_VARIABLE) {
                     assert(!(expr->call.pointer_expr->flags & EXPR_FLAG_UNRESOLVED));
@@ -6954,8 +6981,15 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
             } else {
                 Fn *callee = expr->call.callee;
-                callee_signature = callee->signature;
+                callee_signature_type = callee->signature_type;
                 callee_name = string_table_access(context->string_table, callee->name);
+            }
+
+            assert(callee_signature_type->kind == TYPE_FN_POINTER);
+            Fn_Signature *callee_signature = &callee_signature_type->fn_signature;
+
+            if (callee_signature_type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
+                return TYPECHECK_EXPR_DEPENDENT;
             }
 
             expr->type = callee_signature->return_type;
@@ -6977,7 +7011,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
                 Type *expected_type = callee_signature->params[p].type;
 
-                if (typecheck_expr(context, scope, param_expr, expected_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, param_expr, expected_type);
+                if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 Type *actual_type = param_expr->type;
                 if (!type_can_assign(expected_type, actual_type)) {
@@ -6995,7 +7030,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
         case EXPR_CAST: {
             if (!resolve_type(context, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
-            if (typecheck_expr(context, scope, expr->cast_from, expr->type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->cast_from, expr->type);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             Type_Kind from = expr->cast_from->type->kind;
             Type_Kind to   = expr->type->kind;
@@ -7026,8 +7063,12 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_SUBSCRIPT: {
-            if (typecheck_expr(context, scope, expr->subscript.array, &context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
-            if (typecheck_expr(context, scope, expr->subscript.index, &context->primitive_types[TYPE_DEFAULT_INT]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            Typecheck_Expr_Result r;
+
+            r = typecheck_expr(context, scope, expr->subscript.array, &context->primitive_types[TYPE_VOID]);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
+            r = typecheck_expr(context, scope, expr->subscript.index, &context->primitive_types[TYPE_DEFAULT_INT]);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE) {
                 expr->flags |= EXPR_FLAG_ASSIGNABLE;
@@ -7061,12 +7102,13 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         case EXPR_MEMBER_ACCESS: {
             Expr* parent = expr->member_access.parent;
 
-            bool bad_but_keep_on_going = false;
-            if (typecheck_expr(context, scope, parent, &context->primitive_types[TYPE_VOID]) == TYPECHECK_EXPR_BAD) {
+            Typecheck_Expr_Result bad_but_keep_on_going = TYPECHECK_EXPR_STRONG;
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, parent, &context->primitive_types[TYPE_VOID]);
+            if (r == TYPECHECK_EXPR_BAD ||  r == TYPECHECK_EXPR_DEPENDENT) {
                 if (parent->type == null) {
-                    return TYPECHECK_EXPR_BAD;
+                    return r;
                 } else {
-                    bad_but_keep_on_going = true;
+                    bad_but_keep_on_going = r;
                 }
             }
 
@@ -7105,7 +7147,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
             }
 
-            if (bad_but_keep_on_going) return TYPECHECK_EXPR_BAD;
+            if (bad_but_keep_on_going != TYPECHECK_EXPR_STRONG) return bad_but_keep_on_going;
         } break;
 
         case EXPR_STATIC_MEMBER_ACCESS: {
@@ -7159,7 +7201,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
         case EXPR_TYPE_INFO_OF_VALUE: {
             Type *void_type = &context->primitive_types[TYPE_VOID];
-            if (typecheck_expr(context, scope, expr->type_info_of_value, void_type) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->type_info_of_value, void_type);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
         } break;
 
         case EXPR_QUERY_TYPE_INFO: {
@@ -7178,7 +7221,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
-            if (typecheck_expr(context, scope, expr->enum_member, &context->primitive_types[TYPE_INVALID]) == TYPECHECK_EXPR_BAD) return TYPECHECK_EXPR_BAD;
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->enum_member, &context->primitive_types[TYPE_INVALID]);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             if (expr->enum_member->type->kind != TYPE_ENUM) {
                 print_file_pos(&expr->enum_member->pos);
@@ -7190,7 +7234,10 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_ADDRESS_OF_FUNCTION: {
-            assert(false); // We only generate 'EXPR_ADDRESS_OF_FUNCTION' from within 'typecheck_expr'
+            // We only generate 'EXPR_ADDRESS_OF_FUNCTION' from within 'typecheck_expr',
+            // so we don't need to do anything more if we get here, because that means we are
+            // allready on a second pass (retrying because we had missing dependencies
+            // on the first pass)
         } break;
 
         default: assert(false);
@@ -7205,14 +7252,19 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
     }
 }
 
-bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
+Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
     Type *void_type = &context->primitive_types[TYPE_VOID];
 
     switch (stmt->kind) {
         case STMT_ASSIGNMENT: {
-            if (typecheck_expr(context, scope, stmt->assignment.left, void_type) == TYPECHECK_EXPR_BAD) return false;
+            Typecheck_Expr_Result r;
+
+            r = typecheck_expr(context, scope, stmt->assignment.left, void_type);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
             Type* left_type = stmt->assignment.left->type;
-            if (typecheck_expr(context, scope, stmt->assignment.right, left_type) == TYPECHECK_EXPR_BAD) return false;
+
+            r = typecheck_expr(context, scope, stmt->assignment.right, left_type);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
             Type* right_type = stmt->assignment.right->type;
 
             if (!type_can_assign(right_type, left_type)) {
@@ -7222,7 +7274,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 printf(" vs ");
                 print_type(context, right_type);
                 printf("\n");
-                return false;
+                return TYPECHECK_RESULT_BAD;
             }
 
             if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
@@ -7230,77 +7282,66 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 printf("Can't assign to left hand side: ");
                 print_expr(context, stmt->assignment.left);
                 printf("\n");
-                return false;
+                return TYPECHECK_RESULT_BAD;
             }
         } break;
 
         case STMT_EXPR: {
-            if (typecheck_expr(context, scope, stmt->expr, void_type) == TYPECHECK_EXPR_BAD) return false;
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->expr, void_type);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
         } break;
 
         case STMT_LET: {
             Var* var = stmt->let.var;
             Expr* right = stmt->let.right;
 
-            bool good_types = true;
-
             if (var->type != null) {
                 if (!resolve_type(context, scope, &var->type, &var->declaration_pos)) {
-                    good_types = false;
+                    return TYPECHECK_RESULT_BAD;
                 }
             }
 
-            if (good_types) {
-                if (right != null) {
-                    Type* resolve_to = var->type;
-                    if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
+            if (right != null) {
+                Type* resolve_to = var->type;
+                if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
-                    if (typecheck_expr(context, scope, right, resolve_to) != TYPECHECK_EXPR_BAD) {
-                        if (var->type == null) {
-                            var->type = right->type;
-                        } else {
-                            if (!type_can_assign(var->type, right->type)) {
-                                print_file_pos(&stmt->pos);
-                                printf("Right hand side of variable declaration doesn't have correct type. Expected ");
-                                print_type(context, var->type);
-                                printf(" but got ");
-                                print_type(context, right->type);
-                                printf("\n");
-                                good_types = false;
-                            }
-                        }
-                    } else {
-                        if (var->type == null) {
-                            var->type = right->type;
-                        }
-                        good_types = false;
-                    }
-                } else {
-                    assert(var->type != null);
-                    if (!resolve_type(context, scope, &var->type, &var->declaration_pos)) {
-                        good_types = false;
-                    }
-                }
-            }
-
-            if (!good_types) {
-                if (var->type == null) {
-                    // This only is here to prevent the compiler from crashing when typechecking further statements
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, right, resolve_to);
+                if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
                     var->type = &context->primitive_types[TYPE_INVALID];
+                    return r;
+                } else {
+                    if (var->type == null || var->type->kind == TYPE_INVALID) {
+                        var->type = right->type;
+                    } else {
+                        if (!type_can_assign(var->type, right->type)) {
+                            u8 *var_name = string_table_access(context->string_table, var->name);
+
+                            print_file_pos(&stmt->pos);
+                            printf("Invalid declaration: '%s' has type ", var_name);
+                            print_type(context, var->type);
+                            printf(" but right hand side has type ");
+                            print_type(context, right->type);
+                            printf("\n");
+                            return TYPECHECK_RESULT_BAD;
+                        }
+                    }
                 }
-                return false;
             }
+
+            return TYPECHECK_RESULT_DONE;
         } break;
 
         case STMT_BLOCK: {
             for (Stmt* inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
-                if (!typecheck_stmt(context, &stmt->block.scope, inner)) return false;
+                Typecheck_Result r = typecheck_stmt(context, &stmt->block.scope, inner);
+                if (r != TYPECHECK_RESULT_DONE) return r;
             }
         } break;
 
         case STMT_IF: {
             Type* type_bool = &context->primitive_types[TYPE_BOOL];
-            if (typecheck_expr(context, scope, stmt->conditional.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->conditional.condition, type_bool);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             Type_Kind condition_primitive = stmt->conditional.condition->type->kind;
             if (condition_primitive != TYPE_BOOL) {
@@ -7308,16 +7349,18 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 printf("Expected bool but got ");
                 print_type(context, stmt->conditional.condition->type);
                 printf(" in 'if'-statement\n");
-                return false;
+                return TYPECHECK_RESULT_BAD;
             }
 
             for (Stmt* inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
-                if (!typecheck_stmt(context, &stmt->conditional.then_scope, inner)) return false;
+                Typecheck_Result r = typecheck_stmt(context, &stmt->conditional.then_scope, inner);
+                if (r != TYPECHECK_RESULT_DONE) return r;
             }
 
             if (stmt->conditional.else_then != null) {
                 for (Stmt* inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    if (!typecheck_stmt(context, &stmt->conditional.else_then_scope, inner)) return false;
+                    Typecheck_Result r = typecheck_stmt(context, &stmt->conditional.else_then_scope, inner);
+                    if (r != TYPECHECK_RESULT_DONE) return r;
                 }
             }
         } break;
@@ -7325,7 +7368,8 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         case STMT_LOOP: {
             if (stmt->loop.kind == LOOP_CONDITIONAL) {
                 Type *type_bool = &context->primitive_types[TYPE_BOOL];
-                if (typecheck_expr(context, scope, stmt->loop.condition, type_bool) == TYPECHECK_EXPR_BAD) return false;
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->loop.condition, type_bool);
+                if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 Type_Kind condition_primitive = stmt->loop.condition->type->kind;
                 if (condition_primitive != TYPE_BOOL) {
@@ -7333,7 +7377,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf("Expected bool but got ");
                     print_type(context, stmt->loop.condition->type);
                     printf(" in 'for'-loop\n");
-                    return false;
+                    return TYPECHECK_RESULT_DONE;
                 }
             } else if (stmt->loop.kind == LOOP_RANGE) {
                 Expr *start = stmt->loop.range.start;
@@ -7344,7 +7388,8 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 start_result = typecheck_expr(context, scope, start, type_default_int);
                 end_result   = typecheck_expr(context, scope, end,   type_default_int);
 
-                if (start_result == TYPECHECK_EXPR_BAD || end_result == TYPECHECK_EXPR_BAD) return false;
+                if (start_result == TYPECHECK_EXPR_BAD || end_result == TYPECHECK_EXPR_BAD) return TYPECHECK_RESULT_BAD;
+                if (start_result == TYPECHECK_EXPR_DEPENDENT || end_result == TYPECHECK_EXPR_DEPENDENT) return TYPECHECK_RESULT_DEPENDENT;
 
                 if (start->type != end->type) {
                     if (end_result == TYPECHECK_EXPR_WEAK) {
@@ -7361,7 +7406,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf(" vs ");
                     print_type(context, end->type);
                     printf("\n");
-                    return false;
+                    return TYPECHECK_RESULT_BAD;
                 }
 
                 Type *index_type = start->type;
@@ -7370,7 +7415,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf("Can't iterate over a range of ");
                     print_type(context, index_type);
                     printf("\n");
-                    return false;
+                    return TYPECHECK_RESULT_BAD;
                 }
 
                 stmt->loop.range.var->type = index_type;
@@ -7381,7 +7426,8 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             }
 
             for (Stmt* inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
-                if (!typecheck_stmt(context, &stmt->loop.scope, inner)) return false;
+                Typecheck_Result r = typecheck_stmt(context, &stmt->loop.scope, inner);
+                if (r != TYPECHECK_RESULT_DONE) return r;
             }
         } break;
 
@@ -7393,7 +7439,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     u8* name = string_table_access(context->string_table, scope->fn->name);
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is not declared to return anything, but tried to return a value\n", name);
-                    return false;
+                    return TYPECHECK_RESULT_BAD;
                 }
 
             } else {
@@ -7405,10 +7451,11 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf("Function '%s' is declared to return a ", name);
                     print_type(context, expected_type);
                     printf(", but tried to return a value. value\n");
-                    return false;
+                    return TYPECHECK_RESULT_BAD;
                 }
 
-                if (typecheck_expr(context, scope, stmt->return_stmt.value, expected_type) == TYPECHECK_EXPR_BAD) return false;
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->return_stmt.value, expected_type);
+                if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 if (!type_can_assign(expected_type, stmt->return_stmt.value->type)) {
                     u8* name = string_table_access(context->string_table, scope->fn->name);
@@ -7418,7 +7465,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf(" but got ");
                     print_type(context, stmt->return_stmt.value->type);
                     printf(" for return value in function '%s'\n", name);
-                    return false;
+                    return TYPECHECK_RESULT_BAD;
                 }
             }
         } break;
@@ -7431,7 +7478,7 @@ bool typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         default: assert(false);
     }
 
-    return true;
+    return TYPECHECK_RESULT_DONE;
 }
 
 // NB This will allocate on context->stack, push/pop before/after
@@ -7467,8 +7514,7 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                 mem_copy(other_value, result_into, type_size);
                 return EVAL_OK;
             } else if (!global->checked) {
-                unimplemented(); // TODO :scope signal that we should try reevaluating this
-                return EVAL_BAD;
+                return EVAL_DEPENDENT;
             } else {
                 return EVAL_BAD;
             }
@@ -7913,12 +7959,6 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
 }
 
 
-typedef enum Typecheck_Result {
-    TYPECHECK_RESULT_DONE,
-    TYPECHECK_RESULT_DEPENDENT,
-    TYPECHECK_RESULT_BAD,
-} Typecheck_Result;
-
 typedef struct Typecheck_Item {
     enum {
         TYPECHECK_RESOLVE_TYPE,
@@ -8018,45 +8058,41 @@ Typecheck_Result compute_size_of_struct(Type *type) {
     return TYPECHECK_RESULT_DONE;
 }
 
-bool check_global(Context *context, Global_Var *global) {
-    global->checked = true;
-
-    bool resolved_type = global->var->type != null;
-
-    if (global->var->type != null && !resolve_type(context, &context->global_scope, &global->var->type, &global->var->declaration_pos)) {
-        return false;
+Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global) {
+    if (global->var->type != null && !resolve_type(context, scope, &global->var->type, &global->var->declaration_pos)) {
+        return TYPECHECK_RESULT_BAD;
     }
 
     if (global->initial_expr != null) {
-        resolved_type = false;
-
-        Type* resolve_to = global->var->type;
+        Type *resolve_to = global->var->type;
         if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
-        if (typecheck_expr(context, &context->global_scope, global->initial_expr, resolve_to) != TYPECHECK_EXPR_BAD) {
-            if (global->var->type == null) {
-                global->var->type = global->initial_expr->type;
-                resolved_type = true;
-            } else if (!type_can_assign(global->var->type, global->initial_expr->type)) {
-                print_file_pos(&global->var->declaration_pos);
-                printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
-                print_type(context, global->var->type);
-                printf(" but got ");
-                print_type(context, global->initial_expr->type);
-                printf("\n");
-            } else {
-                resolved_type = true;
-            }
+        Typecheck_Expr_Result r = typecheck_expr(context, scope, global->initial_expr, resolve_to);
+        if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
+            return r;
+        }
+
+        if (global->var->type == null) {
+            global->var->type = global->initial_expr->type;
+        }
+        
+        if (!type_can_assign(global->var->type, global->initial_expr->type)) {
+            print_file_pos(&global->var->declaration_pos);
+            printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
+            print_type(context, global->var->type);
+            printf(" but got ");
+            print_type(context, global->initial_expr->type);
+            printf("\n");
+            return TYPECHECK_RESULT_BAD;
         }
     }
 
-    if (!resolved_type) {
-        return false;
+    if (global->var->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+        return TYPECHECK_RESULT_DEPENDENT;
     }
 
     u64 type_size = type_size_of(global->var->type);
     u64 type_align = type_align_of(global->var->type);
-    assert(type_size > 0);
 
     global->data_offset = add_exe_data(context, null, type_size, type_align);
     u8* result_into = &context->seg_data[global->data_offset];
@@ -8070,25 +8106,36 @@ bool check_global(Context *context, Global_Var *global) {
 
         switch (result) {
             case EVAL_OK: {
+                global->checked = true;
                 global->valid = true;
                 global->compute_at_runtime = false;
             } break;
 
-            case EVAL_BAD: {
-                return false;
-            } break;
-
             case EVAL_DO_AT_RUNTIME: {
+                global->checked = true;
                 global->valid = true;
                 global->compute_at_runtime = true;
             } break;
+
+            case EVAL_BAD: {
+                global->checked = true;
+                return TYPECHECK_RESULT_BAD;
+            } break;
+
+            case EVAL_DEPENDENT: {
+                global->checked = false;
+                return TYPECHECK_RESULT_DEPENDENT;
+            } break;
+
+            default: assert(false);
         }
     } else {
+        global->checked = true;
         global->valid = true;
         global->compute_at_runtime = false;
     }
 
-    return true;
+    return TYPECHECK_RESULT_DONE;
 }
 
 Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) {
@@ -8120,9 +8167,8 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
 
                 // Body types
                 for (Stmt* stmt = fn->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
-                    if (!typecheck_stmt(context, &fn->body.scope, stmt)) {
-                        return TYPECHECK_RESULT_BAD;
-                    }
+                    Typecheck_Result r = typecheck_stmt(context, &fn->body.scope, stmt);
+                    if (r != TYPECHECK_RESULT_DONE) return r;
                 }
 
                 // Control flow
@@ -8144,8 +8190,7 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
 
         case TYPECHECK_GLOBAL_VAR: {
             Global_Var *global = &context->global_vars[item->global_index];
-            bool success = check_global(context, global);
-            return success? TYPECHECK_RESULT_DONE : TYPECHECK_RESULT_BAD;
+            return check_global(context, item->scope, global);
         } break;
     }
 
@@ -8165,6 +8210,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                 if (decl->type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_RESOLVE_TYPE,
+                        .scope = scope,
                         .resolve_type = {
                             .slot = &decl->type,
                             .pos = decl->pos,
@@ -8175,6 +8221,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                 if (decl->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_COMPUTE_SIZE,
+                        .scope = scope,
                         .compute_size_of = decl->type,
                     }));
                 }
@@ -8183,6 +8230,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
             case DECL_TYPEDEF: {
                 buf_push(queue->items, ((Typecheck_Item) {
                     .kind = TYPECHECK_RESOLVE_TYPE,
+                    .scope = scope,
                     .resolve_type = {
                         .slot = &decl->def,
                         .pos = decl->pos,
@@ -8195,6 +8243,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
 
                 buf_push(queue->items, ((Typecheck_Item) {
                     .kind = TYPECHECK_RESOLVE_TYPE,
+                    .scope = scope,
                     .resolve_type = {
                         .slot = &decl->fn->signature_type,
                         .pos = decl->pos,
@@ -8203,6 +8252,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
 
                 buf_push(queue->items, ((Typecheck_Item) {
                     .kind = TYPECHECK_FN_BODY,
+                    .scope = scope,
                     .fn = fn,
                 }));
 
@@ -8220,9 +8270,10 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
             case DECL_VAR: {
                 Var *var = decl->var;
 
-                if (var->global_index != U32_MAX) {
+                if (var->is_global) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_GLOBAL_VAR,
+                        .scope = scope,
                         .global_index = var->global_index,
                     }));
                 } else {
@@ -8262,14 +8313,14 @@ bool typecheck(Context *context) {
     u64 passes = 0;
     while (true) {
         passes += 1;
-        u64 completed = 0;
+        u64 completed_count = 0;
 
         buf_foreach (Typecheck_Item, item, queue.items) {
             Typecheck_Result result = typecheck_item_resolve(context, item);
 
             if (result == TYPECHECK_RESULT_DONE) {
                 // Good!
-                completed += 1;
+                completed_count += 1;
             } else if (result == TYPECHECK_RESULT_DEPENDENT) {
                 buf_push(queue.unresolved, *item);
             } else if (result == TYPECHECK_RESULT_BAD) {
@@ -8277,7 +8328,8 @@ bool typecheck(Context *context) {
             }
         }
 
-        if (completed == 0 && buf_length(queue.unresolved) > 0) {
+        u64 unresolved_count = buf_length(queue.unresolved);
+        if (completed_count == 0 && unresolved_count > 0) {
             // TODO print proper error messages here!!!
             printf("Cyclic dependency!\n");
             return false;
@@ -8288,6 +8340,9 @@ bool typecheck(Context *context) {
             Typecheck_Item *tmp = queue.items;
             queue.items = queue.unresolved;
             queue.unresolved = tmp;
+            continue;
+        } else {
+            break;
         }
     }
 
@@ -11961,7 +12016,6 @@ void build_machinecode(Context *context) {
     Fn *main_fn = main_fn_decl->fn;
     assert(main_fn->kind == FN_KIND_NORMAL);
 
-    // TODO :scope remember to include the global init fn
     buf_foreach (Fn*, fn_ptr, context->all_fns) {
         Fn *fn = *fn_ptr;
         if (fn->kind != FN_KIND_NORMAL) continue;
