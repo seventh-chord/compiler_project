@@ -12005,6 +12005,8 @@ void build_machinecode(Context *context) {
             global_init_fn->body.first_stmt = first_stmt;
             global_init_fn->signature_type = context->void_fn_signature;
             global_init_fn->signature = &global_init_fn->signature_type->fn_signature;
+
+            buf_push(context->all_fns, global_init_fn);
         }
     }
 
