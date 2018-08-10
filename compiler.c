@@ -415,7 +415,114 @@ void u32_fill(u32 *ptr, u64 count, u32 value) {
     }
 }
 
-// Stretchy buffers
+// Hash map
+
+typedef struct Hash_Map {
+    struct { u64 key, value; } *slots;
+    u64 length, capacity, collisions;
+} Hash_Map;
+
+u64 hash_word(u64 key) {
+    key *= 0xff51afd7ed558ccd;
+    key ^= key >> 32;
+    return key;
+}
+
+u64 hash_string(u8 *bytes, u64 length) {
+    //return 1; // TODO This crashes gl_test
+    u64 key = 0xcbf29ce484222325;
+    for (u64 i = 0; i < length; i += 1) {
+        key ^= bytes[i];
+        key *= 0x100000001b3;
+        key ^= key >> 32;
+    }
+    return key;
+}
+
+u64 hash_get(Hash_Map *map, u64 key) {
+    if (map->capacity == 0) {
+        return 0;
+    }
+
+    if (key == 0) {
+        // NB This is trivial to implement, we just have to add a field
+        // to store the associated value, and a flag to indicate whether the
+        // zero key is present.
+        panic("Hash_Map does not support null-keys\n");
+    }
+
+    u64 index = hash_word(key);
+
+    while (true) {
+        index &= map->capacity - 1;
+
+        u64 key_in_slot = map->slots[index].key;
+        if (key_in_slot == 0) {
+            return 0; // No such value
+        } else if (key_in_slot == key) {
+            return map->slots[index].value;
+        }
+
+        index += 1;
+    }
+
+    assert(false);
+    return 0;
+}
+
+void hash_grow(Hash_Map *map, u64 new_capacity);
+
+void hash_insert(Hash_Map *map, u64 key, u64 value) {
+    if (key == 0) panic("Hash_Map does not support null-keys\n");
+
+    if (map->length == 0) {
+        hash_grow(map, 128);
+    }
+    if (map->length*2 > map->capacity) {
+        hash_grow(map, map->capacity*2);
+    }
+
+    u64 index = hash_word(key);
+    while (true) {
+        index &= map->capacity - 1;
+
+        if (map->slots[index].key == 0) {
+            map->slots[index].key = key;
+            map->slots[index].value = value;
+            break;
+        }
+
+        index += 1;
+        map->collisions += 1;
+    }
+
+    map->length += 1;
+}
+
+void hash_grow(Hash_Map *map, u64 new_capacity) {
+    assert((new_capacity & (new_capacity - 1)) == 0); // ensure capacity is allways a power of two
+    Hash_Map new_map = {
+        .slots = (void*) alloc(new_capacity * sizeof(*map->slots)),
+        .capacity = new_capacity,
+        .length = map->length,
+    };
+    mem_clear((u8*) new_map.slots, new_capacity * sizeof(*new_map.slots));
+
+    u64 remaining = map->length;
+    for (u64 i = 0; i < map->capacity; i += 1) {
+        if (remaining <= 0) break;
+
+        if (map->slots[i].key != 0) {
+            hash_insert(&new_map, map->slots[i].key, map->slots[i].value);
+            remaining -= 1;
+        }
+    }
+
+    free(map->slots);
+    *map = new_map;
+}
+
+// Stretchy buffer
 
 typedef struct Buf_Header {
     u64 length;
@@ -655,82 +762,72 @@ void arena_stack_pop(Arena* arena) {
 
 // String interning
 
-const u32 STRING_TABLE_NO_MATCH = U32_MAX;
+typedef struct String_Table {
+    Hash_Map map;
+    u8 *arena;
+    u64 arena_length;
+} String_Table;
 
-u32 string_table_search_with_length(u8* table, u8* string, u32 length) {
-    assert(length <= 0xff); // String table doesn't support strings longer than 255 bytes
+enum { STRING_TABLE_ARENA_CAPACITY = 512*1024 };
 
-    u64 i = 0;
-    u64 table_length = buf_length(table);
-    while (i < table_length) {
-        u8 entry_length = table[i];
+typedef struct String_Table_Entry String_Table_Entry;
+struct String_Table_Entry {
+    String_Table_Entry *next; // next entry with the same key
+    u64 length;
+    u8 string[];
+};
 
-        if (entry_length == length) {
-            bool match = true;
-            for (u8 j = 0; j < entry_length; j += 1) {
-                if (table[i + j + 1] != string[j]) {
-                    match = false;
-                    break;
-                }
+
+u8 *string_intern_with_length(String_Table *table, u8 *string, u64 length) {
+    assert(length + 1 <= STRING_TABLE_ARENA_CAPACITY);
+
+    u64 key = hash_string(string, length);
+    if (key == 0) key = 1;
+
+    String_Table_Entry *entry = (String_Table_Entry*) hash_get(&table->map, key);
+    if (entry != null) {
+        while (true) {
+            if (entry->length == length && mem_cmp(entry->string, string, length)) {
+                return entry->string;
             }
-            if (match) {
-                return i;
+
+            if (entry->next != null) {
+                entry = entry->next;
+            } else {
+                break;
             }
         }
-
-        i += entry_length + 2;
-
     }
 
-    return STRING_TABLE_NO_MATCH;
-}
+    u64 entry_length = 16 + length + 1;
 
-u32 string_table_search(u8* table, u8* string) {
-    return string_table_search_with_length(table, string, str_length(string));
-}
-
-u32 string_table_intern(u8** table, u8* string, u32 length) {
-    u32 index;
-
-    index = string_table_search_with_length(*table, string, length);
-    if (index != STRING_TABLE_NO_MATCH) {
-        return index;
+    if (table->arena == null || table->arena_length + entry_length > STRING_TABLE_ARENA_CAPACITY) {
+        table->arena = (u8*) alloc(STRING_TABLE_ARENA_CAPACITY);
+        table->arena_length = 0;
     }
 
-    index = buf_length(*table);
-    buf_push(*table, (u8) length);
-    str_push_str(table, string, length);
-    buf_push(*table, 0);
+    String_Table_Entry *new_entry = (String_Table_Entry*) (table->arena + table->arena_length);
+    table->arena_length += entry_length;
 
-    return index;
+    new_entry->length = length;
+    new_entry->next = null;
+    mem_copy(string, new_entry->string, length);
+    new_entry->string[length] = 0;
+
+    if (entry != null) {
+        assert(entry->next == null);
+        entry->next = new_entry;
+    }
+
+    hash_insert(&table->map, key, (u64) new_entry);
+
+    return new_entry->string;
 }
 
-u32 string_table_intern_cstr(u8** table, u8* string) {
-    return string_table_intern(table, string, str_length(string));
+u8 *string_intern(String_Table *table, u8 *string) {
+    u64 length = str_length(string);
+    return string_intern_with_length(table, string, length);
 }
-
-// NB when inserting into the string table, old pointer may get invalidated as we reallocate!
-// Returns a null terminated string
-u8* string_table_access(u8* table, u32 index) {
-    u64 table_length = buf_length(table);
-    assert(index < table_length);
-
-    u32 string_length = table[index];
-    assert(table[index + string_length + 1] == 0); // Invalid string index
-
-    return &table[index + 1];
-}
-
-u8* string_table_access_and_get_length(u8* table, u32 index, u32* length) {
-    u64 table_length = buf_length(table);
-    assert(index < table_length);
-
-    *length = table[index];
-    assert(table[index + *length + 1] == 0); // Invalid string index
-
-    return &table[index + 1];
-}
-
 
 // Other utilities
 
@@ -1183,7 +1280,7 @@ typedef struct Token {
     } kind;
 
     union {
-        u32 identifier_string_table_index;
+        u8 *identifier;
 
         u64 literal_int;
         f64 literal_float;
@@ -1363,7 +1460,7 @@ typedef struct Decl {
         DECL_TYPEDEF    = 8,
     } kind;
 
-    u32 name;
+    u8 *name;
     File_Pos pos;
 
     union {
@@ -1401,15 +1498,15 @@ struct Type {
     u32 flags;
 
     union {
-        u32 primitive_name;
-        u32 unresolved_name;
+        u8 *primitive_name;
+        u8 *unresolved_name;
 
         struct {
-            u32 name;
+            u8 *name;
 
             u32 member_count;
             struct {
-                u32 name;
+                u8 *name;
                 Type* type;
                 i32 offset;
                 File_Pos declaration_pos;
@@ -1419,11 +1516,11 @@ struct Type {
         } structure;
 
         struct {
-            u32 name;
+            u8 *name;
 
             u32 member_count;
             struct {
-                u32 name;
+                u8 *name;
                 u64 value;
                 File_Pos declaration_pos;
             } *members;
@@ -1458,7 +1555,7 @@ struct Type_List {
 };
 
 struct Var {
-    u32 name;
+    u8 *name;
     Type *type; // We set this to 'null' to indicate that we want to infer the type
     File_Pos declaration_pos;
 
@@ -1587,7 +1684,7 @@ typedef struct Compound_Member {
     } name_mode;
 
     union {
-        u32 unresolved_name;
+        u8 *unresolved_name;
         u32 member_index;
     };
 } Compound_Member;
@@ -1623,7 +1720,7 @@ struct Expr { // 'typedef'd earlier!
     File_Pos pos;
 
     union {
-        union { u32 unresolved_name; Var *var; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
+        union { u8 *unresolved_name; Var *var; } variable; // discriminated by EXPR_FLAG_UNRESOLVED
 
         struct {
             u64 raw_value;
@@ -1668,7 +1765,7 @@ struct Expr { // 'typedef'd earlier!
             bool pointer_call; // if true, we try to call a function at runtime computed address
 
             union {
-                u32 unresolved_name; // if EXPR_FLAG_UNRESOLVED
+                u8 *unresolved_name; // if EXPR_FLAG_UNRESOLVED
                 Expr *pointer_expr;  // else if pointer_call
                 Fn *callee;
             };
@@ -1699,13 +1796,13 @@ struct Expr { // 'typedef'd earlier!
 
         struct {
             Expr *parent;
-            union { u32 member_name; u32 member_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
+            union { u8 *member_name; u32 member_index; }; // discriminated by EXPR_FLAG_UNRESOLVED
         } member_access;
 
         struct {
             // Both unions discriminated by EXPR_FLAG_UNRESOLVED
-            union { u32 parent_name; Type *parent_type; };
-            union { u32 member_name; u32 member_index; };
+            union { u8 *parent_name; Type *parent_type; };
+            union { u8 *member_name; u32 member_index; };
         } static_member_access;
     };
 };
@@ -1848,25 +1945,21 @@ Condition condition_not(Condition c) {
 
 
 typedef struct Import_Index {
-    // names are string table indices
-    u32 library;
-    u32 function;
+    u32 library, function;
 } Import_Index;
 
 typedef struct Library_Import {
-    // most names are string table indices
+    u8 *importing_source_file; // NB not interned in the string table
+    u8 *lib_name;
+    u8 **function_names; // stretchy-buffer
 
-    u8* importing_source_file;
-    u32 lib_name;
-    u32* function_names; // stretchy-buffer
-
-    // Set in  'parse_library'
-    u8* dll_name;
-    u32* function_hints;
+    // Set in 'parse_library'
+    u8 *dll_name; // NB not interned in the string table, I think...
+    u32 *function_hints;
 } Library_Import;
 
 struct Fn {
-    u32 name;
+    u8 *name;
     File_Pos declaration_pos;
 
     Type *signature_type;
@@ -1946,9 +2039,12 @@ typedef struct Jump_Fixup {
 typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
 
-    u8* string_table;
-    u32 keyword_token_table[KEYWORD_COUNT][2];
-    u32 builtin_names[BUILTIN_COUNT];
+    String_Table string_table;
+    struct {
+        int token;
+        u8 *interned_name;
+    } keyword_token_table[KEYWORD_COUNT];
+    u8 *builtin_names[BUILTIN_COUNT];
 
     // AST & intermediate representation
     Scope global_scope;
@@ -1985,11 +2081,11 @@ bool file_pos_is_greater(File_Pos *a, File_Pos *b) {
 
 #define DECL_ANY_KIND (-1)
 
-Decl *find_declaration(Scope *scope, u32 name_index, int kind) {
+Decl *find_declaration(Scope *scope, u8 *interned_name, int kind) {
     while (true) {
         for (u32 i = 0; i < scope->decls_length; i += 1) {
             Decl *decl = &scope->decls[i];
-            if (decl->name == name_index && ((decl->kind&kind) == decl->kind || kind == DECL_ANY_KIND)) {
+            if (decl->name == interned_name && ((decl->kind&kind) == decl->kind || kind == DECL_ANY_KIND)) {
                 return decl;
             }
         }
@@ -2005,7 +2101,7 @@ Decl *find_declaration(Scope *scope, u32 name_index, int kind) {
     return null;
 }
 
-Var *find_var(Scope *scope, u32 name_index, File_Pos *pos) {
+Var *find_var(Scope *scope, u8 *interned_name, File_Pos *pos) {
     Fn *start_fn = scope->fn;
     if (start_fn == null) start_fn = (Fn*) U64_MAX;
 
@@ -2017,7 +2113,7 @@ Var *find_var(Scope *scope, u32 name_index, File_Pos *pos) {
                 continue;
             }
 
-            if (decl->name == name_index && decl->kind == DECL_VAR) {
+            if (decl->name == interned_name && decl->kind == DECL_VAR) {
                 return decl->var;
             }
         }
@@ -2087,7 +2183,7 @@ Type *get_array_type(Context *context, Type *type, u64 length) {
 }
 
 void init_primitive_types(Context *context) {
-    #define init_primitive(kind) context->primitive_types[kind] = (Type) { kind, .primitive_name = string_table_intern_cstr(&context->string_table, PRIMITIVE_NAMES[kind]) };
+    #define init_primitive(kind) context->primitive_types[kind] = (Type) { kind, .primitive_name = string_intern(&context->string_table, PRIMITIVE_NAMES[kind]) };
 
     init_primitive(TYPE_INVALID);
     init_primitive(TYPE_VOID);
@@ -2116,21 +2212,21 @@ void init_primitive_types(Context *context) {
 }
 
 void init_builtin_fn_names(Context *context) {
-    context->builtin_names[BUILTIN_TYPE_INFO_OF_TYPE]  = string_table_intern_cstr(&context->string_table, "type_info_of_type");
-    context->builtin_names[BUILTIN_TYPE_INFO_OF_VALUE] = string_table_intern_cstr(&context->string_table, "type_info_of_value");
-    context->builtin_names[BUILTIN_ENUM_MEMBER_NAME]   = string_table_intern_cstr(&context->string_table, "enum_member_name");
-    context->builtin_names[BUILTIN_ENUM_LENGTH]        = string_table_intern_cstr(&context->string_table, "enum_length");
-    context->builtin_names[BUILTIN_CAST]               = string_table_intern_cstr(&context->string_table, "cast");
-    context->builtin_names[BUILTIN_SIZE_OF]            = string_table_intern_cstr(&context->string_table, "size_of");
-    context->builtin_names[BUILTIN_ALIGN_OF]           = string_table_intern_cstr(&context->string_table, "align_of");
+    context->builtin_names[BUILTIN_TYPE_INFO_OF_TYPE]  = string_intern(&context->string_table, "type_info_of_type");
+    context->builtin_names[BUILTIN_TYPE_INFO_OF_VALUE] = string_intern(&context->string_table, "type_info_of_value");
+    context->builtin_names[BUILTIN_ENUM_MEMBER_NAME]   = string_intern(&context->string_table, "enum_member_name");
+    context->builtin_names[BUILTIN_ENUM_LENGTH]        = string_intern(&context->string_table, "enum_length");
+    context->builtin_names[BUILTIN_CAST]               = string_intern(&context->string_table, "cast");
+    context->builtin_names[BUILTIN_SIZE_OF]            = string_intern(&context->string_table, "size_of");
+    context->builtin_names[BUILTIN_ALIGN_OF]           = string_intern(&context->string_table, "align_of");
 }
 
 void init_keyword_names(Context *context) {
     u32 i = 0;
 
-    #define add_keyword(token, name) \
-    context->keyword_token_table[i][0] = token; \
-    context->keyword_token_table[i][1] = string_table_intern_cstr(&context->string_table, name); \
+    #define add_keyword(t, n) \
+    context->keyword_token_table[i].token = t; \
+    context->keyword_token_table[i].interned_name = string_intern(&context->string_table, n); \
     i += 1;
 
     add_keyword(TOKEN_KEYWORD_FN,          "fn");
@@ -2283,25 +2379,26 @@ u8 primitive_size_of(Type_Kind primitive) {
 }
 
 u8* compound_member_name(Context *context, Expr* expr, Compound_Member* member) {
-    u32 name_index;
     switch (member->name_mode) {
         case EXPR_COMPOUND_NAME: {
             assert(expr->type->kind == TYPE_STRUCT);
             u32 member_index = member->member_index;
-            name_index = expr->type->structure.members[member_index].name;
+            return expr->type->structure.members[member_index].name;
         } break;
 
         case EXPR_COMPOUND_UNRESOLVED_NAME: {
-            name_index = member->unresolved_name;
+            return member->unresolved_name;
         } break;
 
         case EXPR_COMPOUND_NO_NAME: {
             return null;
         } break;
 
-        default: assert(false);
+        default: {
+            assert(false);
+            return null;
+        } break;
     }
-    return string_table_access(context->string_table, name_index);
 }
 
 u64 type_size_of(Type* type) {
@@ -2349,14 +2446,12 @@ u64 type_align_of(Type* type) {
     return 0;
 }
 
-u32 user_type_name(Type* type) {
-    u32 name;
+u8 *user_type_name(Type* type) {
     switch (type->kind) {
-        case TYPE_STRUCT: name = type->structure.name; break;
-        case TYPE_ENUM:   name = type->enumeration.name; break;
-        default: assert(false);
+        case TYPE_STRUCT: return type->structure.name;
+        case TYPE_ENUM:   return type->enumeration.name;
+        default: assert(false); return null;
     }
-    return name;
 }
  
 Type_Kind primitive_of(Type* type) {
@@ -2435,7 +2530,8 @@ u64 size_mask(u8 size) {
 
 // NB This currently just assumes we are trying to import a function. In the future we might want to support importing
 // other items, though we probably want to find an example of that first, so we know what we are doing!
-Import_Index add_import(Context *context, u8* source_path, u32 library_name, u32 function_name) {
+// 'library_name' and 'function_name' should be interned in the string table!
+Import_Index add_import(Context *context, u8 *source_path, u8 *library_name, u8 *function_name) {
     Import_Index index = {0};
 
     Library_Import* import = null;
@@ -2458,7 +2554,7 @@ Import_Index add_import(Context *context, u8* source_path, u32 library_name, u32
     }
 
     for (u32 i = 0; i < buf_length(import->function_names); i += 1) {
-        u32 other_function_name = import->function_names[i];
+        u8 *other_function_name = import->function_names[i];
         if (other_function_name == function_name) {
             index.function = i;
             return index;
@@ -2524,20 +2620,17 @@ void print_type(Context *context, Type* type) {
             } break;
 
             case TYPE_STRUCT: {
-                u8* name = string_table_access(context->string_table, type->structure.name);
-                printf(name);
+                printf(type->structure.name);
                 type = null;
             } break;
 
             case TYPE_ENUM: {
-                u8* name = string_table_access(context->string_table, type->enumeration.name);
-                printf(name);
+                printf(type->enumeration.name);
                 type = null;
             } break;
 
             case TYPE_UNRESOLVED_NAME: {
-                u8* name = string_table_access(context->string_table, type->unresolved_name);
-                printf("<unresolved %s>", name);
+                printf("<unresolved %s>", type->unresolved_name);
                 type = null;
             } break;
 
@@ -2549,13 +2642,12 @@ void print_type(Context *context, Type* type) {
     }
 }
 
-void print_token(u8* string_table, Token* t) {
+void print_token(Token* t) {
     u8* s = null;
 
     switch (t->kind) {
         case TOKEN_IDENTIFIER: {
-            u32 index = t->identifier_string_table_index;
-            printf("'%s'", string_table_access(string_table, index));
+            printf("'%s'", t->identifier);
         } break;
         case TOKEN_STRING: {
             printf("\"%z\"", t->string.length, t->string.bytes);
@@ -2575,11 +2667,9 @@ void print_expr(Context *context, Expr* expr) {
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u8* name = string_table_access(context->string_table, expr->variable.unresolved_name);
-                printf("<unresolved %s>", name);
+                printf("<unresolved %s>", expr->variable.unresolved_name);
             } else {
-                u8* name = string_table_access(context->string_table, expr->variable.var->name);
-                printf("%s", name);
+                printf(expr->variable.var->name);
             }
         } break;
 
@@ -2659,8 +2749,7 @@ void print_expr(Context *context, Expr* expr) {
 
         case EXPR_CALL: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u8 *name = string_table_access(context->string_table, expr->call.unresolved_name);
-                printf("<unresolved %s>", name);
+                printf("<unresolved %s>", expr->call.unresolved_name);
             } else if (expr->call.pointer_call) {
                 bool parenthesize = expr->call.pointer_expr->kind != EXPR_VARIABLE;
 
@@ -2668,8 +2757,7 @@ void print_expr(Context *context, Expr* expr) {
                 print_expr(context, expr->call.pointer_expr);
                 if (parenthesize) printf(")");
             } else {
-                u8 *name = string_table_access(context->string_table, expr->call.callee->name);
-                printf("%s", name);
+                printf("%s", expr->call.callee->name);
             }
 
             printf("(");
@@ -2709,8 +2797,7 @@ void print_expr(Context *context, Expr* expr) {
             print_expr(context, expr->member_access.parent);
             printf(".");
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u8* name = string_table_access(context->string_table, expr->member_access.member_name);
-                printf("<unresolved %s>", name);
+                printf("<unresolved %s>", expr->member_access.member_name);
             } else {
                 Type* s = expr->member_access.parent->type;
                 if (s->kind == TYPE_POINTER) {
@@ -2718,26 +2805,24 @@ void print_expr(Context *context, Expr* expr) {
                 }
                 assert(s->kind == TYPE_STRUCT);
 
-                u32 name_index = s->structure.members[expr->member_access.member_index].name;
-                u8* name = string_table_access(context->string_table, name_index);
+                u8 *name = s->structure.members[expr->member_access.member_index].name;
                 printf(name);
             }
         } break;
 
         case EXPR_STATIC_MEMBER_ACCESS: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u8* parent_name = string_table_access(context->string_table, expr->static_member_access.parent_name);
-                u8* member_name = string_table_access(context->string_table, expr->static_member_access.member_name);
+                u8* parent_name = expr->static_member_access.parent_name;
+                u8* member_name = expr->static_member_access.member_name;
                 printf("<unresolved %s::%s>", parent_name, member_name);
             } else {
                 Type* parent = expr->static_member_access.parent_type;
                 assert(parent->kind == TYPE_ENUM);
 
-                u8* parent_name = string_table_access(context->string_table, parent->enumeration.name);
+                u8* parent_name = parent->enumeration.name;
 
                 u32 m = expr->static_member_access.member_index;
-                u32 member_name_index = parent->enumeration.members[m].name;
-                u8* member_name = string_table_access(context->string_table, member_name_index);
+                u8 *member_name = parent->enumeration.members[m].name;
                 printf("%s::%s", parent_name, member_name);
             }
 
@@ -2776,7 +2861,7 @@ void print_expr(Context *context, Expr* expr) {
         } break;
 
         case EXPR_ADDRESS_OF_FUNCTION: {
-            u8 *name = string_table_access(context->string_table, expr->address_of_fn->name);
+            u8 *name = expr->address_of_fn->name;
             printf("&%s", name);
         } break;
 
@@ -2801,7 +2886,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
         } break;
 
         case STMT_LET: {
-            u8 *var_name = string_table_access(context->string_table, stmt->let.var->name);
+            u8 *var_name = stmt->let.var->name;
             printf("let %s: ", var_name);
 
             print_type(context, stmt->let.var->type);
@@ -2859,7 +2944,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
             } else if (stmt->loop.kind == LOOP_INFINITE) {
                 printf("for {\n");
             } else if (stmt->loop.kind == LOOP_RANGE) {
-                u8 *var_name = string_table_access(context->string_table, stmt->loop.range.var->name);
+                u8 *var_name = stmt->loop.range.var->name;
 
                 printf("for %s : ", var_name);
                 print_expr(context, stmt->loop.range.start);
@@ -2918,7 +3003,7 @@ bool expect_single_token(Context *context, Token* t, int kind, u8* location) {
     if (t->kind != kind) {
         print_file_pos(&t->pos);
         printf("Expected %s %s, but got ", TOKEN_NAMES[kind], location);
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         return false;
     } else {
@@ -2957,10 +3042,10 @@ f64 parse_f64(u8* string, u64 length) {
     return value;
 }
 
-Type *parse_primitive_name(Context *context, u32 name_index) {
+Type *parse_primitive_name(Context *context, u8 *interned_name) {
     for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
         Type* type = &context->primitive_types[i];
-        if (type->primitive_name == name_index) {
+        if (type->primitive_name == interned_name) {
             return type;
         }
     }
@@ -2968,9 +3053,9 @@ Type *parse_primitive_name(Context *context, u32 name_index) {
     return null;
 }
 
-Builtin_Fn parse_builtin_fn_name(Context *context, u32 name_index) {
+Builtin_Fn parse_builtin_fn_name(Context *context, u8 *name) {
     for (u32 i = 0; i < BUILTIN_COUNT; i += 1) {
-        if (context->builtin_names[i] == name_index) {
+        if (context->builtin_names[i] == name) {
             return i;
         }
     }
@@ -2978,8 +3063,8 @@ Builtin_Fn parse_builtin_fn_name(Context *context, u32 name_index) {
     return BUILTIN_INVALID;
 }
 
-Type *parse_user_type_name(Scope *scope, u32 name_index) {
-    Decl *decl = find_declaration(scope, name_index, DECL_TYPE | DECL_TYPEDEF);
+Type *parse_user_type_name(Scope *scope, u8 *interned_name) {
+    Decl *decl = find_declaration(scope, interned_name, DECL_TYPE | DECL_TYPEDEF);
     if (decl == null) {
         return null;
     } else if (decl->kind == DECL_TYPE) {
@@ -3019,16 +3104,16 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
     while (base_type == null) {
         switch (t->kind) {
             case TOKEN_IDENTIFIER: {
-                base_type = parse_primitive_name(context, t->identifier_string_table_index);
+                base_type = parse_primitive_name(context, t->identifier);
 
                 if (base_type == null) {
-                    base_type = parse_user_type_name(scope, t->identifier_string_table_index);
+                    base_type = parse_user_type_name(scope, t->identifier);
                 }
 
                 if (base_type == null) {
                     base_type = arena_new(&context->arena, Type);
                     base_type->kind = TYPE_UNRESOLVED_NAME;
-                    base_type->unresolved_name = t->identifier_string_table_index;
+                    base_type->unresolved_name = t->identifier;
                     base_type->flags |= TYPE_FLAG_UNRESOLVED;
                 }
 
@@ -3089,7 +3174,7 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
             default: {
                 print_file_pos(&t->pos);
                 printf("Unexpected token in type: ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
 
                 t += 1;
@@ -3137,12 +3222,12 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
     Fn_Signature signature = {0};
 
     if (t->kind == TOKEN_IDENTIFIER) {
-        if (fn != null) fn->name = t->identifier_string_table_index;
+        if (fn != null) fn->name = t->identifier;
         t += 1;
     } else if (fn != null) {
         print_file_pos(&t->pos);
         printf("Expected function name, but found ");
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         return null;
     }
@@ -3160,7 +3245,7 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
 
         typedef struct Param Param;
         struct Param {
-            u32 name;
+            u8 *name;
             File_Pos pos;
             Type *type;
             Param *next, *previous;
@@ -3176,14 +3261,14 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
                 if (t->kind != TOKEN_IDENTIFIER) {
                     print_file_pos(&t->pos);
                     printf("Expected a parameter name, but got ");
-                    print_token(context->string_table, t);
+                    print_token(t);
                     printf("\n");
                     *length = t - t_start;
                     return null;
                 }
 
                 Param *next = arena_new(&context->stack, Param);
-                next->name = t->identifier_string_table_index;
+                next->name = t->identifier;
                 next->pos = t->pos;
                 t += 1;
 
@@ -3333,11 +3418,11 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
     if (t->kind != TOKEN_IDENTIFIER) {
         print_file_pos(&t->pos);
         printf("Expected struct name, but got ");
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         return false;
     }
-    type->structure.name = t->identifier_string_table_index;
+    type->structure.name = t->identifier;
     t += 1;
 
     if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after struct name")) return false;
@@ -3346,7 +3431,7 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
 
     typedef struct Member Member;
     struct Member {
-        u32 name;
+        u8 *name;
         Type* type;
         File_Pos pos;
         Member *next, *previous;
@@ -3363,13 +3448,13 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
             if (t->kind != TOKEN_IDENTIFIER) {
                 print_file_pos(&t->pos);
                 printf("Expected a member name, but got ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
                 return false;
             }
 
             Member* next = arena_new(&context->stack, Member);
-            next->name = t->identifier_string_table_index;
+            next->name = t->identifier;
             next->pos = t->pos;
 
             t += 1;
@@ -3439,7 +3524,7 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
 
     Type *old_type = parse_user_type_name(scope, type->enumeration.name);
     if (old_type != null) {
-        u8 *name = string_table_access(context->string_table, type->structure.name);
+        u8 *name = type->structure.name;
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
         return false;
@@ -3468,12 +3553,12 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
     if (t->kind != TOKEN_IDENTIFIER) {
         print_file_pos(&t->pos);
         printf("Expected enum name, but got ");
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         *length = t - t_start;
         return false;
     }
-    type->enumeration.name = t->identifier_string_table_index;
+    type->enumeration.name = t->identifier;
     t += 1;
 
     if (t->kind == TOKEN_BRACKET_ROUND_OPEN) {
@@ -3483,12 +3568,12 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         if (t->kind != TOKEN_IDENTIFIER) {
             print_file_pos(&type_start_pos);
             printf("Expected primitive name, but got ");
-            print_token(context->string_table, t);
+            print_token(t);
             printf("\n");
             *length = t - t_start;
             return false;
         }
-        u32 type_name_index = t->identifier_string_table_index;
+        u8 *type_name = t->identifier;
         t += 1;
 
         if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_CLOSE, "after enum primitive")) {
@@ -3497,10 +3582,10 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         }
         t += 1;
 
-        Type *primitive = parse_primitive_name(context, type_name_index);
+        Type *primitive = parse_primitive_name(context, type_name);
         if (primitive == null || !primitive_is_integer(primitive->kind)) {
             print_file_pos(&type_start_pos);
-            printf("Expected unsigned integer type, but got %s\n", string_table_access(context->string_table, type_name_index));
+            printf("Expected unsigned integer type, but got %s\n", type_name);
             *length = t - t_start;
             return false;
         }
@@ -3521,7 +3606,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
 
     typedef struct Member Member;
     struct Member {
-        u32 name;
+        u8 *name;
         u64 value;
         File_Pos pos;
         Member *next, *previous;
@@ -3538,14 +3623,14 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         if (t->kind != TOKEN_IDENTIFIER) {
             print_file_pos(&t->pos);
             printf("Expected a member name, but got ");
-            print_token(context->string_table, t);
+            print_token(t);
             printf("\n");
             *length = t - t_start;
             return false;
         }
 
         Member* next = arena_new(&context->stack, Member);
-        next->name = t->identifier_string_table_index;
+        next->name = t->identifier;
         next->pos = t->pos;
 
         t += 1;
@@ -3562,7 +3647,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
             if (t->kind != TOKEN_LITERAL_INT) {
                 print_file_pos(&t->pos);
                 printf("Expected literal value, but got ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
                 *length = t - t_start;
                 return false;
@@ -3595,7 +3680,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
             } else {
                 print_file_pos(&t->pos);
                 printf("Expected comma ',' or closing curly brace '}' after value in enum, but got ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
                 *length = t - t_start;
                 return false;
@@ -3619,9 +3704,8 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
 
     Type *old_type = parse_user_type_name(scope, type->enumeration.name);
     if (old_type != null) {
-        u8 *name = string_table_access(context->string_table, type->enumeration.name);
         print_file_pos(&declaration_pos);
-        printf("Redefinition of type '%s'\n", name);
+        printf("Redefinition of type '%s'\n", type->enumeration.name);
         return false;
     }
 
@@ -3633,12 +3717,12 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         u32 count = type->enumeration.member_count;
 
         for (u32 i = 0; i < count; i += 1) {
-            u64 value_i = type->enumeration.members[i].value;
-            u32 name_index_i = type->enumeration.members[i].name;
+            u64 member_value = type->enumeration.members[i].value;
+            u8 *member_name = type->enumeration.members[i].name;
 
             bool out_of_range;
             if (is_signed) {
-                i64 signed_value = value_i;
+                i64 signed_value = member_value;
                 i64 min, max;
                 switch (primitive) {
                     case TYPE_I8:  min = I8_MIN;  max = I8_MAX;  break;
@@ -3649,43 +3733,38 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
                 }
                 out_of_range = signed_value < min || signed_value > max;
             } else {
-                out_of_range = (value_i & mask) != value_i;
+                out_of_range = (member_value & mask) != member_value;
             }
 
             if (out_of_range) {
-                u8 *member_name = string_table_access(context->string_table, name_index_i);
                 u8 *primitive_name = PRIMITIVE_NAMES[type->enumeration.value_primitive];
-                u8 *enum_name = string_table_access(context->string_table, type->enumeration.name);
+                u8 *enum_name = type->enumeration.name;
 
                 print_file_pos(&type->enumeration.members[i].declaration_pos);
                 printf(
                     is_signed?
                         "%s = %i is out of range for enum %s(%s)\n" :
                         "%s = %u is out of range for enum %s(%s)\n",
-                    member_name, value_i, enum_name, primitive_name
+                    member_name, member_value, enum_name, primitive_name
                 );
                 return false;
             }
 
             for (u32 j = i + 1; j < count; j += 1) {
-                u64 value_j = type->enumeration.members[j].value;
-                u32 name_index_j = type->enumeration.members[j].name;
+                u64 other_member_value = type->enumeration.members[j].value;
+                u8 *other_member_name = type->enumeration.members[j].name;
 
-                if (value_i == value_j) {
-                    u8* name_i = string_table_access(context->string_table, name_index_i);
-                    u8* name_j = string_table_access(context->string_table, name_index_j);
-
+                if (member_name == other_member_name) {
                     print_file_pos(&type->enumeration.members[i].declaration_pos);
                     printf("and ");
                     print_file_pos(&type->enumeration.members[j].declaration_pos);
-                    printf("Members '%s' and '%s' both equal %u\n", name_i, name_j, value_i);
+                    printf("Members '%s' and '%s' both equal %u\n", member_name, other_member_name, member_value);
 
                     return false;
                 }
                 
-                if (name_index_i == name_index_j) {
-                    u8* member_name = string_table_access(context->string_table, name_index_i);
-                    u8* enum_name = string_table_access(context->string_table, type->enumeration.name);
+                if (member_name == other_member_name) {
+                    u8 *enum_name = type->enumeration.name;
 
                     print_file_pos(&type->enumeration.members[i].declaration_pos);
                     printf("and ");
@@ -3793,7 +3872,7 @@ void shunting_yard_push_pointer_call(Context *context, Shunting_Yard *yard, Expr
     *pointer = expr;
 }
 
-void shunting_yard_push_member_access(Context *context, Shunting_Yard *yard, u32 member_name) {
+void shunting_yard_push_member_access(Context *context, Shunting_Yard *yard, u8 *member_name) {
     assert(yard->unary_prefix == null);
     assert(yard->expr_queue_index > 0);
 
@@ -3897,8 +3976,6 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                 case TOKEN_IDENTIFIER: {
                     File_Pos start_pos = t->pos;
 
-                    u32 name_index = t->identifier_string_table_index;
-
                     // Some call (either a function or a builtin)
                     if (t[1].kind == TOKEN_BRACKET_ROUND_OPEN) {
                         u32 call_length = 0;
@@ -3916,11 +3993,11 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                     } else if (t[1].kind == TOKEN_BRACKET_CURLY_OPEN && !stop_on_open_curly) {
                         File_Pos start_pos = t->pos;
 
-                        Type *type = parse_user_type_name(scope, t->identifier_string_table_index);
+                        Type *type = parse_user_type_name(scope, t->identifier);
                         if (type == null) {
                             type = arena_new(&context->arena, Type);
                             type->kind = TYPE_UNRESOLVED_NAME;
-                            type->unresolved_name = t->identifier_string_table_index;
+                            type->unresolved_name = t->identifier;
                             type->flags |= TYPE_FLAG_UNRESOLVED;
                         }
                         t += 1;
@@ -3938,34 +4015,38 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                         shunting_yard_push_expr(context, yard, expr);
 
                     } else if (t[1].kind == TOKEN_STATIC_ACCESS) {
+                        u8 *parent_name = t->identifier;
+
                         File_Pos start_pos = t->pos;
                         t += 2;
 
                         if (t->kind != TOKEN_IDENTIFIER) {
                             print_file_pos(&t->pos);
                             printf("Expected struct name, but got ");
-                            print_token(context->string_table, t);
+                            print_token(t);
                             printf("\n");
                             *length = t - t_start;
                             return null;
                         }
 
-                        u32 member_name_index = t->identifier_string_table_index;
+                        u8 *member_name = t->identifier;
                         t += 1;
 
                         Expr* expr = arena_new(&context->arena, Expr);
                         expr->kind = EXPR_STATIC_MEMBER_ACCESS;
-                        expr->static_member_access.parent_name = name_index;;
-                        expr->static_member_access.member_name = member_name_index;;
+                        expr->static_member_access.parent_name = parent_name;
+                        expr->static_member_access.member_name = member_name;
                         expr->flags |= EXPR_FLAG_UNRESOLVED;
                         expr->pos = start_pos;
 
                         shunting_yard_push_expr(context, yard, expr);
 
                     } else {
+                        u8 *name = t->identifier;
+
                         Expr* expr = arena_new(&context->arena, Expr);
                         expr->kind = EXPR_VARIABLE;
-                        expr->variable.unresolved_name = name_index;
+                        expr->variable.unresolved_name = name;
                         expr->flags |= EXPR_FLAG_UNRESOLVED;
                         expr->pos = t->pos;
 
@@ -4181,12 +4262,12 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                     if (t->kind != TOKEN_IDENTIFIER) {
                         print_file_pos(&t->pos);
                         printf("Expected member name, but got ");
-                        print_token(context->string_table, t);
+                        print_token(t);
                         printf("\n");
                         *length = t - t_start;
                         return null;
                     }
-                    u32 member_name = t->identifier_string_table_index;
+                    u8 *member_name = t->identifier;
                     t += 1;
 
                     shunting_yard_push_member_access(context, yard, member_name);
@@ -4265,7 +4346,7 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                 printf("a binary operator or a postfix operator");
             }
             printf(", but got ");
-            print_token(context->string_table, t);
+            print_token(t);
             printf("\n");
 
             t += 1;
@@ -4335,7 +4416,7 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
     typedef struct Member_Expr Member_Expr;
     struct Member_Expr {
         Expr* expr;
-        u32 name_index;
+        u8 *name;
         Member_Expr *next, *previous;
     };
 
@@ -4346,9 +4427,9 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
     arena_stack_push(&context->stack);
 
     while (t->kind != TOKEN_BRACKET_CURLY_CLOSE) {
-        u32 name_index = U32_MAX;
+        u8 *name = null;
         if (t->kind == TOKEN_IDENTIFIER && (t + 1)->kind == TOKEN_COLON) {
-            name_index = t->identifier_string_table_index;
+            name = t->identifier;
             t += 2;
         }
 
@@ -4362,7 +4443,7 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
         }
 
         Member_Expr* next = arena_new(&context->stack, Member_Expr);
-        next->name_index = name_index;
+        next->name = name;
         next->expr = member;
 
         if (first_member == null) {
@@ -4379,7 +4460,7 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
             if (t->kind != TOKEN_COMMA) {
                 print_file_pos(&t->pos);
                 printf("Expected comma ',' or closing parenthesis '}' after value in compound, but got ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
                 *length = t - t_start;
                 return null;
@@ -4406,10 +4487,10 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
         Compound_Member* member = &expr->compound.content[i];
         member->expr = p->expr;
 
-        if (p->name_index == U32_MAX) {
+        if (p->name == null) {
             member->name_mode = EXPR_COMPOUND_NO_NAME;
         } else {
-            member->unresolved_name = p->name_index;
+            member->unresolved_name = p->name;
             member->name_mode = EXPR_COMPOUND_UNRESOLVED_NAME;
         }
     }
@@ -4449,7 +4530,7 @@ Expr **parse_parameter_list(Context *context, Scope *scope, Token* t, u32* lengt
             if (t->kind != TOKEN_COMMA) {
                 print_file_pos(&t->pos);
                 printf("Expected comma ',' or closing parenthesis ')' after parameter in call, but got ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
                 *length = t - t_start;
                 return null;
@@ -4488,7 +4569,7 @@ Expr **parse_parameter_list(Context *context, Scope *scope, Token* t, u32* lengt
 
 Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
     assert(t->kind == TOKEN_IDENTIFIER);
-    u32 name_index = t->identifier_string_table_index;
+    u8 *fn_name = t->identifier;
 
     Token* t_start = t;
     File_Pos start_pos = t->pos;
@@ -4498,7 +4579,7 @@ Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
     t += 1;
 
 
-    Builtin_Fn builtin_name = parse_builtin_fn_name(context, name_index);
+    Builtin_Fn builtin_name = parse_builtin_fn_name(context, fn_name);
     switch (builtin_name) {
         case BUILTIN_TYPE_INFO_OF_TYPE: {
             u32 type_length = 0;
@@ -4668,7 +4749,7 @@ Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
                 return null;
             }
 
-            Type *cast_to_primitive = parse_primitive_name(context, name_index);
+            Type *cast_to_primitive = parse_primitive_name(context, fn_name);
             if (cast_to_primitive != null) {
                 if (!(primitive_is_integer(cast_to_primitive->kind) || primitive_is_float(cast_to_primitive->kind))) {
                     print_file_pos(&start_pos);
@@ -4699,7 +4780,7 @@ Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
                 Expr* expr = arena_new(&context->arena, Expr);
                 expr->pos = start_pos;
                 expr->kind = EXPR_CALL;
-                expr->call.unresolved_name = name_index;
+                expr->call.unresolved_name = fn_name;
                 expr->flags |= EXPR_FLAG_UNRESOLVED;
                 expr->call.params = params;
                 expr->call.param_count = param_count;
@@ -4839,7 +4920,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                             default: {
                                 print_file_pos(&t->pos);
                                 printf("Expected another if-statmenet or a basic block after else, but got ");
-                                print_token(context->string_table, t);
+                                print_token(t);
                                 printf("\n");
                                 *length = t - t_first_stmt_start;
                                 return null;
@@ -4874,7 +4955,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 } else if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
                     stmt->loop.kind = LOOP_RANGE;
 
-                    u32 index_var_name = t[0].identifier_string_table_index;
+                    u8 *index_var_name = t[0].identifier;
                     File_Pos index_var_pos = t[0].pos;
                     t += 2;
 
@@ -5005,12 +5086,12 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 if (t->kind != TOKEN_IDENTIFIER) {
                     print_file_pos(&t->pos);
                     printf("Expected variable name, but found ");
-                    print_token(context->string_table, t);
+                    print_token(t);
                     printf("\n");
                     *length = t - t_first_stmt_start;
                     return null;
                 }
-                u32 name_index = t->identifier_string_table_index;
+                u8 *name = t->identifier;
                 t += 1;
 
                 Type* type = null;
@@ -5040,7 +5121,6 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 }
 
                 if (expr == null && type == null) {
-                    u8* name = string_table_access(context->string_table, name_index);
                     print_file_pos(&t->pos);
                     printf("Declared variable '%s' without giving type or initial value.\n", name);
                     *length = t - t_first_stmt_start;
@@ -5048,7 +5128,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 }
 
                 Var *var = arena_new(&context->arena, Var);
-                var->name = name_index;
+                var->name = name;
                 var->declaration_pos = stmt->pos,
                 var->type = type;
                 var->local_index = scope->fn->body.var_count;
@@ -5056,7 +5136,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
 
                 Decl *decl = add_declaration(&context->arena, scope);
                 decl->kind = DECL_VAR;
-                decl->name = name_index;
+                decl->name = name;
                 decl->pos = stmt->pos,
                 decl->var = var;
 
@@ -5220,7 +5300,7 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
 
     Decl *other_decl = find_declaration(scope, fn->name, DECL_FN);;
     if (other_decl != null) {
-        u8* name = string_table_access(context->string_table, other_decl->fn->name);
+        u8* name = other_decl->fn->name;
         print_file_pos(&t_start->pos);
         printf(
             "A function called '%s' is defined both on line %u and line %u\n",
@@ -5230,14 +5310,12 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     }
 
     if (parse_primitive_name(context, fn->name) != null || context->builtin_names[BUILTIN_CAST] == fn->name) {
-        u8* name = string_table_access(context->string_table, fn->name);
         print_file_pos(&t_start->pos);
-        printf("Can't use '%s' as a function name, as it is reserved for casts\n", name);
+        printf("Can't use '%s' as a function name, as it is reserved for casts\n", fn->name);
         valid = false;
     } else if (parse_builtin_fn_name(context, fn->name) != BUILTIN_INVALID) {
-        u8* name = string_table_access(context->string_table, fn->name);
         print_file_pos(&t_start->pos);
-        printf("Can't use '%s' as a function name, as it would shadow a builtin function\n", name);
+        printf("Can't use '%s' as a function name, as it would shadow a builtin function\n", fn->name);
         valid = false;
     }
 
@@ -5253,10 +5331,9 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
         fn->body.scope.parent = scope;
 
         if (t->kind != TOKEN_BRACKET_CURLY_OPEN) {
-            u8* name = string_table_access(context->string_table, fn->name);
             print_file_pos(&t->pos);
-            printf("Expected an open curly brace { after 'fn %s ...', but found ", name);
-            print_token(context->string_table, t);
+            printf("Expected an open curly brace { after 'fn %s ...', but found ", fn->name);
+            print_token(t);
             printf("\n");
             return null;
         }
@@ -5308,11 +5385,11 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
     if (t->kind != TOKEN_IDENTIFIER) {
         print_file_pos(&t->pos);
         printf("Expected new type name, but got ");
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         return false;
     }
-    u32 name_index = t->identifier_string_table_index;
+    u8 *name = t->identifier;
     t += 1;
 
     if (!expect_single_token(context, t, TOKEN_ASSIGN, "after typedef name")) return false;
@@ -5327,16 +5404,15 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(scope, name_index);
+    Type *old_type = parse_user_type_name(scope, name);
     if (old_type != null) {
-        u8 *name = string_table_access(context->string_table, name_index);
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
         return false;
     } else {
         Decl *decl = add_declaration(&context->arena, scope);
         decl->kind = DECL_TYPE;
-        decl->name = name_index;
+        decl->name = name;
         decl->pos  = declaration_pos;
         decl->type = type;
         return true;
@@ -5360,19 +5436,18 @@ bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32
     if (t->kind != TOKEN_STRING) {
         print_file_pos(&t->pos);
         printf("Expected library name, but got ");
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         return false;
     }
-    u8 *library_name = t->string.bytes;
-    u32 library_name_index = string_table_intern(&context->string_table, t->string.bytes, t->string.length);
+    u8 *library_name = string_intern_with_length(&context->string_table, t->string.bytes, t->string.length);
 
     // Body
     t += 1;
     if (t->kind != TOKEN_BRACKET_CURLY_OPEN) {
         print_file_pos(&t->pos);
         printf("Expected an open curly brace { after 'extern \"%s\" ...', but found ", library_name);
-        print_token(context->string_table, t);
+        print_token(t);
         printf("\n");
         return false;
     }
@@ -5394,12 +5469,11 @@ bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32
                 if (fn == null) {
                     valid = false;
                 } else if (fn->kind != FN_KIND_IMPORTED) {
-                    u8* name = string_table_access(context->string_table, fn->name);
                     print_file_pos(&body[i].pos);
-                    printf("Function '%s' has a body, but functions inside 'extern' blocks can't have bodies\n", name);
+                    printf("Function '%s' has a body, but functions inside 'extern' blocks can't have bodies\n", fn->name);
                     valid = false;
                 } else {
-                    Import_Index import_index = add_import(context, source_path, library_name_index, fn->name);
+                    Import_Index import_index = add_import(context, source_path, library_name, fn->name);
                     fn->import_info.index = import_index;
                 }
 
@@ -5409,7 +5483,7 @@ bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32
             default: {
                 print_file_pos(&body[i].pos);
                 printf("Found invalid token at top level inside 'extern' block: ");
-                print_token(context->string_table, &body[i]);
+                print_token(&body[i]);
                 printf("\n");
 
                 i += 1;
@@ -5443,12 +5517,12 @@ bool build_ast(Context *context, u8* file_name) {
 
     assert(lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text)));
 
-    u32 string_type_name_index = string_table_intern_cstr(&context->string_table, "String");
-    context->string_type = parse_user_type_name(&context->global_scope, string_type_name_index);
+    u8 *string_type_name = string_intern(&context->string_table, "String");
+    context->string_type = parse_user_type_name(&context->global_scope, string_type_name);
     assert(context->string_type != null && context->string_type->kind == TYPE_STRUCT);
 
-    u32 type_kind_name_index = string_table_intern_cstr(&context->string_table, "Type_Kind");
-    context->type_info_type = parse_user_type_name(&context->global_scope, type_kind_name_index);
+    u8 *type_kind_type_name = string_intern(&context->string_table, "Type_Kind");
+    context->type_info_type = parse_user_type_name(&context->global_scope, type_kind_type_name);
     assert(context->type_info_type != null && context->type_info_type->kind == TYPE_ENUM);
 
 
@@ -5518,21 +5592,20 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 done_with_identifier:
 
                 u32 length = last - first + 1;
-                u8* identifier = &file[first];
-
-                u32 string_table_index = string_table_intern(&context->string_table, identifier, length);
+                u8 *identifier = &file[first];
+                u8 *interned_identifier = string_intern_with_length(&context->string_table, identifier, length);
 
                 bool is_keyword = false;
                 for (u32 k = 0; k < KEYWORD_COUNT; k += 1) {
-                    if (string_table_index == context->keyword_token_table[k][1]) {
-                        buf_push(tokens, ((Token) { context->keyword_token_table[k][0], .pos = file_pos }));
+                    if (interned_identifier == context->keyword_token_table[k].interned_name) {
+                        buf_push(tokens, ((Token) { context->keyword_token_table[k].token, .pos = file_pos }));
                         is_keyword = true;
                         break;
                     }
                 }
 
                 if (!is_keyword) {
-                    buf_push(tokens, ((Token) { TOKEN_IDENTIFIER, .identifier_string_table_index = string_table_index, .pos = file_pos }));
+                    buf_push(tokens, ((Token) { TOKEN_IDENTIFIER, .identifier = interned_identifier, .pos = file_pos }));
                 }
             } break;
 
@@ -6059,7 +6132,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
     for (Token* t = tokens; t->kind != TOKEN_END_OF_STREAM; t += 1) {
         print_token_pos(&t->pos);
         printf("  ");
-        print_token(string_table, t);
+        print_token(t);
         printf("\n");
     }
     #endif
@@ -6074,9 +6147,8 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             if (fn == null) {
                 valid = false;
             } else if (fn->kind != FN_KIND_NORMAL) {
-                u8* name = string_table_access(context->string_table, fn->name);
                 print_file_pos(&t->pos);
-                printf("Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks\n", name);
+                printf("Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks\n", fn->name);
                 valid = false;
             }
 
@@ -6102,15 +6174,15 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             if (t->kind != TOKEN_IDENTIFIER) {
                 print_file_pos(&t->pos);
                 printf("Expected global variable name, but found ");
-                print_token(context->string_table, t);
+                print_token(t);
                 printf("\n");
                 valid = false;
                 break;
             }
-            u32 name_index = t->identifier_string_table_index;
+            u8 *name = t->identifier;
             t += 1;
 
-            Type* type = null;
+            Type *type = null;
             if (t->kind == TOKEN_COLON) {
                 t += 1;
 
@@ -6123,7 +6195,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 }
             }
 
-            Expr* expr = null;
+            Expr *expr = null;
             if (t->kind == TOKEN_ASSIGN) {
                 t += 1;
 
@@ -6137,7 +6209,6 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             }
 
             if (expr == null && type == null) {
-                u8* name = string_table_access(context->string_table, name_index);
                 print_file_pos(&t->pos);
                 printf("Declared global variable '%s' without specifying type or initial value. Hence can't infer type\n", name);
                 valid = false;
@@ -6153,11 +6224,10 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             // TODO Only scan the current scope for conflicting global variable names
             bool redeclaration = false;
             buf_foreach (Global_Var, old_global, context->global_vars) {
-                if (old_global->var->name == name_index) {
-                    u8* name_string = string_table_access(context->string_table, name_index);
+                if (old_global->var->name == name) {
                     u32 initial_decl_line = old_global->var->declaration_pos.line;
                     print_file_pos(&start_pos);
-                    printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name_string, (u64) initial_decl_line);
+                    printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name, (u64) initial_decl_line);
                     redeclaration = true;
                     break;
                 }
@@ -6175,7 +6245,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                     .initial_expr = expr,
                 }));
 
-                var->name = name_index;
+                var->name = name;
                 var->declaration_pos = start_pos;
                 var->type = type;
                 var->is_global = true;
@@ -6183,7 +6253,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
                 Decl *decl = add_declaration(&context->arena, &context->global_scope);
                 decl->kind = DECL_VAR;
-                decl->name = name_index;
+                decl->name = name;
                 decl->pos = start_pos;
                 decl->var = var;
             }
@@ -6210,7 +6280,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
             print_file_pos(&t->pos);
             printf("Found invalid token at global scope: ");
-            print_token(context->string_table, t);
+            print_token(t);
             printf("\n");
         } break;
     }
@@ -6424,9 +6494,8 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
                 Type *new = parse_user_type_name(scope, type->unresolved_name);
 
                 if (new == null) {
-                    u8* name_string = string_table_access(context->string_table, type->unresolved_name);
                     print_file_pos(pos);
-                    printf("No such type in scope: '%s'\n", name_string);
+                    printf("No such type in scope: '%s'\n", type->unresolved_name);
                     return TYPECHECK_RESULT_BAD;
                 }
 
@@ -6503,7 +6572,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 Var *var = find_var(scope, expr->variable.unresolved_name, &expr->pos);
 
                 if (var == null) {
-                    u8* var_name = string_table_access(context->string_table, expr->variable.unresolved_name);
+                    u8 *var_name = expr->variable.unresolved_name;
                     print_file_pos(&expr->pos);
                     printf("Can't find variable '%s' in scope\n", var_name);
                     return TYPECHECK_EXPR_BAD;
@@ -6676,7 +6745,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         Expr* child = expr->compound.content[i].expr;
 
                         if (expr->compound.content[i].name_mode == EXPR_COMPOUND_UNRESOLVED_NAME) {
-                            u32 unresolved_name = expr->compound.content[i].unresolved_name;
+                            u8 *unresolved_name = expr->compound.content[i].unresolved_name;
                             u32 member_index = U32_MAX;
 
                             for (u32 m = 0; m < expr->type->structure.member_count; m += 1) {
@@ -6687,8 +6756,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                             }
 
                             if (member_index == U32_MAX) {
-                                u8* member_name = string_table_access(context->string_table, unresolved_name);
-                                u8* struct_name = string_table_access(context->string_table, expr->type->structure.name);
+                                u8 *member_name = unresolved_name;
+                                u8 *struct_name = expr->type->structure.name;
                                 print_file_pos(&expr->pos);
                                 printf("Struct '%s' has no member '%s'\n", struct_name, member_name);
                                 return TYPECHECK_EXPR_BAD;
@@ -6713,8 +6782,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                         if (!type_can_assign(member_type, child->type)) {
-                            u8* member_name = string_table_access(context->string_table, expr->type->structure.members[m].name);
-                            u8* struct_name = string_table_access(context->string_table, expr->type->structure.name);
+                            u8 *member_name = expr->type->structure.members[m].name;
+                            u8 *struct_name = expr->type->structure.name;
 
                             print_file_pos(&child->pos);
                             printf("Expected ");
@@ -6726,8 +6795,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         }
 
                         if (set_map[i]) {
-                            u32 name_index = expr->type->structure.members[m].name;
-                            u8* member_name = string_table_access(context->string_table, name_index);
+                            u8 *name = expr->type->structure.members[m].name;
+                            u8* member_name = name;
 
                             print_file_pos(&child->pos);
                             printf("'%s' is set more than once in struct literal\n", member_name);
@@ -6939,7 +7008,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 // The alternative would be to use a different syntax to get function pointers, or putting
                 // functions and variables in the same namespace.
 
-                u32 name = expr->unary.inner->variable.unresolved_name;
+                u8 *name = expr->unary.inner->variable.unresolved_name;
                 Decl *fn_decl = find_declaration(scope, name, DECL_FN);
 
                 if (fn_decl != null) {
@@ -7038,9 +7107,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     Var *var = find_var(scope, expr->call.unresolved_name, &expr->pos);
 
                     if (var == null) {
-                        u8* name = string_table_access(context->string_table, expr->call.unresolved_name);
                         print_file_pos(&expr->pos);
-                        printf("No such function or function pointer '%s'\n", name);
+                        printf("No such function or function pointer '%s'\n", expr->call.unresolved_name);
                         return TYPECHECK_EXPR_BAD;
                     } else {
                         // Modify the call to call a function pointer stored in a variable
@@ -7079,14 +7147,14 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 if (expr->call.pointer_expr->kind == EXPR_VARIABLE) {
                     assert(!(expr->call.pointer_expr->flags & EXPR_FLAG_UNRESOLVED));
                     Var *var = expr->call.pointer_expr->variable.var;
-                    callee_name = string_table_access(context->string_table, var->name);
+                    callee_name = var->name;
                 } else {
                     callee_name = "<unkown pointer>";
                 }
             } else {
                 Fn *callee = expr->call.callee;
                 callee_signature_type = callee->signature_type;
-                callee_name = string_table_access(context->string_table, callee->name);
+                callee_name = callee->name;
             }
 
             assert(callee_signature_type->kind == TYPE_FN_POINTER);
@@ -7222,7 +7290,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             }
 
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u32 access_name = expr->member_access.member_name;
+                u8 *access_name = expr->member_access.member_name;
 
                 Type* s = parent->type;
                 if (s->kind == TYPE_POINTER && s->pointer_to->kind == TYPE_STRUCT) {
@@ -7232,7 +7300,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 bool has_member = false;
                 if (s->kind == TYPE_STRUCT) {
                     for (u32 m = 0; m < s->structure.member_count; m += 1) {
-                        u32 member_name = s->structure.members[m].name;
+                        u8 *member_name = s->structure.members[m].name;
                         if (member_name == access_name) {
                             expr->member_access.member_index = m;
                             expr->type = s->structure.members[m].type;
@@ -7244,10 +7312,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
 
                 if (!has_member) {
-                    u8* name_string = string_table_access(context->string_table, access_name);
                     print_file_pos(&expr->pos);
                     print_type(context, parent->type);
-                    printf(" has no member '%s'\n", name_string);
+                    printf(" has no member '%s'\n", access_name);
                     return TYPECHECK_EXPR_BAD;
                 }
             }
@@ -7260,7 +7327,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 Type *parent = parse_user_type_name(scope, expr->static_member_access.parent_name);
 
                 if (parent == null) {
-                    u8* name_string = string_table_access(context->string_table, expr->static_member_access.parent_name);
+                    u8 *name_string = expr->static_member_access.parent_name;
                     print_file_pos(&expr->pos);
                     printf("No such type in scope: '%s'\n", name_string);
                     return TYPECHECK_EXPR_BAD;
@@ -7283,7 +7350,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
 
                 if (member_index == U32_MAX) {
-                    u8* member_name = string_table_access(context->string_table, expr->static_member_access.member_name);
+                    u8 *member_name = expr->static_member_access.member_name;
                     print_file_pos(&expr->pos);
                     print_type(context, parent);
                     printf(" has no member '%s'\n", member_name);
@@ -7421,10 +7488,8 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                         var->type = right->type;
                     } else {
                         if (!type_can_assign(var->type, right->type)) {
-                            u8 *var_name = string_table_access(context->string_table, var->name);
-
                             print_file_pos(&stmt->pos);
-                            printf("Invalid declaration: '%s' has type ", var_name);
+                            printf("Invalid declaration: '%s' has type ", var->name);
                             print_type(context, var->type);
                             printf(" but right hand side has type ");
                             print_type(context, right->type);
@@ -7547,7 +7612,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
             if (!scope->fn->signature->has_return) {
                 if (stmt->return_stmt.value != null) {
-                    u8* name = string_table_access(context->string_table, scope->fn->name);
+                    u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is not declared to return anything, but tried to return a value\n", name);
                     return TYPECHECK_RESULT_BAD;
@@ -7557,7 +7622,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 Type *expected_type = scope->fn->signature->return_type;
 
                 if (stmt->return_stmt.value == null) {
-                    u8* name = string_table_access(context->string_table, scope->fn->name);
+                    u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is declared to return a ", name);
                     print_type(context, expected_type);
@@ -7569,7 +7634,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 if (!type_can_assign(expected_type, stmt->return_stmt.value->type)) {
-                    u8* name = string_table_access(context->string_table, scope->fn->name);
+                    u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Expected ");
                     print_type(context, expected_type);
@@ -8223,9 +8288,8 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
                 if (result == CONTROL_FLOW_INVALID) {
                     return TYPECHECK_RESULT_BAD;
                 } else if (fn->signature->has_return && result != CONTROL_FLOW_WILL_RETURN) {
-                    u8* name = string_table_access(context->string_table, fn->name);
                     print_file_pos(&fn->declaration_pos);
-                    printf("Function '%s' might not return\n", name);
+                    printf("Function '%s' might not return\n", fn->name);
                     return TYPECHECK_RESULT_BAD;
                 }
 
@@ -8360,7 +8424,7 @@ bool typecheck(Context *context) {
     u64 passes = 0;
     while (true) {
         passes += 1;
-        printf("%n pass\n", passes);
+        //printf("%n pass\n", passes);
         u64 completed_count = 0;
 
         buf_foreach (Typecheck_Item, item, queue.items) {
@@ -8389,19 +8453,18 @@ bool typecheck(Context *context) {
 
                     case TYPECHECK_COMPUTE_SIZE: {
                         assert(item->compute_size_of->kind == TYPE_STRUCT);
-                        u8 *name = string_table_access(context->string_table, item->compute_size_of->structure.name);
+                        u8 *name = item->compute_size_of->structure.name;
                         printf("    The size of 'struct %s'\n", name);
                     } break;
 
                     case TYPECHECK_FN_BODY: {
-                        u8 *name = string_table_access(context->string_table, item->fn->name);
+                        u8 *name = item->fn->name;
                         printf("    The body of 'fn %s'\n", name);
                     } break;
 
                     case TYPECHECK_GLOBAL_VAR: {
                         Global_Var *global = &context->global_vars[item->global_index];
-                        u8 *name = string_table_access(context->string_table, global->var->name);
-                        printf("    The global '%s'\n", name);
+                        printf("    The global '%s'\n", global->var->name);
                     } break;
 
                     default: assert(false);
@@ -8494,8 +8557,8 @@ void build_enum_member_name_table(Context *context, Type* type) {
 
     mem_fill(context->seg_data + table_offset, 0xff, table_size * sizeof(u16));
 
-    u32 type_name_length;
-    u8* type_name = string_table_access_and_get_length(context->string_table, type->enumeration.name, &type_name_length);
+    u8 *type_name = type->enumeration.name;
+    u32 type_name_length = str_length(type_name);
 
     u64 invalid_string_offset = buf_length(context->seg_data);
     u64 invalid_string_length = type_name_length + 10;
@@ -8507,8 +8570,8 @@ void build_enum_member_name_table(Context *context, Type* type) {
 
     for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
         u64 value = type->enumeration.members[m].value;
-        u32 name_length = 0;
-        u8* name = string_table_access_and_get_length(context->string_table, type->enumeration.members[m].name, &name_length);
+        u8 *name = type->enumeration.members[m].name;
+        u32 name_length = str_length(name);
 
         assert(name_length <= U16_MAX);
         u64 string_offset = buf_length(context->seg_data);
@@ -12078,7 +12141,7 @@ void build_machinecode(Context *context) {
             last_stmt->next->kind = STMT_END;
 
             global_init_fn = arena_new(&context->arena, Fn);
-            global_init_fn->name = string_table_intern_cstr(&context->string_table, "__init_globals__");
+            global_init_fn->name = string_intern(&context->string_table, "__init_globals__");
             global_init_fn->kind = FN_KIND_NORMAL;
             global_init_fn->body.first_stmt = first_stmt;
             global_init_fn->signature_type = context->void_fn_signature;
@@ -12091,7 +12154,7 @@ void build_machinecode(Context *context) {
     // Normal functions
     u8 *prolog = null; // stretchy-buffer, this is a huge hack :(
 
-    Decl *main_fn_decl = find_declaration(&context->global_scope, string_table_search(context->string_table, "main"), DECL_FN);
+    Decl *main_fn_decl = find_declaration(&context->global_scope, string_intern(&context->string_table, "main"), DECL_FN);
     if (main_fn_decl == null) panic("No main function");
     Fn *main_fn = main_fn_decl->fn;
     assert(main_fn->kind == FN_KIND_NORMAL);
@@ -12487,7 +12550,7 @@ void parse_lib_paths_from_env_variable(Context *context) {
 
     u32 lib_string_length = GetEnvironmentVariableA("LIB", null, 0);
     if (lib_string_length == 0) {
-        printf("%%LIB%% is not set. External libraries won't be usable");
+        printf("%%LIB%% is not set. External libraries won't be usable\n");
         context->lib_paths = (void*) arena_alloc(&context->arena, 0); // So we know we tried parsing %LIB%
         return;
     }
@@ -12599,7 +12662,7 @@ bool read_archive_member_header(
 bool parse_library(Context *context, Library_Import* import) {
     arena_stack_push(&context->stack);
 
-    u8 *raw_lib_name = string_table_access(context->string_table, import->lib_name);
+    u8 *raw_lib_name = import->lib_name;
     u8 *source_path = import->importing_source_file;
     u8 *source_folder = path_get_folder(&context->stack, source_path);
     u8 *path = path_join(&context->stack, source_folder, raw_lib_name);
@@ -12693,7 +12756,7 @@ bool parse_library(Context *context, Library_Import* import) {
         for (u32 j = 0; j < buf_length(import->function_names); j += 1) {
             u32* hint = &import->function_hints[j];
             if (*hint != U32_MAX) continue;
-            u8* specified_name = string_table_access(context->string_table, import->function_names[j]);
+            u8 *specified_name = import->function_names[j];
 
             bool match = true;
             for (u32 k = 0; k < symbol_name_length; k += 1) {
@@ -12741,7 +12804,7 @@ bool parse_library(Context *context, Library_Import* import) {
 
     for (u32 i = 0; i < buf_length(import->function_names); i += 1) {
         if (import->function_hints[i] == U32_MAX) {
-            u8* name = string_table_access(context->string_table, import->function_names[i]);
+            u8 *name = import->function_names[i];
             printf("Couldn't find %s in \"%s\"\n", name, path);
             return false;
         }
@@ -12925,7 +12988,7 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
                 panic("Import data will be invalid, because it has functions at to high rvas: %x!", function_name_address);
             }
 
-            u8* name = string_table_access(context->string_table, import->function_names[j]);
+            u8 *name = import->function_names[j];
             u16 hint = import->function_hints[j];
 
             buf_push(rdata, (u8) (hint & 0xff));
@@ -13066,7 +13129,7 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     image.size_of_initialized_data = data_length + rdata_length;
     image.size_of_uninitialized_data = 0;
 
-    Decl *main_fn_decl = find_declaration(&context->global_scope, string_table_search(context->string_table, "main"), DECL_FN);
+    Decl *main_fn_decl = find_declaration(&context->global_scope, string_intern(&context->string_table, "main"), DECL_FN);
     if (main_fn_decl == null) panic("No main function");
     Fn *main_fn = main_fn_decl->fn;
     assert(main_fn_decl->fn->kind == FN_KIND_NORMAL);
