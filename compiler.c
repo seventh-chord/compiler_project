@@ -6211,14 +6211,83 @@ typedef enum Typecheck_Expr_Result {
 
 Typecheck_Expr_Result typecheck_expr(Context* info, Scope *scope, Expr* expr, Type* solidify_to);
 
-// TODO should return 'Typecheck_Result', so we can do out of order stuff
-bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *pos) {
+Typecheck_Result compute_size_of_struct(Type *type) {
+    u32 max_align = 0;
+    u32 size = 0;
+
+    for (u32 m = 0; m < type->structure.member_count; m += 1) {
+        File_Pos* member_pos = &type->structure.members[m].declaration_pos;
+        Type *member_type = type->structure.members[m].type;
+
+        if (member_type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
+            return TYPECHECK_RESULT_DEPENDENT;
+        }
+
+        u32 member_size = 0;
+        u32 member_align = 0;
+
+        u32 array_multiplier = 1;
+        while (true) {
+            if (member_type->kind == TYPE_ARRAY) {
+                array_multiplier *= member_type->array.length;
+                member_type = member_type->array.of;
+
+            } else {
+                if (member_type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                    return TYPECHECK_RESULT_DEPENDENT;
+                }
+
+                u64 base_size;
+                if (member_type->kind == TYPE_STRUCT) {
+                    member_size = member_type->structure.size;
+                    member_align = member_type->structure.align;
+                } else {
+                    member_size = primitive_size_of(primitive_of(member_type));
+                    member_align = member_size;
+                }
+
+                member_size *= array_multiplier;
+                break;
+            }
+        }
+
+        size = round_to_next(size, member_align);
+        type->structure.members[m].offset = (i32) size;
+        size += member_size;
+
+        max_align = max(max_align, member_align);
+    }
+
+    if (max_align > 0) {
+        size = round_to_next(size, max_align);
+    }
+
+    type->structure.size = size;
+    type->structure.align = max_align;
+
+    type->flags &= ~TYPE_FLAG_SIZE_NOT_COMPUTED;
+
+    #if 0
+    u8* name = string_table_access(context->string_table, type->structure.name);
+    printf("struct %s\n", name);
+    printf("size = %u, align = %u\n", type->structure.size, type->structure.align);
+    for (u32 m = 0; m < type->structure.member_count; m += 1) {
+        u8* member_name = string_table_access(context->string_table, type->structure.members[m].name);
+        u64 offset = type->structure.members[m].offset;
+        printf("    %s: offset = %u\n", member_name, offset);
+    }
+    #endif
+
+    return TYPECHECK_RESULT_DONE;
+}
+
+Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *pos) {
     // The reason we have a pretty complex system here is because we want types to be pointer-equal
 
-    Type* type = *type_slot;
+    Type *type = *type_slot;
 
     if (!(type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD))) {
-        return true;
+        return TYPECHECK_RESULT_DONE;
     }
 
     typedef struct Prefix Prefix;
@@ -6259,7 +6328,7 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                     if (!primitive_is_integer(length_expr->type->kind)) {
                         print_file_pos(&length_expr->pos);
                         printf("Can only use unsigned integers as array sizes\n");
-                        return false;
+                        return TYPECHECK_RESULT_BAD;
                     }
 
                     u64 length = 0;
@@ -6268,8 +6337,8 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                     arena_stack_pop(&context->stack);
 
                     switch (eval_result) {
-                        case EVAL_BAD:       return false;
-                        case EVAL_DEPENDENT: unimplemented();
+                        case EVAL_BAD:       return TYPECHECK_RESULT_BAD;
+                        case EVAL_DEPENDENT: return TYPECHECK_RESULT_DEPENDENT;
 
                         case EVAL_DO_AT_RUNTIME: {
                             print_file_pos(&length_expr->pos);
@@ -6291,7 +6360,7 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                                 if (signed_length < 0) {
                                     print_file_pos(&length_expr->pos);
                                     printf("Can't use negative array length %i\n", signed_length);
-                                    return false;
+                                    return TYPECHECK_RESULT_BAD;
                                 }
                             }
 
@@ -6325,7 +6394,7 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                     u8* name_string = string_table_access(context->string_table, type->unresolved_name);
                     print_file_pos(pos);
                     printf("No such type: '%s'\n", name_string);
-                    return false;
+                    return TYPECHECK_RESULT_BAD;
                 }
 
                 type = new;
@@ -6340,14 +6409,12 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                 Fn_Signature signature = type->fn_signature;
 
                 for (u32 p = 0; p < signature.param_count; p += 1) {
-                    if (!resolve_type(context, scope, &signature.params[p].type, pos)) {
-                        return false;
-                    }
+                    Typecheck_Result r = resolve_type(context, scope, &signature.params[p].type, pos);
+                    if (r != TYPECHECK_RESULT_DONE) return r;
                 }
 
-                if (!resolve_type(context, scope, &signature.return_type, pos)) {
-                    return false;
-                }
+                Typecheck_Result r = resolve_type(context, scope, &signature.return_type, pos);
+                if (r != TYPECHECK_RESULT_DONE) return r;
 
                 type = fn_signature_canonicalize(context, &signature);
                 done = true;
@@ -6358,12 +6425,17 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
 
                 for (u32 m = 0; m < type->structure.member_count; m += 1) {
-                    if (!resolve_type(context, scope, &type->structure.members[m].type, pos)) {
-                        return false;
-                    }
+                    Typecheck_Result r = resolve_type(context, scope, &type->structure.members[m].type, pos);
+                    if (r != TYPECHECK_RESULT_DONE) return r;
                 }
 
                 type->flags &= ~TYPE_FLAG_UNRESOLVED_CHILD;
+
+                if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                    Typecheck_Result r = compute_size_of_struct(type);
+                    if (r != TYPECHECK_RESULT_DONE) return r;
+                }
+
 
                 done = true;
             } break;
@@ -6385,7 +6457,7 @@ bool resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *po
     arena_stack_pop(&context->stack);
 
     *type_slot = type;
-    return true;
+    return TYPECHECK_RESULT_DONE;
 }
 
 
@@ -6505,9 +6577,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 expr->type = solidify_to;
             }
 
-            if (!resolve_type(context, scope, &expr->type, &expr->pos)) {
-                return TYPECHECK_EXPR_BAD;
-            }
+            Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);
+            if (r != TYPECHECK_RESULT_DONE) return r;
 
             if (expr->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
                 return TYPECHECK_EXPR_DEPENDENT;
@@ -7029,10 +7100,11 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_CAST: {
-            if (!resolve_type(context, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            Typecheck_Result r1 = resolve_type(context, scope, &expr->type, &expr->pos);
+            if (r1 != TYPECHECK_RESULT_DONE) return r1;
 
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->cast_from, expr->type);
-            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
+            Typecheck_Expr_Result r2 = typecheck_expr(context, scope, expr->cast_from, expr->type);
+            if (r2 == TYPECHECK_EXPR_BAD || r2 == TYPECHECK_EXPR_DEPENDENT) return r2;
 
             Type_Kind from = expr->cast_from->type->kind;
             Type_Kind to   = expr->type->kind;
@@ -7196,7 +7268,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
 
         case EXPR_TYPE_INFO_OF_TYPE: {
-            if (!resolve_type(context, scope, &expr->type_info_of_type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            Typecheck_Result r = resolve_type(context, scope, &expr->type_info_of_type, &expr->pos);
+            if (r != TYPECHECK_RESULT_DONE) return r;
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
@@ -7206,7 +7279,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_QUERY_TYPE_INFO: {
-            if (!resolve_type(context, scope, &expr->query_type_info.type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+            Typecheck_Result r = resolve_type(context, scope, &expr->query_type_info.type, &expr->pos);
+            if (r != TYPECHECK_RESULT_DONE) return r;
 
             if (
                 expr->query_type_info.query == QUERY_TYPE_INFO_ENUM_LENGTH &&
@@ -7243,7 +7317,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         default: assert(false);
     }
 
-    if (!resolve_type(context, scope, &expr->type, &expr->pos)) return TYPECHECK_EXPR_BAD;
+    Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);
+    if (r != TYPECHECK_RESULT_DONE) return r;
 
     if (strong) {
         return TYPECHECK_EXPR_STRONG;
@@ -7296,9 +7371,8 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             Expr* right = stmt->let.right;
 
             if (var->type != null) {
-                if (!resolve_type(context, scope, &var->type, &var->declaration_pos)) {
-                    return TYPECHECK_RESULT_BAD;
-                }
+                Typecheck_Result r = resolve_type(context, scope, &var->type, &var->declaration_pos);
+                if (r != TYPECHECK_RESULT_DONE) return r;
             }
 
             if (right != null) {
@@ -7863,7 +7937,7 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
         } break;
 
         case EXPR_ADDRESS_OF_FUNCTION: {
-            return EVAL_DO_AT_RUNTIME; // TODO If we go full-on cyclic dependency resolution, we could compute this at compile time
+            return EVAL_DO_AT_RUNTIME;
         } break;
 
         default: assert(false); return EVAL_BAD;
@@ -7988,79 +8062,11 @@ typedef struct Typecheck_Queue {
     Typecheck_Item *items, *unresolved; // stretchy-buffer
 } Typecheck_Queue;
 
-Typecheck_Result compute_size_of_struct(Type *type) {
-    u32 max_align = 0;
-    u32 size = 0;
-
-    for (u32 m = 0; m < type->structure.member_count; m += 1) {
-        File_Pos* member_pos = &type->structure.members[m].declaration_pos;
-        Type *member_type = type->structure.members[m].type;
-
-        if (member_type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
-            return TYPECHECK_RESULT_DEPENDENT;
-        }
-
-        u32 member_size = 0;
-        u32 member_align = 0;
-
-        u32 array_multiplier = 1;
-        while (true) {
-            if (member_type->kind == TYPE_ARRAY) {
-                array_multiplier *= member_type->array.length;
-                member_type = member_type->array.of;
-
-            } else {
-                if (member_type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
-                    return TYPECHECK_RESULT_DEPENDENT;
-                }
-
-                u64 base_size;
-                if (member_type->kind == TYPE_STRUCT) {
-                    member_size = member_type->structure.size;
-                    member_align = member_type->structure.align;
-                } else {
-                    member_size = primitive_size_of(primitive_of(member_type));
-                    member_align = member_size;
-                }
-
-                member_size *= array_multiplier;
-                break;
-            }
-        }
-
-        size = round_to_next(size, member_align);
-        type->structure.members[m].offset = (i32) size;
-        size += member_size;
-
-        max_align = max(max_align, member_align);
-    }
-
-    if (max_align > 0) {
-        size = round_to_next(size, max_align);
-    }
-
-    type->structure.size = size;
-    type->structure.align = max_align;
-
-    type->flags &= ~TYPE_FLAG_SIZE_NOT_COMPUTED;
-
-    #if 0
-    u8* name = string_table_access(context->string_table, type->structure.name);
-    printf("struct %s\n", name);
-    printf("size = %u, align = %u\n", type->structure.size, type->structure.align);
-    for (u32 m = 0; m < type->structure.member_count; m += 1) {
-        u8* member_name = string_table_access(context->string_table, type->structure.members[m].name);
-        u64 offset = type->structure.members[m].offset;
-        printf("    %s: offset = %u\n", member_name, offset);
-    }
-    #endif
-
-    return TYPECHECK_RESULT_DONE;
-}
 
 Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global) {
-    if (global->var->type != null && !resolve_type(context, scope, &global->var->type, &global->var->declaration_pos)) {
-        return TYPECHECK_RESULT_BAD;
+    if (global->var->type != null) {
+        Typecheck_Result r = resolve_type(context, scope, &global->var->type, &global->var->declaration_pos);
+        if (r != TYPECHECK_RESULT_DONE) return r;
     }
 
     if (global->initial_expr != null) {
@@ -8141,15 +8147,18 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
 Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) {
     switch (item->kind) {
         case TYPECHECK_RESOLVE_TYPE: {
-            bool success = resolve_type(context, item->scope, item->resolve_type.slot, &item->resolve_type.pos);
-            return success? TYPECHECK_RESULT_DONE : TYPECHECK_RESULT_BAD;
+            return resolve_type(context, item->scope, item->resolve_type.slot, &item->resolve_type.pos);
         } break;
 
         case TYPECHECK_COMPUTE_SIZE: {
             Type *type = item->compute_size_of;
-            assert(type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED);
             assert(type->kind == TYPE_STRUCT);
-            return compute_size_of_struct(type);
+
+            if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                return compute_size_of_struct(type);
+            } else {
+                return TYPECHECK_RESULT_DONE;
+            }
         } break;
 
         case TYPECHECK_FN_BODY: {
@@ -8313,6 +8322,7 @@ bool typecheck(Context *context) {
     u64 passes = 0;
     while (true) {
         passes += 1;
+        printf("%n pass\n", passes);
         u64 completed_count = 0;
 
         buf_foreach (Typecheck_Item, item, queue.items) {
@@ -8330,8 +8340,35 @@ bool typecheck(Context *context) {
 
         u64 unresolved_count = buf_length(queue.unresolved);
         if (completed_count == 0 && unresolved_count > 0) {
-            // TODO print proper error messages here!!!
-            printf("Cyclic dependency!\n");
+            printf("The following items depend on each other cyclically:\n");
+            buf_foreach (Typecheck_Item, item, queue.unresolved) {
+                switch (item->kind) {
+                    case TYPECHECK_RESOLVE_TYPE: {
+                        printf("    The type of ");
+                        print_type(context, *item->resolve_type.slot);
+                        printf("\n");
+                    } break;
+
+                    case TYPECHECK_COMPUTE_SIZE: {
+                        assert(item->compute_size_of->kind == TYPE_STRUCT);
+                        u8 *name = string_table_access(context->string_table, item->compute_size_of->structure.name);
+                        printf("    The size of 'struct %s'\n", name);
+                    } break;
+
+                    case TYPECHECK_FN_BODY: {
+                        u8 *name = string_table_access(context->string_table, item->fn->name);
+                        printf("    The body of 'fn %s'\n", name);
+                    } break;
+
+                    case TYPECHECK_GLOBAL_VAR: {
+                        Global_Var *global = &context->global_vars[item->global_index];
+                        u8 *name = string_table_access(context->string_table, global->var->name);
+                        printf("    The global '%s'\n", name);
+                    } break;
+
+                    default: assert(false);
+                }
+            }
             return false;
         }
 
