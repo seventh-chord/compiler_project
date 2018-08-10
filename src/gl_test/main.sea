@@ -75,7 +75,14 @@ fn open_window() {
     let legacy_gl_context = wglCreateContext(device_context);
     wglMakeCurrent(device_context, legacy_gl_context);
 
+    // NB this is only the subset of extensions I care about
+    enum WGL_Extensions {
+        WGL_ARB_create_context,
+        WGL_ARB_create_context_profile,
+        WGL_EXT_swap_control
+    }
     let has_extensions: [enum_length(WGL_Extensions)]bool;
+
     {
         let wglGetExtensionsStringARB = cast(wglGetExtensionsStringARB_Type, get_gl_proc_address(gl32_lib, "wglGetExtensionsStringARB".data));
         assert(wglGetExtensionsStringARB != null, "WGL_ARB_extensions_string is not supported");
@@ -307,15 +314,6 @@ let SW_SHOWNA: i32          = 8;
 let SW_RESTORE: i32         = 9;
 let SW_SHOWDEFAULT: i32     = 10;
 let SW_FORCEMINIMIZE: i32   = 11;
-
-// TODO 'enum WGL_Extensions' and 'fn get_gl_proc_address' should be inline
-// in the main function which actually uses them.
-// NB this is only the subset of extensions I care about
-enum WGL_Extensions {
-    WGL_ARB_create_context,
-    WGL_ARB_create_context_profile,
-    WGL_EXT_swap_control
-}
 
 fn get_gl_proc_address(gl32_lib: Handle, name: *u8) -> *fn() {
     let address = wglGetProcAddress(name);

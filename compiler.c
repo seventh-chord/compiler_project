@@ -1715,6 +1715,7 @@ struct Stmt {
         STMT_END = 0, // Sentinel, returned to mark that no more statements can be parsed
 
         STMT_LET,
+        STMT_DECL,
         STMT_EXPR,
         STMT_ASSIGNMENT,
 
@@ -2812,6 +2813,8 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
 
             printf(";");
         } break;
+
+        case STMT_DECL: {} break;
 
         case STMT_BLOCK: {
             printf("{\n");
@@ -5068,6 +5071,36 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 t += 1;
             } break;
 
+            case TOKEN_KEYWORD_ENUM: {
+                stmt->kind = STMT_DECL;
+
+                u32 decl_length = 0;
+                bool valid = parse_enum_declaration(context, scope, t, &decl_length);
+                t += decl_length;
+
+                if (!valid) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+            } break;
+
+            case TOKEN_KEYWORD_STRUCT: {
+                stmt->kind = STMT_DECL;
+
+                u32 decl_length = 0;
+                bool valid = parse_struct_declaration(context, &context->global_scope, t, &decl_length);
+                t += decl_length;
+
+                if (!valid) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+            } break;
+
+            case TOKEN_KEYWORD_UNION: {
+                unimplemented(); // TODO
+            } break;
+
             default: {
                 u32 left_length = 0;
                 Expr* left = parse_expr(context, scope, t, &left_length, false);
@@ -6393,7 +6426,7 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
                 if (new == null) {
                     u8* name_string = string_table_access(context->string_table, type->unresolved_name);
                     print_file_pos(pos);
-                    printf("No such type: '%s'\n", name_string);
+                    printf("No such type in scope: '%s'\n", name_string);
                     return TYPECHECK_RESULT_BAD;
                 }
 
@@ -7229,7 +7262,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 if (parent == null) {
                     u8* name_string = string_table_access(context->string_table, expr->static_member_access.parent_name);
                     print_file_pos(&expr->pos);
-                    printf("No such type: '%s'\n", name_string);
+                    printf("No such type in scope: '%s'\n", name_string);
                     return TYPECHECK_EXPR_BAD;
                 }
 
@@ -7402,6 +7435,10 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 }
             }
 
+            return TYPECHECK_RESULT_DONE;
+        } break;
+
+        case STMT_DECL: {
             return TYPECHECK_RESULT_DONE;
         } break;
 
@@ -7967,6 +8004,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             case STMT_LET:
             case STMT_EXPR:
             case STMT_ASSIGNMENT:
+            case STMT_DECL:
             {} break;
 
             case STMT_BLOCK: {
@@ -11707,6 +11745,9 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             } else {
                 machinecode_for_expr(context, fn, stmt->let.right, reg_allocator, x64_place_address(address));
             }
+        } break;
+
+        case STMT_DECL: {
         } break;
 
         case STMT_EXPR: {
