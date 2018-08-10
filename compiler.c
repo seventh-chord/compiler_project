@@ -429,7 +429,6 @@ u64 hash_word(u64 key) {
 }
 
 u64 hash_string(u8 *bytes, u64 length) {
-    //return 1; // TODO This crashes gl_test
     u64 key = 0xcbf29ce484222325;
     for (u64 i = 0; i < length; i += 1) {
         key ^= bytes[i];
@@ -814,12 +813,12 @@ u8 *string_intern_with_length(String_Table *table, u8 *string, u64 length) {
     mem_copy(string, new_entry->string, length);
     new_entry->string[length] = 0;
 
-    if (entry != null) {
+    if (entry == null) {
+        hash_insert(&table->map, key, (u64) new_entry);
+    } else {
         assert(entry->next == null);
         entry->next = new_entry;
     }
-
-    hash_insert(&table->map, key, (u64) new_entry);
 
     return new_entry->string;
 }
