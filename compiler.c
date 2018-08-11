@@ -1198,7 +1198,7 @@ typedef struct File_Pos {
     u32 character;
 } File_Pos;
 
-enum { KEYWORD_COUNT = 17 };
+enum { KEYWORD_COUNT = 18 };
 
 typedef struct Token {
     enum {
@@ -1262,6 +1262,7 @@ typedef struct Token {
         TOKEN_KEYWORD_TYPEDEF,
         TOKEN_KEYWORD_LET,
         TOKEN_KEYWORD_IF,
+        TOKEN_KEYWORD_SWITCH,
         TOKEN_KEYWORD_ELSE,
         TOKEN_KEYWORD_FOR,
         TOKEN_KEYWORD_RETURN,
@@ -1347,6 +1348,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_KEYWORD_TYPEDEF]      = "typedef",
     [TOKEN_KEYWORD_LET]          = "let",
     [TOKEN_KEYWORD_IF]           = "if",
+    [TOKEN_KEYWORD_SWITCH]       = "switch",
     [TOKEN_KEYWORD_ELSE]         = "else",
     [TOKEN_KEYWORD_FOR]          = "for",
     [TOKEN_KEYWORD_RETURN]       = "return",
@@ -1817,7 +1819,8 @@ struct Stmt {
 
         STMT_BLOCK,
         STMT_IF,
-        STMT_LOOP,
+        STMT_FOR,
+        STMT_SWITCH,
 
         STMT_RETURN,
         STMT_BREAK,
@@ -1848,7 +1851,18 @@ struct Stmt {
             Expr *condition;
             Stmt *then, *else_then;
             Scope then_scope, else_then_scope;
-        } conditional;
+        } if_;
+
+        struct {
+            Expr *index;
+
+            struct {
+                // TODO How do we represent the key?
+                Stmt *body;
+                Scope *scope;
+            } *cases;
+            u32 case_count;
+        } switch_;
 
         struct {
             enum {
@@ -1867,12 +1881,12 @@ struct Stmt {
 
             Stmt *body;
             Scope scope;
-        } loop;
+        } for_;
 
         struct {
             Expr *value;
             bool trailing;
-        } return_stmt;
+        } return_;
     };
 
     File_Pos pos;
@@ -2233,6 +2247,7 @@ void init_keyword_names(Context *context) {
     add_keyword(TOKEN_KEYWORD_TYPEDEF,     "typedef");
     add_keyword(TOKEN_KEYWORD_LET,         "let");
     add_keyword(TOKEN_KEYWORD_IF,          "if");
+    add_keyword(TOKEN_KEYWORD_SWITCH,      "switch");
     add_keyword(TOKEN_KEYWORD_ELSE,        "else");
     add_keyword(TOKEN_KEYWORD_FOR,         "for");
     add_keyword(TOKEN_KEYWORD_RETURN,      "return");
@@ -2913,20 +2928,20 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
 
         case STMT_IF: {
             printf("if (");
-            print_expr(context, stmt->conditional.condition);
+            print_expr(context, stmt->if_.condition);
             printf(") {\n");
 
-            for (Stmt *inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
+            for (Stmt *inner = stmt->if_.then; inner->kind != STMT_END; inner = inner->next) {
                 print_stmt(context, inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
             printf("}");
 
-            if (stmt->conditional.else_then != null) {
+            if (stmt->if_.else_then != null) {
                 printf(" else {\n");
 
-                for (Stmt *inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
+                for (Stmt *inner = stmt->if_.else_then; inner->kind != STMT_END; inner = inner->next) {
                     print_stmt(context, inner, indent_level + 1);
                 }
 
@@ -2935,26 +2950,26 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
             }
         } break;
 
-        case STMT_LOOP: {
-            if (stmt->loop.kind == LOOP_CONDITIONAL) {
+        case STMT_FOR: {
+            if (stmt->for_.kind == LOOP_CONDITIONAL) {
                 printf("for ");
-                print_expr(context, stmt->loop.condition);
+                print_expr(context, stmt->for_.condition);
                 printf(" {\n");
-            } else if (stmt->loop.kind == LOOP_INFINITE) {
+            } else if (stmt->for_.kind == LOOP_INFINITE) {
                 printf("for {\n");
-            } else if (stmt->loop.kind == LOOP_RANGE) {
-                u8 *var_name = stmt->loop.range.var->name;
+            } else if (stmt->for_.kind == LOOP_RANGE) {
+                u8 *var_name = stmt->for_.range.var->name;
 
                 printf("for %s : ", var_name);
-                print_expr(context, stmt->loop.range.start);
+                print_expr(context, stmt->for_.range.start);
                 printf("..");
-                print_expr(context, stmt->loop.range.end);
+                print_expr(context, stmt->for_.range.end);
                 printf(" {\n");
             } else {
                 assert(false);
             }
 
-            for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
+            for (Stmt *inner = stmt->for_.body; inner->kind != STMT_END; inner = inner->next) {
                 print_stmt(context, inner, indent_level + 1);
             }
 
@@ -2963,9 +2978,9 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
         } break;
 
         case STMT_RETURN: {
-            if (stmt->return_stmt.value != null) {
+            if (stmt->return_.value != null) {
                 printf("return ");
-                print_expr(context, stmt->return_stmt.value);
+                print_expr(context, stmt->return_.value);
                 printf(";");
             } else {
                 printf("return;");
@@ -4869,24 +4884,24 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
 
                 while (true) {
                     if_stmt->kind = STMT_IF;
-                    if_stmt->conditional.then_scope.fn = scope->fn;
-                    if_stmt->conditional.then_scope.parent = scope;
-                    if_stmt->conditional.else_then_scope.fn = scope->fn;
-                    if_stmt->conditional.else_then_scope.parent = scope;
+                    if_stmt->if_.then_scope.fn = scope->fn;
+                    if_stmt->if_.then_scope.parent = scope;
+                    if_stmt->if_.else_then_scope.fn = scope->fn;
+                    if_stmt->if_.else_then_scope.parent = scope;
                     t += 1;
 
                     u32 condition_length = 0;
-                    if_stmt->conditional.condition = parse_expr(context, scope, t, &condition_length, true);
+                    if_stmt->if_.condition = parse_expr(context, scope, t, &condition_length, true);
                     t += condition_length;
-                    if (if_stmt->conditional.condition == null) {
+                    if (if_stmt->if_.condition == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
                     u32 block_length = 0;
-                    if_stmt->conditional.then = parse_basic_block(context, &if_stmt->conditional.then_scope, t, &block_length);
+                    if_stmt->if_.then = parse_basic_block(context, &if_stmt->if_.then_scope, t, &block_length);
                     t += block_length;
-                    if (if_stmt->conditional.then == null) {
+                    if (if_stmt->if_.then == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
@@ -4898,9 +4913,9 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                         switch (t->kind) {
                             case TOKEN_BRACKET_CURLY_OPEN: {
                                 u32 block_length = 0;
-                                if_stmt->conditional.else_then = parse_basic_block(context, &if_stmt->conditional.else_then_scope, t, &block_length);
+                                if_stmt->if_.else_then = parse_basic_block(context, &if_stmt->if_.else_then_scope, t, &block_length);
                                 t += block_length;
-                                if (if_stmt->conditional.else_then == null) {
+                                if (if_stmt->if_.else_then == null) {
                                     *length = t - t_first_stmt_start;
                                     return null;
                                 }
@@ -4912,7 +4927,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                                 Stmt* next_if_stmt = arena_new(&context->arena, Stmt);
                                 next_if_stmt->next = arena_new(&context->arena, Stmt); // Sentinel
 
-                                if_stmt->conditional.else_then = next_if_stmt;
+                                if_stmt->if_.else_then = next_if_stmt;
                                 if_stmt = next_if_stmt;
                             } break;
 
@@ -4931,37 +4946,57 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                 }
             } break;
 
+            case TOKEN_KEYWORD_SWITCH: {
+                stmt->kind = STMT_SWITCH;
+                t += 1;
+
+                u32 index_length = 0;
+                stmt->switch_.index = parse_expr(context, scope, t, &index_length, true);
+                t += index_length;
+                if (stmt->switch_.index == null) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+
+                if (!expect_single_token(context, t, '{', "after switch key")) {
+                    *length = t - t_start;
+                    return null;
+                }
+
+                unimplemented();
+            } break;
+
             case TOKEN_KEYWORD_FOR: {
-                stmt->kind = STMT_LOOP;
-                stmt->loop.scope.parent = scope;
-                stmt->loop.scope.fn = scope->fn;
+                stmt->kind = STMT_FOR;
+                stmt->for_.scope.parent = scope;
+                stmt->for_.scope.fn = scope->fn;
 
                 t += 1;
 
                 // for {}
                 if (t[0].kind == TOKEN_BRACKET_CURLY_OPEN) {
-                    stmt->loop.kind = LOOP_INFINITE;
+                    stmt->for_.kind = LOOP_INFINITE;
 
                     u32 body_length = 0;
-                    stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
+                    stmt->for_.body = parse_basic_block(context, &stmt->for_.scope, t, &body_length);
                     t += body_length;
-                    if (stmt->loop.body == null) {
+                    if (stmt->for_.body == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
                 // for item : <range> {}
                 } else if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-                    stmt->loop.kind = LOOP_RANGE;
+                    stmt->for_.kind = LOOP_RANGE;
 
                     u8 *index_var_name = t[0].identifier;
                     File_Pos index_var_pos = t[0].pos;
                     t += 2;
 
                     u32 start_length;
-                    stmt->loop.range.start = parse_expr(context, scope, t, &start_length, false);
+                    stmt->for_.range.start = parse_expr(context, scope, t, &start_length, false);
                     t += start_length;
-                    if (stmt->loop.range.start == null) {
+                    if (stmt->for_.range.start == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
@@ -4973,9 +5008,9 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                     t += 1;
 
                     u32 end_length;
-                    stmt->loop.range.end = parse_expr(context, scope, t, &end_length, true);
+                    stmt->for_.range.end = parse_expr(context, scope, t, &end_length, true);
                     t += end_length;
-                    if (stmt->loop.range.end == null) {
+                    if (stmt->for_.range.end == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
@@ -4987,38 +5022,38 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
                     var->local_index = scope->fn->body.var_count;
                     scope->fn->body.var_count += 1;
 
-                    Decl *index_decl = add_declaration(&context->arena, &stmt->loop.scope);
+                    Decl *index_decl = add_declaration(&context->arena, &stmt->for_.scope);
                     index_decl->kind = DECL_VAR;
                     index_decl->name = index_var_name;
                     index_decl->pos = index_var_pos;
                     index_decl->var = var;
 
-                    stmt->loop.range.var = var;
+                    stmt->for_.range.var = var;
 
                     u32 body_length = 0;
-                    stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
+                    stmt->for_.body = parse_basic_block(context, &stmt->for_.scope, t, &body_length);
                     t += body_length;
-                    if (stmt->loop.body == null) {
+                    if (stmt->for_.body == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
                 // for <condition> {}
                 } else {
-                    stmt->loop.kind = LOOP_CONDITIONAL;
+                    stmt->for_.kind = LOOP_CONDITIONAL;
 
                     u32 first_length = 0;
-                    stmt->loop.condition = parse_expr(context, scope, t, &first_length, true);
+                    stmt->for_.condition = parse_expr(context, scope, t, &first_length, true);
                     t += first_length;
-                    if (stmt->loop.condition == null) {
+                    if (stmt->for_.condition == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
 
                     u32 body_length = 0;
-                    stmt->loop.body = parse_basic_block(context, &stmt->loop.scope, t, &body_length);
+                    stmt->for_.body = parse_basic_block(context, &stmt->for_.scope, t, &body_length);
                     t += body_length;
-                    if (stmt->loop.body == null) {
+                    if (stmt->for_.body == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
@@ -5031,9 +5066,9 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
 
                 if (t->kind != TOKEN_SEMICOLON) {
                     u32 expr_length = 0;
-                    stmt->return_stmt.value = parse_expr(context, scope, t, &expr_length, false);
+                    stmt->return_.value = parse_expr(context, scope, t, &expr_length, false);
                     t += expr_length;
-                    if (stmt->return_stmt.value == null) {
+                    if (stmt->return_.value == null) {
                         *length = t - t_first_stmt_start;
                         return null;
                     }
@@ -6221,6 +6256,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             t += 1;
 
             // TODO Only scan the current scope for conflicting global variable names
+            // NB This also is a performance concern for large scopes!
             bool redeclaration = false;
             buf_foreach (Global_Var, old_global, context->global_vars) {
                 if (old_global->var->name == name) {
@@ -7515,48 +7551,48 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
         case STMT_IF: {
             Type* type_bool = &context->primitive_types[TYPE_BOOL];
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->conditional.condition, type_bool);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->if_.condition, type_bool);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-            Type_Kind condition_primitive = stmt->conditional.condition->type->kind;
+            Type_Kind condition_primitive = stmt->if_.condition->type->kind;
             if (condition_primitive != TYPE_BOOL) {
-                print_file_pos(&stmt->conditional.condition->pos);
+                print_file_pos(&stmt->if_.condition->pos);
                 printf("Expected bool but got ");
-                print_type(context, stmt->conditional.condition->type);
+                print_type(context, stmt->if_.condition->type);
                 printf(" in 'if'-statement\n");
                 return TYPECHECK_RESULT_BAD;
             }
 
-            for (Stmt* inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
-                Typecheck_Result r = typecheck_stmt(context, &stmt->conditional.then_scope, inner);
+            for (Stmt* inner = stmt->if_.then; inner->kind != STMT_END; inner = inner->next) {
+                Typecheck_Result r = typecheck_stmt(context, &stmt->if_.then_scope, inner);
                 if (r != TYPECHECK_RESULT_DONE) return r;
             }
 
-            if (stmt->conditional.else_then != null) {
-                for (Stmt* inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    Typecheck_Result r = typecheck_stmt(context, &stmt->conditional.else_then_scope, inner);
+            if (stmt->if_.else_then != null) {
+                for (Stmt* inner = stmt->if_.else_then; inner->kind != STMT_END; inner = inner->next) {
+                    Typecheck_Result r = typecheck_stmt(context, &stmt->if_.else_then_scope, inner);
                     if (r != TYPECHECK_RESULT_DONE) return r;
                 }
             }
         } break;
 
-        case STMT_LOOP: {
-            if (stmt->loop.kind == LOOP_CONDITIONAL) {
+        case STMT_FOR: {
+            if (stmt->for_.kind == LOOP_CONDITIONAL) {
                 Type *type_bool = &context->primitive_types[TYPE_BOOL];
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->loop.condition, type_bool);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->for_.condition, type_bool);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-                Type_Kind condition_primitive = stmt->loop.condition->type->kind;
+                Type_Kind condition_primitive = stmt->for_.condition->type->kind;
                 if (condition_primitive != TYPE_BOOL) {
-                    print_file_pos(&stmt->loop.condition->pos);
+                    print_file_pos(&stmt->for_.condition->pos);
                     printf("Expected bool but got ");
-                    print_type(context, stmt->loop.condition->type);
+                    print_type(context, stmt->for_.condition->type);
                     printf(" in 'for'-loop\n");
                     return TYPECHECK_RESULT_DONE;
                 }
-            } else if (stmt->loop.kind == LOOP_RANGE) {
-                Expr *start = stmt->loop.range.start;
-                Expr *end   = stmt->loop.range.end;
+            } else if (stmt->for_.kind == LOOP_RANGE) {
+                Expr *start = stmt->for_.range.start;
+                Expr *end   = stmt->for_.range.end;
 
                 Type *type_default_int = &context->primitive_types[TYPE_DEFAULT_INT];
                 Typecheck_Expr_Result start_result, end_result;
@@ -7575,7 +7611,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 }
 
                 if (start->type != end->type) {
-                    print_file_pos(&stmt->loop.range.start->pos);
+                    print_file_pos(&stmt->for_.range.start->pos);
                     printf("Ends of range have different type: ");
                     print_type(context, start->type);
                     printf(" vs ");
@@ -7586,22 +7622,22 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
                 Type *index_type = start->type;
                 if (!primitive_is_integer(primitive_of(index_type))) {
-                    print_file_pos(&stmt->loop.range.start->pos);
+                    print_file_pos(&stmt->for_.range.start->pos);
                     printf("Can't iterate over a range of ");
                     print_type(context, index_type);
                     printf("\n");
                     return TYPECHECK_RESULT_BAD;
                 }
 
-                stmt->loop.range.var->type = index_type;
-            } else if (stmt->loop.kind == LOOP_INFINITE) {
+                stmt->for_.range.var->type = index_type;
+            } else if (stmt->for_.kind == LOOP_INFINITE) {
                 // No special checking
             } else {
                 assert(false);
             }
 
-            for (Stmt* inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
-                Typecheck_Result r = typecheck_stmt(context, &stmt->loop.scope, inner);
+            for (Stmt* inner = stmt->for_.body; inner->kind != STMT_END; inner = inner->next) {
+                Typecheck_Result r = typecheck_stmt(context, &stmt->for_.scope, inner);
                 if (r != TYPECHECK_RESULT_DONE) return r;
             }
         } break;
@@ -7610,7 +7646,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             assert(scope->fn != null);
 
             if (!scope->fn->signature->has_return) {
-                if (stmt->return_stmt.value != null) {
+                if (stmt->return_.value != null) {
                     u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is not declared to return anything, but tried to return a value\n", name);
@@ -7620,7 +7656,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             } else {
                 Type *expected_type = scope->fn->signature->return_type;
 
-                if (stmt->return_stmt.value == null) {
+                if (stmt->return_.value == null) {
                     u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is declared to return a ", name);
@@ -7629,16 +7665,16 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     return TYPECHECK_RESULT_BAD;
                 }
 
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->return_stmt.value, expected_type);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->return_.value, expected_type);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-                if (!type_can_assign(expected_type, stmt->return_stmt.value->type)) {
+                if (!type_can_assign(expected_type, stmt->return_.value->type)) {
                     u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Expected ");
                     print_type(context, expected_type);
                     printf(" but got ");
-                    print_type(context, stmt->return_stmt.value->type);
+                    print_type(context, stmt->return_.value->type);
                     printf(" for return value in function '%s'\n", name);
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -8083,14 +8119,14 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
 
             case STMT_IF: {
                 bool else_return_would_be_trailing = return_would_be_trailing && is_last_stmt;
-                bool then_return_would_be_trailing = else_return_would_be_trailing && (stmt->conditional.else_then == null);
+                bool then_return_would_be_trailing = else_return_would_be_trailing && (stmt->if_.else_then == null);
 
-                Control_Flow_Result then_result = check_control_flow(stmt->conditional.then, parent_loop, then_return_would_be_trailing);
+                Control_Flow_Result then_result = check_control_flow(stmt->if_.then, parent_loop, then_return_would_be_trailing);
                 if (then_result == CONTROL_FLOW_INVALID) return then_result;
 
                 Control_Flow_Result else_result = CONTROL_FLOW_MIGHT_RETURN;
-                if (stmt->conditional.else_then != null) {
-                    else_result = check_control_flow(stmt->conditional.else_then, parent_loop, else_return_would_be_trailing);
+                if (stmt->if_.else_then != null) {
+                    else_result = check_control_flow(stmt->if_.else_then, parent_loop, else_return_would_be_trailing);
                     if (else_result == CONTROL_FLOW_INVALID) return else_result;
                 }
 
@@ -8099,14 +8135,14 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
                 }
             } break;
 
-            case STMT_LOOP: {
-                Control_Flow_Result result = check_control_flow(stmt->loop.body, stmt, false);
+            case STMT_FOR: {
+                Control_Flow_Result result = check_control_flow(stmt->for_.body, stmt, false);
                 if (result == CONTROL_FLOW_INVALID) return CONTROL_FLOW_INVALID;
             } break;
 
             case STMT_RETURN: {
                 has_returned = true;
-                stmt->return_stmt.trailing = return_would_be_trailing && is_last_stmt;
+                stmt->return_.trailing = return_would_be_trailing && is_last_stmt;
             } break;
 
             case STMT_BREAK:
@@ -8402,16 +8438,16 @@ void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stm
             typecheck_queue_include_stmts(context, queue, stmt->block.stmt);
             typecheck_queue_include_scope(context, queue, &stmt->block.scope);
         } else if (stmt->kind == STMT_IF) {
-            typecheck_queue_include_stmts(context, queue, stmt->conditional.then);
-            typecheck_queue_include_scope(context, queue, &stmt->conditional.then_scope);
+            typecheck_queue_include_stmts(context, queue, stmt->if_.then);
+            typecheck_queue_include_scope(context, queue, &stmt->if_.then_scope);
 
-            if (stmt->conditional.else_then != null) {
-                typecheck_queue_include_stmts(context, queue, stmt->conditional.else_then);
-                typecheck_queue_include_scope(context, queue, &stmt->conditional.else_then_scope);
+            if (stmt->if_.else_then != null) {
+                typecheck_queue_include_stmts(context, queue, stmt->if_.else_then);
+                typecheck_queue_include_scope(context, queue, &stmt->if_.else_then_scope);
             }
-        } else if (stmt->kind == STMT_LOOP) {
-            typecheck_queue_include_stmts(context, queue, stmt->loop.body);
-            typecheck_queue_include_scope(context, queue, &stmt->loop.scope);
+        } else if (stmt->kind == STMT_FOR) {
+            typecheck_queue_include_stmts(context, queue, stmt->for_.body);
+            typecheck_queue_include_scope(context, queue, &stmt->for_.scope);
         }
     }
 }
@@ -11851,14 +11887,14 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
         } break;
 
         case STMT_IF: {
-            Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->conditional.condition, reg_allocator);
+            Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->if_.condition, reg_allocator);
 
-            for (Stmt *inner = stmt->conditional.then; inner->kind != STMT_END; inner = inner->next) {
+            for (Stmt *inner = stmt->if_.then; inner->kind != STMT_END; inner = inner->next) {
                 machinecode_for_stmt(context, fn, inner, reg_allocator);
             }
 
             u64 second_jump_text_location_index, second_jump_from;
-            if (stmt->conditional.else_then != null) {
+            if (stmt->if_.else_then != null) {
                 second_jump_text_location_index = instruction_jmp(context, sizeof(i32));
                 second_jump_from = buf_length(context->seg_text);
             }
@@ -11881,8 +11917,8 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 }
             }
 
-            if (stmt->conditional.else_then != null) {
-                for (Stmt *inner = stmt->conditional.else_then; inner->kind != STMT_END; inner = inner->next) {
+            if (stmt->if_.else_then != null) {
+                for (Stmt *inner = stmt->if_.else_then; inner->kind != STMT_END; inner = inner->next) {
                     machinecode_for_stmt(context, fn, inner, reg_allocator);
                 }
 
@@ -11893,14 +11929,14 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             }
         } break;
 
-        case STMT_LOOP: {
+        case STMT_FOR: {
             u32 jump_fixup_ignore = buf_length(context->jump_fixups);
 
             u64 loop_start;
-            if (stmt->loop.kind == LOOP_CONDITIONAL) {
+            if (stmt->for_.kind == LOOP_CONDITIONAL) {
                 loop_start = buf_length(context->seg_text);
 
-                Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->loop.condition, reg_allocator);
+                Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->for_.condition, reg_allocator);
 
                 if (jump_info.first_from != 0) {
                     buf_push(context->jump_fixups, ((Jump_Fixup) { .text_location = jump_info.first_text_location, .jump_from = jump_info.first_from, .jump_to = JUMP_TO_END_OF_LOOP }));
@@ -11908,17 +11944,17 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 if (jump_info.second_from != 0) {
                     buf_push(context->jump_fixups, ((Jump_Fixup) { .text_location = jump_info.second_text_location, .jump_from = jump_info.second_from, .jump_to = JUMP_TO_END_OF_LOOP }));
                 }
-            } else if (stmt->loop.kind == LOOP_RANGE) {
-                Var *var = stmt->loop.range.var;
+            } else if (stmt->for_.kind == LOOP_RANGE) {
+                Var *var = stmt->for_.range.var;
                 X64_Address index_address = reg_allocator->var_mem_infos[var->local_index].address;
-                machinecode_for_expr(context, fn, stmt->loop.range.start, reg_allocator, x64_place_address(index_address));
+                machinecode_for_expr(context, fn, stmt->for_.range.start, reg_allocator, x64_place_address(index_address));
 
                 loop_start = buf_length(context->seg_text);
 
                 register_allocator_enter_frame(context, reg_allocator);
 
                 Register end_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, 0xffffffff);
-                machinecode_for_expr(context, fn, stmt->loop.range.end, reg_allocator, x64_place_reg(end_reg));
+                machinecode_for_expr(context, fn, stmt->for_.range.end, reg_allocator, x64_place_reg(end_reg));
 
                 instruction_cmp(context, x64_place_address(index_address), end_reg, type_size_of(var->type));
                 u64 jump_text_location = instruction_jcc(context, COND_GE, sizeof(i32));
@@ -11931,18 +11967,18 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                     .jump_to = JUMP_TO_END_OF_LOOP
                 }));
 
-            } else if (stmt->loop.kind == LOOP_INFINITE) {
+            } else if (stmt->for_.kind == LOOP_INFINITE) {
                 loop_start = buf_length(context->seg_text);
             } else {
                 assert(false);
             }
 
-            for (Stmt *inner = stmt->loop.body; inner->kind != STMT_END; inner = inner->next) {
+            for (Stmt *inner = stmt->for_.body; inner->kind != STMT_END; inner = inner->next) {
                 machinecode_for_stmt(context, fn, inner, reg_allocator);
             }
 
-            if (stmt->loop.kind == LOOP_RANGE) {
-                Var *var = stmt->loop.range.var;
+            if (stmt->for_.kind == LOOP_RANGE) {
+                Var *var = stmt->for_.range.var;
                 X64_Address index_address = reg_allocator->var_mem_infos[var->local_index].address;
                 instruction_inc_or_dec(context, true, x64_place_address(index_address), type_size_of(var->type));
             }
@@ -11980,7 +12016,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
         } break;
 
         case STMT_RETURN: {
-            if (stmt->return_stmt.value != null) {
+            if (stmt->return_.value != null) {
                 register_allocator_enter_frame(context, reg_allocator);
                 register_allocate_specific(context, reg_allocator, RAX);
 
@@ -11993,12 +12029,12 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 } else {
                     return_location = x64_place_reg(RAX);
                 }
-                machinecode_for_expr(context, fn, stmt->return_stmt.value, reg_allocator, return_location);
+                machinecode_for_expr(context, fn, stmt->return_.value, reg_allocator, return_location);
 
                 register_allocator_leave_frame(context, reg_allocator);
             }
 
-            if (!stmt->return_stmt.trailing) {
+            if (!stmt->return_.trailing) {
                 Jump_Fixup fixup = {0};
                 fixup.text_location = instruction_jmp(context, sizeof(i32));
                 fixup.jump_from = buf_length(context->seg_text);

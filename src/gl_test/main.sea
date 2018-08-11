@@ -161,7 +161,9 @@ fn swap_buffers() {
     SwapBuffers(device_context);
 }
 
+// This is 'WNDPROC'
 fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
+
     // TODO
     return DefWindowProcA(window, message, w, l);
 }
