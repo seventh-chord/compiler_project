@@ -13,7 +13,6 @@ Language features
     namespaces, for includes, extern-blocks, etc
     includes - either textual or preferably with some nice system!
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
-    real constants
     complete type_info_of_{value, type}
     slices
     a 'any' type (pointer + type info)
@@ -21,12 +20,11 @@ Language features
     unions
     shifting operators (<< >>)
     assignment operators (*= /= &= |= ^= <<= >>=), not sure if I want all of them...
-    variable shadowing
     taking the address of temporaries (c doesn't support this though, and it messes with potential optimization)
     a defer statement
     maybe a better parser for floats? The current one is pretty accurate for f32 at least though
-    structure definitions inside functions
     casts from/to bool
+    flags enums
 
 Compiler internals
     stack unwinding - so we can produce a stack trace on e.g. assert

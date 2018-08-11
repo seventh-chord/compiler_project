@@ -1198,7 +1198,7 @@ typedef struct File_Pos {
     u32 character;
 } File_Pos;
 
-enum { KEYWORD_COUNT = 18 };
+enum { KEYWORD_COUNT = 19 };
 
 typedef struct Token {
     enum {
@@ -1261,6 +1261,7 @@ typedef struct Token {
         TOKEN_KEYWORD_EXTERN,
         TOKEN_KEYWORD_TYPEDEF,
         TOKEN_KEYWORD_LET,
+        TOKEN_KEYWORD_CONST,
         TOKEN_KEYWORD_IF,
         TOKEN_KEYWORD_SWITCH,
         TOKEN_KEYWORD_ELSE,
@@ -1347,6 +1348,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_KEYWORD_EXTERN]       = "extern",
     [TOKEN_KEYWORD_TYPEDEF]      = "typedef",
     [TOKEN_KEYWORD_LET]          = "let",
+    [TOKEN_KEYWORD_CONST]        = "const",
     [TOKEN_KEYWORD_IF]           = "if",
     [TOKEN_KEYWORD_SWITCH]       = "switch",
     [TOKEN_KEYWORD_ELSE]         = "else",
@@ -1555,14 +1557,18 @@ struct Type_List {
     Type_List *next;
 };
 
+
+enum {
+    VAR_FLAG_REFERENCE = 0x01,
+    VAR_FLAG_CONSTANT  = 0x02,
+    VAR_FLAG_GLOBAL    = 0x04,
+};
+
 struct Var {
     u8 *name;
     Type *type; // We set this to 'null' to indicate that we want to infer the type
     File_Pos declaration_pos;
-
-    bool is_reference; // Only used for structs as function parameters!
-
-    bool is_global;
+    u8 flags;
     union { u32 global_index; u32 local_index; };
 };
 
@@ -1575,6 +1581,7 @@ typedef struct Global_Var {
     bool checked;
     bool valid;
     bool compute_at_runtime;
+    bool in_rdata;
 } Global_Var;
 
 typedef enum Unary_Op {
@@ -1690,8 +1697,9 @@ typedef struct Compound_Member {
     };
 } Compound_Member;
 
-#define EXPR_FLAG_UNRESOLVED 0x01
-#define EXPR_FLAG_ASSIGNABLE 0x02
+#define EXPR_FLAG_UNRESOLVED  0x01
+#define EXPR_FLAG_ASSIGNABLE  0x02
+#define EXPR_FLAG_ADDRESSABLE 0x04
 
 typedef enum Expr_Kind {
     EXPR_VARIABLE,
@@ -2012,6 +2020,7 @@ typedef struct Rip_Fixup {
     enum {
         RIP_FIXUP_IMPORT_CALL,
         RIP_FIXUP_DATA,
+        RIP_FIXUP_RDATA,
     } kind;
 
     union {
@@ -2076,6 +2085,7 @@ typedef struct Context {
     // Low level representation
     u8 *seg_text;
     u8 *seg_data;
+    u8 *seg_rdata;
 
     Library_Import *imports;
     Rip_Fixup *fixups;
@@ -2246,6 +2256,7 @@ void init_keyword_names(Context *context) {
     add_keyword(TOKEN_KEYWORD_EXTERN,      "extern");
     add_keyword(TOKEN_KEYWORD_TYPEDEF,     "typedef");
     add_keyword(TOKEN_KEYWORD_LET,         "let");
+    add_keyword(TOKEN_KEYWORD_CONST,       "const");
     add_keyword(TOKEN_KEYWORD_IF,          "if");
     add_keyword(TOKEN_KEYWORD_SWITCH,      "switch");
     add_keyword(TOKEN_KEYWORD_ELSE,        "else");
@@ -2580,18 +2591,20 @@ Import_Index add_import(Context *context, u8 *source_path, u8 *library_name, u8 
     return index;
 }
 
-u64 add_exe_data(Context *context, u8* data, u64 length, u64 alignment) {
-    u64 data_offset = buf_length(context->seg_data);
+u64 add_exe_data(Context *context, bool read_only, u8 *data, u64 length, u64 alignment) {
+    u8 **seg = read_only? &context->seg_rdata : &context->seg_data;
+
+    u64 data_offset = buf_length(*seg);
 
     u64 aligned_data_offset = round_to_next(data_offset, alignment);
     if (aligned_data_offset > data_offset) {
-        str_push_zeroes(&context->seg_data, aligned_data_offset - data_offset);
+        str_push_zeroes(seg, aligned_data_offset - data_offset);
     }
 
     if (data == null) {
-        str_push_zeroes(&context->seg_data, length);
+        str_push_zeroes(seg, length);
     } else {
-        str_push_str(&context->seg_data, data, length);
+        str_push_str(seg, data, length);
     }
 
     return aligned_data_offset;
@@ -3356,7 +3369,6 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
                 var->name = p->name;
                 var->type = p->type;
                 var->declaration_pos = p->pos;
-                var->is_global = false;
                 var->local_index = fn->body.var_count;
                 fn->body.var_count += 1;
 
@@ -4298,6 +4310,7 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                 case ')': case ']': case '}':
                 case TOKEN_ASSIGN:
                 case TOKEN_KEYWORD_LET:
+                case TOKEN_KEYWORD_CONST:
                 case TOKEN_KEYWORD_FN:
                 case TOKEN_ADD_ASSIGN:
                 case TOKEN_SUB_ASSIGN:
@@ -5213,6 +5226,14 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length) {
 
             case TOKEN_KEYWORD_UNION: {
                 unimplemented(); // TODO
+            } break;
+
+            case TOKEN_KEYWORD_FN: {
+                unimplemented(); // TODO functions declared inside another functions scope
+            } break;
+
+            case TOKEN_KEYWORD_CONST: {
+                unimplemented(); // TODO constants declared inside a functions scope
             } break;
 
             default: {
@@ -6201,7 +6222,11 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             t += length;
         } break;
 
-        case TOKEN_KEYWORD_LET: {
+        case TOKEN_KEYWORD_CONST:
+        case TOKEN_KEYWORD_LET:
+        {
+            bool constant = t->kind == TOKEN_KEYWORD_CONST;
+
             File_Pos start_pos = t->pos;
             t += 1;
 
@@ -6255,43 +6280,35 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             }
             t += 1;
 
-            // TODO Only scan the current scope for conflicting global variable names
-            // NB This also is a performance concern for large scopes!
-            bool redeclaration = false;
-            buf_foreach (Global_Var, old_global, context->global_vars) {
-                if (old_global->var->name == name) {
-                    u32 initial_decl_line = old_global->var->declaration_pos.line;
-                    print_file_pos(&start_pos);
-                    printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name, (u64) initial_decl_line);
-                    redeclaration = true;
-                    break;
-                }
-            }
-
-            if (redeclaration) {
+            Var *old_var = find_var(&context->global_scope, name, null);
+            if (old_var != null) {
+                u32 initial_decl_line = old_var->declaration_pos.line;
+                print_file_pos(&start_pos);
+                printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name, (u64) initial_decl_line);
                 valid = false;
                 break;
-            } else {
-                Var *var = arena_new(&context->arena, Var);
-
-                u32 global_index = buf_length(context->global_vars);
-                buf_push(context->global_vars, ((Global_Var) {
-                    .var = var,
-                    .initial_expr = expr,
-                }));
-
-                var->name = name;
-                var->declaration_pos = start_pos;
-                var->type = type;
-                var->is_global = true;
-                var->global_index = global_index;
-
-                Decl *decl = add_declaration(&context->arena, &context->global_scope);
-                decl->kind = DECL_VAR;
-                decl->name = name;
-                decl->pos = start_pos;
-                decl->var = var;
             }
+
+            Var *var = arena_new(&context->arena, Var);
+
+            u32 global_index = buf_length(context->global_vars);
+            buf_push(context->global_vars, ((Global_Var) {
+                .var = var,
+                .initial_expr = expr,
+            }));
+
+            var->name = name;
+            var->declaration_pos = start_pos;
+            var->type = type;
+            var->flags = VAR_FLAG_GLOBAL;
+            if (constant) var->flags |= VAR_FLAG_CONSTANT;
+            var->global_index = global_index;
+
+            Decl *decl = add_declaration(&context->arena, &context->global_scope);
+            decl->kind = DECL_VAR;
+            decl->name = name;
+            decl->pos = start_pos;
+            decl->var = var;
         } break;
 
         case TOKEN_KEYWORD_ENUM: {
@@ -6613,7 +6630,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     return TYPECHECK_EXPR_BAD;
                 }
 
-                if (var->is_global) {
+                if (var->flags & VAR_FLAG_GLOBAL) {
                     Global_Var *global = &context->global_vars[var->global_index];
                     if (!global->checked) {
                         return TYPECHECK_EXPR_DEPENDENT;
@@ -6622,7 +6639,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
                 expr->variable.var = var;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
+
+                if (!(var->flags & VAR_FLAG_CONSTANT)) expr->flags |= EXPR_FLAG_ASSIGNABLE;
+                expr->flags |= EXPR_FLAG_ADDRESSABLE;
             }
 
             expr->type = expr->variable.var->type;
@@ -7097,6 +7116,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 case UNARY_DEREFERENCE: {
                     expr->type = expr->unary.inner->type->pointer_to;
                     expr->flags |= EXPR_FLAG_ASSIGNABLE;
+                    expr->flags |= EXPR_FLAG_ADDRESSABLE;
 
                     Type_Kind child_primitive = expr->unary.inner->type->kind;
                     if (child_primitive != TYPE_POINTER) {
@@ -7119,7 +7139,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
                 case UNARY_ADDRESS_OF: {
                     expr->type = get_pointer_type(context, expr->unary.inner->type);
-                    if (!(expr->unary.inner->flags & EXPR_FLAG_ASSIGNABLE)) {
+                    if (!(expr->unary.inner->flags & EXPR_FLAG_ADDRESSABLE)) {
                         print_file_pos(&expr->pos);
                         printf("Can't take address of ");
                         print_expr(context, expr->unary.inner);
@@ -7152,7 +7172,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         *expr->call.pointer_expr = (Expr) {
                             .kind = EXPR_VARIABLE,
                             .pos = expr->pos,
-                            .flags = EXPR_FLAG_ASSIGNABLE,
+                            .flags = EXPR_FLAG_ADDRESSABLE | EXPR_FLAG_ASSIGNABLE,
                             .variable.var = var,
                         };
                     }
@@ -7278,9 +7298,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             r = typecheck_expr(context, scope, expr->subscript.index, &context->primitive_types[TYPE_DEFAULT_INT]);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-            if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE) {
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
-            }
+            if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE)  expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            if (expr->subscript.array->flags & EXPR_FLAG_ADDRESSABLE) expr->flags |= EXPR_FLAG_ADDRESSABLE;
 
             Type* array_type = expr->subscript.array->type;
             if (array_type->kind == TYPE_ARRAY) {
@@ -7320,9 +7339,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
             }
 
-            if (parent->flags & EXPR_FLAG_ASSIGNABLE) {
-                expr->flags |= EXPR_FLAG_ASSIGNABLE;
-            }
+            if (parent->flags & EXPR_FLAG_ASSIGNABLE)  expr->flags |= EXPR_FLAG_ASSIGNABLE;
+            if (parent->flags & EXPR_FLAG_ADDRESSABLE) expr->flags |= EXPR_FLAG_ADDRESSABLE;
 
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
                 u8 *access_name = expr->member_access.member_name;
@@ -7489,8 +7507,14 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
             if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
                 print_file_pos(&stmt->pos);
-                printf("Can't assign to left hand side: ");
-                print_expr(context, stmt->assignment.left);
+                printf("Can't assign to left hand side");
+                if (stmt->assignment.left->kind == EXPR_VARIABLE && (stmt->assignment.left->variable.var->flags & VAR_FLAG_CONSTANT)) {
+                    u8 *const_name = stmt->assignment.left->variable.var->name;
+                    printf(", %s is const", const_name);
+                } else {
+                    printf(" of type ");
+                    print_type(context, stmt->assignment.left->type);
+                }
                 printf("\n");
                 return TYPECHECK_RESULT_BAD;
             }
@@ -7708,7 +7732,7 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
             Var *var = expr->variable.var;
 
-            if (!var->is_global) {
+            if (!(var->flags & VAR_FLAG_GLOBAL)) {
                 print_file_pos(&expr->pos);
                 printf("Can't use local variables in constant expressions\n");
                 return EVAL_BAD;
@@ -7721,7 +7745,7 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             } else if (global->valid) {
                 u64 other_size = type_size_of(global->var->type);
                 assert(other_size == type_size);
-                u8* other_value = &context->seg_data[global->data_offset];
+                u8* other_value = &(global->in_rdata? context->seg_rdata : context->seg_data)[global->data_offset];
                 mem_copy(other_value, result_into, type_size);
                 return EVAL_OK;
             } else if (!global->checked) {
@@ -8238,8 +8262,9 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
     u64 type_size = type_size_of(global->var->type);
     u64 type_align = type_align_of(global->var->type);
 
-    global->data_offset = add_exe_data(context, null, type_size, type_align);
-    u8* result_into = &context->seg_data[global->data_offset];
+    global->in_rdata = global->var->flags & VAR_FLAG_CONSTANT;
+    global->data_offset = add_exe_data(context, global->in_rdata, null, type_size, type_align);
+    u8* result_into = &(global->in_rdata? context->seg_rdata : context->seg_data)[global->data_offset];
 
     //printf("%s at .data + %u\n", string_table_access(context->string_table, global->var.name), (u64) global->data_offset);
 
@@ -8256,9 +8281,20 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
             } break;
 
             case EVAL_DO_AT_RUNTIME: {
-                global->checked = true;
-                global->valid = true;
-                global->compute_at_runtime = true;
+                if (global->var->flags & VAR_FLAG_CONSTANT) {
+                    global->checked = true;
+                    global->valid = false;
+                    global->compute_at_runtime = false;
+
+                    u8 *var_name = global->var->name;
+                    print_file_pos(&global->var->declaration_pos);
+                    printf("Can't compute right hand side of 'const %s' at compile time!\n", var_name);
+                    return TYPECHECK_RESULT_BAD;
+                } else {
+                    global->checked = true;
+                    global->valid = true;
+                    global->compute_at_runtime = true;
+                }
             } break;
 
             case EVAL_BAD: {
@@ -8416,7 +8452,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
             case DECL_VAR: {
                 Var *var = decl->var;
 
-                if (var->is_global) {
+                if (var->flags & VAR_FLAG_GLOBAL) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_GLOBAL_VAR,
                         .scope = scope,
@@ -8566,7 +8602,7 @@ bool typecheck(Context *context) {
 
         for (u32 p = 0; p < fn->signature->param_count; p += 1) {
             if (fn->signature->params[p].reference_semantics && fn->kind == FN_KIND_NORMAL) {
-                fn->body.param_var_mappings[p]->is_reference = true;
+                fn->body.param_var_mappings[p]->flags |= VAR_FLAG_REFERENCE;
             }
         }
     }
@@ -8587,21 +8623,21 @@ void build_enum_member_name_table(Context *context, Type* type) {
     }
 
     u64 table_size = max_value + 1;
-    u64 table_offset = add_exe_data(context, null, table_size * sizeof(u16), sizeof(u16));
+    u64 table_offset = add_exe_data(context, true, null, table_size * sizeof(u16), sizeof(u16));
     type->enumeration.name_table_data_offset = table_offset;
 
-    mem_fill(context->seg_data + table_offset, 0xff, table_size * sizeof(u16));
+    mem_fill(context->seg_rdata + table_offset, 0xff, table_size * sizeof(u16));
 
     u8 *type_name = type->enumeration.name;
     u32 type_name_length = str_length(type_name);
 
-    u64 invalid_string_offset = buf_length(context->seg_data);
+    u64 invalid_string_offset = buf_length(context->seg_rdata);
     u64 invalid_string_length = type_name_length + 10;
-    buf_push(context->seg_data, invalid_string_length & 0xff);
-    buf_push(context->seg_data, (invalid_string_length >> 8) & 0xff);
-    str_push_str(&context->seg_data, "<unknown ", 9);
-    str_push_str(&context->seg_data, type_name, type_name_length);
-    str_push_str(&context->seg_data, ">\0", 2);
+    buf_push(context->seg_rdata, invalid_string_length & 0xff);
+    buf_push(context->seg_rdata, (invalid_string_length >> 8) & 0xff);
+    str_push_str(&context->seg_rdata, "<unknown ", 9);
+    str_push_str(&context->seg_rdata, type_name, type_name_length);
+    str_push_str(&context->seg_rdata, ">\0", 2);
 
     for (u32 m = 0; m < type->enumeration.member_count; m += 1) {
         u64 value = type->enumeration.members[m].value;
@@ -8609,19 +8645,19 @@ void build_enum_member_name_table(Context *context, Type* type) {
         u32 name_length = str_length(name);
 
         assert(name_length <= U16_MAX);
-        u64 string_offset = buf_length(context->seg_data);
-        buf_push(context->seg_data, name_length & 0xff);
-        buf_push(context->seg_data, (name_length >> 8) & 0xff);
-        str_push_str(&context->seg_data, name, name_length + 1);
+        u64 string_offset = buf_length(context->seg_rdata);
+        buf_push(context->seg_rdata, name_length & 0xff);
+        buf_push(context->seg_rdata, (name_length >> 8) & 0xff);
+        str_push_str(&context->seg_rdata, name, name_length + 1);
 
         u16 relative_offset = string_offset - table_offset - value*sizeof(u16);
         assert(relative_offset < U16_MAX);
 
-        u16* table_value = ((u16*) (context->seg_data + table_offset)) + value;
+        u16* table_value = ((u16*) (context->seg_rdata + table_offset)) + value;
         *table_value = relative_offset;
     }
 
-    u16* table = (u16*) (context->seg_data + table_offset);
+    u16* table = (u16*) (context->seg_rdata + table_offset);
     for (u32 i = 0; i < table_size; i += 1) {
         if (table[i] == 0xffff) {
             u16 a = invalid_string_offset - table_offset;
@@ -8648,6 +8684,7 @@ typedef enum Register {
     RSP_OFFSET_INPUTS,  // RSP, but we add some value (calculated later) to the immediate offset
     RSP_OFFSET_LOCALS,
     RIP_OFFSET_DATA,    // relative to .data
+    RIP_OFFSET_RDATA,   // relative to .rdata
 
     // General purpose registers, up to 64 bits
     RAX, RCX, RDX, RBX,
@@ -8702,6 +8739,7 @@ u8 REGISTER_INDICES[REGISTER_COUNT] = {
     [RSP_OFFSET_INPUTS] = 4,
     [RSP_OFFSET_LOCALS] = 4,
     [RIP_OFFSET_DATA]   = 5,
+    [RIP_OFFSET_RDATA]  = 5,
 };
 
 u8 *REGISTER_NAMES[REGISTER_COUNT][4] = {
@@ -8850,6 +8888,7 @@ void print_x64_address(X64_Address address) {
         case RSP_OFFSET_LOCALS:  printf(" + local offset");  break;
         case RSP_OFFSET_INPUTS:  printf(" + input offset");  break;
         case RIP_OFFSET_DATA:    printf(" + .data offset");  break;
+        case RIP_OFFSET_RDATA:   printf(" + .rdata offset"); break;
     }
 
     printf("]");
@@ -8915,8 +8954,8 @@ void encode_instruction_modrm_reg_mem(
         force_i32_offset = true;
     }
 
-    if (mem.base == RIP_OFFSET_DATA) {
-        data_fixup.kind = RIP_FIXUP_DATA;
+    if (mem.base == RIP_OFFSET_DATA || mem.base == RIP_OFFSET_RDATA) {
+        data_fixup.kind = mem.base == RIP_OFFSET_DATA? RIP_FIXUP_DATA : RIP_FIXUP_RDATA;
         data_fixup.data_offset = mem.immediate_offset;
 
         assert(mem.index == REGISTER_NONE);
@@ -8925,7 +8964,7 @@ void encode_instruction_modrm_reg_mem(
         rip_relative = true;
     }
 
-    assert(is_gpr(mem.base) || mem.base == RSP_OFFSET_INPUTS || mem.base == RSP_OFFSET_LOCALS || mem.base == RIP_OFFSET_DATA);
+    assert(is_gpr(mem.base) || mem.base == RSP_OFFSET_INPUTS || mem.base == RSP_OFFSET_LOCALS || mem.base == RIP_OFFSET_DATA || mem.base == RIP_OFFSET_RDATA);
     assert(mem.base != REGISTER_NONE);
     assert(is_gpr(mem.index) || mem.index == REGISTER_NONE);
 
@@ -10567,8 +10606,8 @@ X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *r
     return address;
 }
 
-X64_Place machinecode_for_assignable_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator, u32 reserves) {
-    assert(expr->flags & EXPR_FLAG_ASSIGNABLE);
+X64_Place machinecode_for_addressable_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator, u32 reserves) {
+    assert(expr->flags & EXPR_FLAG_ADDRESSABLE);
 
     switch (expr->kind) {
         case EXPR_VARIABLE: {
@@ -10576,16 +10615,17 @@ X64_Place machinecode_for_assignable_expr(Context *context, Fn *fn, Expr *expr, 
             Var *var = expr->variable.var;
 
             X64_Address address;
-            if (var->is_global) {
+            if (var->flags & VAR_FLAG_GLOBAL) {
                 Global_Var *global = &context->global_vars[var->global_index];
                 assert(global->valid);
-                address = (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = global->data_offset };
+                Register base = global->in_rdata? RIP_OFFSET_RDATA : RIP_OFFSET_DATA;
+                address = (X64_Address) { .base = base, .immediate_offset = global->data_offset };
             } else {
                 address = reg_allocator->var_mem_infos[var->local_index].address;
             }
 
 
-            if (var->is_reference) {
+            if (var->flags & VAR_FLAG_REFERENCE) {
                 Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
                 instruction_mov_reg_mem(context, MOVE_FROM_MEM, address, reg, POINTER_SIZE);
                 return x64_place_address((X64_Address) { .base = reg });
@@ -10605,7 +10645,7 @@ X64_Place machinecode_for_assignable_expr(Context *context, Fn *fn, Expr *expr, 
         } break;
 
         case EXPR_SUBSCRIPT: {
-            X64_Place place = machinecode_for_assignable_expr(context, fn, expr->subscript.array, reg_allocator, reserves);
+            X64_Place place = machinecode_for_addressable_expr(context, fn, expr->subscript.array, reg_allocator, reserves);
             assert(place.kind == PLACE_ADDRESS);
             X64_Address address = place.address;
 
@@ -10640,7 +10680,7 @@ X64_Place machinecode_for_assignable_expr(Context *context, Fn *fn, Expr *expr, 
         } break;
 
         case EXPR_MEMBER_ACCESS: {
-            X64_Place place = machinecode_for_assignable_expr(context, fn, expr->member_access.parent, reg_allocator, reserves);
+            X64_Place place = machinecode_for_addressable_expr(context, fn, expr->member_access.parent, reg_allocator, reserves);
             assert(place.kind == PLACE_ADDRESS);
 
             Type *parent_type = expr->member_access.parent->type;
@@ -10675,7 +10715,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             if (place.kind == PLACE_NOWHERE) return;
 
             u64 size = type_size_of(expr->type);
-            X64_Place from = machinecode_for_assignable_expr(context, fn, expr, reg_allocator, 0);
+            X64_Place from = machinecode_for_addressable_expr(context, fn, expr, reg_allocator, 0);
             machinecode_move(context, reg_allocator, from, place, size);
         } break;
 
@@ -10693,10 +10733,10 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             X64_Address place_address = place.address;
 
             u64 length = expr->string.length;
-            u64 data_offset = add_exe_data(context, expr->string.bytes, length + 1, 1);
+            u64 data_offset = add_exe_data(context, true, expr->string.bytes, length + 1, 1);
 
             assert(data_offset < I32_MAX);
-            X64_Address data_address = { .base = RIP_OFFSET_DATA, .immediate_offset = data_offset };
+            X64_Address data_address = { .base = RIP_OFFSET_RDATA, .immediate_offset = data_offset };
 
             machinecode_lea(context, reg_allocator, data_address, x64_place_address(place_address));
             place_address.immediate_offset += POINTER_SIZE;
@@ -10825,8 +10865,8 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
                 register_allocator_enter_frame(context, reg_allocator);
                 X64_Place right_place;
-                if (expr->binary.right->flags & EXPR_FLAG_ASSIGNABLE) {
-                    right_place = machinecode_for_assignable_expr(context, fn, expr->binary.right, reg_allocator, 0);
+                if (expr->binary.right->flags & EXPR_FLAG_ADDRESSABLE) {
+                    right_place = machinecode_for_addressable_expr(context, fn, expr->binary.right, reg_allocator, 0);
                 } else {
                     Register right_reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
                     right_place = x64_place_reg(right_reg);
@@ -11138,25 +11178,25 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                         u64 offset;
                         if (single) {
                             if (reg_allocator->negate_f32_data_offset == U64_MAX) {
-                                reg_allocator->negate_f32_data_offset = add_exe_data(context, null, 0, 16);
+                                reg_allocator->negate_f32_data_offset = add_exe_data(context, true, null, 0, 16);
                                 u32 negative_zero = 0x80000000;
-                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
-                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
-                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
-                                str_push_integer(&context->seg_data, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_rdata, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_rdata, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_rdata, sizeof(f32), negative_zero);
+                                str_push_integer(&context->seg_rdata, sizeof(f32), negative_zero);
                             }
                             offset = reg_allocator->negate_f32_data_offset;
                         } else {
                             if (reg_allocator->negate_f64_data_offset == U64_MAX) {
-                                reg_allocator->negate_f64_data_offset = add_exe_data(context, null, 0, 16);
+                                reg_allocator->negate_f64_data_offset = add_exe_data(context, true, null, 0, 16);
                                 u64 negative_zero = 0x8000000000000000;
-                                str_push_integer(&context->seg_data, sizeof(f64), negative_zero);
-                                str_push_integer(&context->seg_data, sizeof(f64), negative_zero);
+                                str_push_integer(&context->seg_rdata, sizeof(f64), negative_zero);
+                                str_push_integer(&context->seg_rdata, sizeof(f64), negative_zero);
                             }
                             offset = reg_allocator->negate_f64_data_offset;
                         }
 
-                        X64_Address negate_address = { .base = RIP_OFFSET_DATA, .immediate_offset = offset };
+                        X64_Address negate_address = { .base = RIP_OFFSET_RDATA, .immediate_offset = offset };
                         instruction_float(context, FLOAT_XOR_PACKED, reg, x64_place_address(negate_address), single);
 
                         if (place.kind == PLACE_ADDRESS) {
@@ -11193,7 +11233,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 } break;
 
                 case UNARY_ADDRESS_OF: {
-                    X64_Place inner_place = machinecode_for_assignable_expr(context, fn, expr->unary.inner, reg_allocator, 0);
+                    X64_Place inner_place = machinecode_for_addressable_expr(context, fn, expr->unary.inner, reg_allocator, 0);
                     assert(inner_place.kind == PLACE_ADDRESS);
 
                     switch (place.kind) {
@@ -11436,8 +11476,8 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             register_allocator_enter_frame(context, reg_allocator);
 
             X64_Place source;
-            if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                source = machinecode_for_assignable_expr(context, fn, expr, reg_allocator, 0);
+            if (expr->flags & EXPR_FLAG_ADDRESSABLE) {
+                source = machinecode_for_addressable_expr(context, fn, expr, reg_allocator, 0);
             } else {
                 Type *array_type = expr->subscript.array->type;
                 X64_Address array_base;
@@ -11500,8 +11540,8 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
             u64 member_size = type_size_of(expr->type);
 
-            if (expr->flags & EXPR_FLAG_ASSIGNABLE) {
-                X64_Place source = machinecode_for_assignable_expr(context, fn, expr, reg_allocator, 0);
+            if (expr->flags & EXPR_FLAG_ADDRESSABLE) {
+                X64_Place source = machinecode_for_addressable_expr(context, fn, expr, reg_allocator, 0);
                 machinecode_move(context, reg_allocator, source, place, member_size);
             } else {
                 Expr *parent = expr->member_access.parent;
@@ -11644,7 +11684,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 instruction_cmp_imm(context, x64_place_reg(member_reg), enum_type->enumeration.name_table_entries, op_size);
                 u64 jge_location = instruction_jcc(context, COND_GE, 1);
                 u64 jge_from = buf_length(context->seg_text);
-                instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = enum_type->enumeration.name_table_data_offset }, pointer_reg);
+                instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_RDATA, .immediate_offset = enum_type->enumeration.name_table_data_offset }, pointer_reg);
                 if (op_size == 1 || op_size == 2) {
                     instruction_movzx(context, x64_place_reg(member_reg), member_reg, op_size, POINTER_SIZE);
                 }
@@ -11655,7 +11695,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 u64 jmp_location = instruction_jmp(context, sizeof(i8));
                 u64 jge_to = buf_length(context->seg_text);
                 u64 jmp_from = jge_to;
-                instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_DATA, .immediate_offset = enum_type->enumeration.name_table_invalid_offset }, pointer_reg);
+                instruction_lea(context, (X64_Address) { .base = RIP_OFFSET_RDATA, .immediate_offset = enum_type->enumeration.name_table_invalid_offset }, pointer_reg);
                 u64 jmp_to = buf_length(context->seg_text);
                 instruction_movzx(context, x64_place_address((X64_Address) { .base = pointer_reg }), member_reg, 2, POINTER_SIZE);
                 instruction_integer_imm(context, INTEGER_ADD, x64_place_reg(pointer_reg), 2, POINTER_SIZE);
@@ -11832,7 +11872,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
     switch (stmt->kind) {
         case STMT_LET: {
             Var *var = stmt->let.var;
-            assert(!var->is_global);
+            assert(!(var->flags & VAR_FLAG_GLOBAL));
 
             u64 size = type_size_of(var->type);
             u64 align = type_align_of(var->type);
@@ -11871,11 +11911,11 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
                 machinecode_for_expr(context, fn, right, reg_allocator, tmp_place);
 
-                X64_Place left_place = machinecode_for_assignable_expr(context, fn, left, reg_allocator, 0);
+                X64_Place left_place = machinecode_for_addressable_expr(context, fn, left, reg_allocator, 0);
                 machinecode_move(context, reg_allocator, tmp_place, left_place, size);
             } else {
                 u32 reserves_for_rhs = machinecode_expr_reserves(right);
-                X64_Place left_place = machinecode_for_assignable_expr(context, fn, left, reg_allocator, reserves_for_rhs);
+                X64_Place left_place = machinecode_for_addressable_expr(context, fn, left, reg_allocator, reserves_for_rhs);
                 machinecode_for_expr(context, fn, right, reg_allocator, left_place);
             }
         } break;
@@ -12151,9 +12191,11 @@ void build_machinecode(Context *context) {
         for (u32 i = 0; i < buf_length(context->global_vars); i += 1) {
             Global_Var *global = &context->global_vars[i];
             if (global->compute_at_runtime) {
+                assert(!(global->var->flags & VAR_FLAG_CONSTANT));
+
                 Expr *left = arena_new(&context->arena, Expr);
                 left->kind = EXPR_VARIABLE;
-                left->flags = EXPR_FLAG_ASSIGNABLE;
+                left->flags = EXPR_FLAG_ASSIGNABLE | EXPR_FLAG_ADDRESSABLE;
                 left->type = global->var->type;
                 left->variable.var = global->var;
 
@@ -12939,7 +12981,7 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     u64 data_memory_start  = text_memory_start + round_to_next(text_length, in_memory_alignment);
     u64 rdata_memory_start = data_memory_start + round_to_next(data_length, in_memory_alignment);
 
-    u8* rdata = null; // We need to generate .rdata
+    u8 *rdata = context->seg_rdata; // We need to append imports and debug info into .rdata
 
     // Write debug info into .rdata
     u32 debug_size = 0;
@@ -13061,15 +13103,25 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     u64 file_image_size   = rdata_file_start   + round_to_next(rdata_length, in_file_alignment);
     u64 memory_image_size = rdata_memory_start + round_to_next(rdata_length, in_memory_alignment);
 
-    // Apply data fixups
+    // Apply .data and .rdata fixups
     buf_foreach (Rip_Fixup, fixup, context->fixups) {
-        if (fixup->kind != RIP_FIXUP_DATA) continue;
-        assert(fixup->data_offset < data_length);
+        u32 seg_length, seg_memory_start;
+        if (fixup->kind == RIP_FIXUP_DATA) {
+            seg_length = data_length;
+            seg_memory_start = data_memory_start;
+        } else if (fixup->kind == RIP_FIXUP_RDATA) {
+            seg_length = rdata_length;
+            seg_memory_start = rdata_memory_start;
+        } else {
+            continue;
+        }
+
+        assert(fixup->data_offset < seg_length);
         assert(fixup->rip_offset + 4 <= fixup->next_instruction);
 
         i32 *text_value = (u32*) (context->seg_text + fixup->rip_offset);
         assert(*text_value == 0xdeadbeef);
-        *text_value = data_memory_start + fixup->data_offset - (text_memory_start + fixup->next_instruction);
+        *text_value = seg_memory_start + fixup->data_offset - (text_memory_start + fixup->next_instruction);
     }
 
     // Set up section headers
@@ -13099,7 +13151,7 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     Section_Header* rdata_header = &section_headers[section_index];
     section_index += 1;
     mem_copy(".rdata", rdata_header->name, 6);
-    rdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_WRITE | SECTION_FLAGS_INITIALIZED_DATA;
+    rdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
     rdata_header->virtual_size = rdata_length;
     rdata_header->virtual_address = rdata_memory_start;
     rdata_header->size_of_raw_data = round_to_next(rdata_length, in_file_alignment);
