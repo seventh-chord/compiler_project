@@ -12,6 +12,31 @@ fn print(string: String) {
 }
 
 fn main() {
-    print("Hello world");
+    print("Hello world\n");
+    print_direction(Direction::NORTH);
+    print_direction(Direction::SOUTH);
+    print(get_direction_instruction(Direction::EAST));
     ExitProcess(0);
 }
+
+fn print_direction(dir: Direction) {
+    // NB You probably want to use 'enum_member_name(dir)' instead though
+    switch dir {
+        NORTH: print("North\n");
+        SOUTH: print("South\n");
+        EAST:  print("East\n");
+        WEST:  print("West\n");
+    }
+}
+
+fn get_direction_instruction(dir: Direction) -> String {
+    switch dir {
+        NORTH: return "Go upwards";
+        SOUTH: return "Don't go upwards";
+        EAST:  ; // This is an empty case
+        WEST:  return "Go left";
+    }
+    return "Go right";
+}
+
+enum Direction { NORTH, SOUTH, EAST, WEST }
