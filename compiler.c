@@ -1210,11 +1210,13 @@ typedef struct Token {
         TOKEN_BRACKET_SQUARE_CLOSE = ']',
         TOKEN_BRACKET_CURLY_OPEN   = '{',
         TOKEN_BRACKET_CURLY_CLOSE  = '}',
+
         TOKEN_SEMICOLON    = ';',
         TOKEN_COMMA        = ',',
         TOKEN_DOT          = '.',
         TOKEN_COLON        = ':',
         TOKEN_QUESTIONMARK = '?',
+        TOKEN_UNDERSCORE   = '_',
 
         TOKEN_ADD = '+',
         TOKEN_SUB = '-',
@@ -1334,6 +1336,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_COMMA]                = "a comma ','",
     [TOKEN_COLON]                = "a colon ':'",
     [TOKEN_QUESTIONMARK]         = "a question mark '?'",
+    [TOKEN_UNDERSCORE]           = "a underscore '_'",
     [TOKEN_STATIC_ACCESS]        = "::",
     [TOKEN_RANGE]                = "..",
 
@@ -1876,6 +1879,7 @@ struct Stmt {
         struct {
             Expr *index;
 
+            Switch_Case *default_case;
             Switch_Case *cases;
             u32 case_count;
         } switch_;
@@ -3001,6 +3005,18 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                 printf(": {\n");
 
                 for (Stmt *inner = c->body; inner->kind != STMT_END; inner = inner->next) {
+                    print_stmt(context, inner, indent_level + 2);
+                }
+
+                for (u32 i = 0; i <= indent_level; i += 1) printf("    ");
+                printf("}\n");
+            }
+
+            if (stmt->switch_.default_case != null) {
+                for (u32 i = 0; i <= indent_level; i += 1) printf("    ");
+                printf("_: {\n");
+
+                for (Stmt *inner = stmt->switch_.default_case->body; inner->kind != STMT_END; inner = inner->next) {
                     print_stmt(context, inner, indent_level + 2);
                 }
 
@@ -4355,6 +4371,7 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                 case TOKEN_SEMICOLON:
                 case TOKEN_COLON:
                 case TOKEN_QUESTIONMARK:
+                case TOKEN_UNDERSCORE:
                 case TOKEN_COMMA:
                 case ')': case ']': case '}':
                 case TOKEN_ASSIGN:
@@ -4904,6 +4921,41 @@ Stmt* parse_basic_block(Context *context, Scope *scope, Token* t, u32* length) {
     return stmts;
 }
 
+Stmt *parse_case_body(Context *context, Scope *scope, Token *t, u32 *length) {
+    Token *t_start = t;
+    Stmt *body = null;
+
+    if (t[0].kind == TOKEN_BRACKET_CURLY_OPEN) {
+        t += 1;
+
+        u32 body_length;
+        body = parse_stmts(context, scope, t, &body_length, false);
+        t += body_length;
+
+        if (body == null) {
+            *length = t - t_start;
+            return null;
+        }
+
+        if (!expect_single_token(context, t, '}', "after case")) {
+            *length = t - t_start;
+            return null;
+        }
+    } else {
+        u32 body_length;
+        body = parse_stmts(context, scope, t, &body_length, true);
+        t += body_length;
+
+        if (body == null) {
+            *length = t - t_start;
+            return null;
+        }
+    }
+
+    *length = t - t_start;
+    return body;
+}
+
 Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool single_stmt) {
     Token* t_first_stmt_start = t;
 
@@ -5048,65 +5100,79 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                         break;
                     }
 
-                    Entry *entry = arena_new(&context->stack, Entry);
-                    if (first == null) { first = entry; } else { last->next = entry; }
-                    last = entry;
+                    // The default case
+                    if (t[0].kind == TOKEN_UNDERSCORE) {
+                        File_Pos default_case_pos = t[0].pos;
 
-                    entry->c.pos = t[0].pos;
-                    entry->c.scope = arena_new(&context->arena, Scope);
-
-                    entry->c.scope->parent = scope;
-                    entry->c.scope->fn = scope->fn;
-
-                    if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-                        entry->c.key_is_identifier = true;
-                        entry->c.key_identifier = t[0].identifier;
-                        t += 2;
-                    } else {
-                        u32 key_expr_length;
-                        entry->c.key_expr = parse_expr(context, scope, t, &key_expr_length, false);
-                        t += key_expr_length;
-
-                        if (entry->c.key_expr == null) {
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-
+                        t += 1;
                         if (!expect_single_token(context, t, ':', "after case")) {
                             *length = t - t_start;
                             return null;
                         }
                         t += 1;
-                    }
 
-                    if (t[0].kind == TOKEN_BRACKET_CURLY_OPEN) {
-                        t += 1;
-
-                        u32 body_length;
-                        entry->c.body = parse_stmts(context, entry->c.scope, t, &body_length, false);
-                        t += body_length;
-
-                        if (entry->c.body == null) {
-                            *length = t - t_start;
+                        if (stmt->switch_.default_case != null) {
+                            u64 other_line = stmt->switch_.default_case->pos.line;
+                            print_file_pos(&default_case_pos);
+                            printf("Can't have more than one default case (Other default case on line %u)\n", (u64) other_line);
+                            *length = t - t_first_stmt_start;
                             return null;
                         }
 
-                        if (!expect_single_token(context, t, '}', "after case")) {
+                        stmt->switch_.default_case = arena_new(&context->arena, Switch_Case);
+                        stmt->switch_.default_case->scope = arena_new(&context->arena, Scope);
+                        stmt->switch_.default_case->scope->parent = scope;
+                        stmt->switch_.default_case->scope->fn = scope->fn;
+
+                        u32 body_length;
+                        stmt->switch_.default_case->body = parse_case_body(context, stmt->switch_.default_case->scope, t, &body_length);
+                        t += body_length;
+                        if (stmt->switch_.default_case->body == null) {
                             *length = t - t_start;
                             return null;
                         }
                     } else {
-                        u32 body_length;
-                        entry->c.body = parse_stmts(context, entry->c.scope, t, &body_length, true);
-                        t += body_length;
+                        Entry *entry = arena_new(&context->stack, Entry);
+                        if (first == null) { first = entry; } else { last->next = entry; }
+                        last = entry;
 
+                        entry->c.pos = t[0].pos;
+                        entry->c.scope = arena_new(&context->arena, Scope);
+
+                        entry->c.scope->parent = scope;
+                        entry->c.scope->fn = scope->fn;
+
+                        if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
+                            entry->c.key_is_identifier = true;
+                            entry->c.key_identifier = t[0].identifier;
+                            t += 2;
+                        } else {
+                            u32 key_expr_length;
+                            entry->c.key_expr = parse_expr(context, scope, t, &key_expr_length, false);
+                            t += key_expr_length;
+
+                            if (entry->c.key_expr == null) {
+                                *length = t - t_first_stmt_start;
+                                return null;
+                            }
+
+                            if (!expect_single_token(context, t, ':', "after case")) {
+                                *length = t - t_start;
+                                return null;
+                            }
+                            t += 1;
+                        }
+
+                        u32 body_length;
+                        entry->c.body = parse_case_body(context, entry->c.scope, t, &body_length);
+                        t += body_length;
                         if (entry->c.body == null) {
                             *length = t - t_start;
                             return null;
                         }
-                    }
 
-                    stmt->switch_.case_count += 1;
+                        stmt->switch_.case_count += 1;
+                    }
                 }
 
                 stmt->switch_.cases = (void*) arena_alloc(&context->arena, stmt->switch_.case_count * sizeof(Switch_Case));
@@ -5790,6 +5856,12 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
                 u32 length = last - first + 1;
                 u8 *identifier = &file[first];
+
+                if (length == 1 && *identifier == '_') {
+                    buf_push(tokens, ((Token) { TOKEN_UNDERSCORE, .pos = file_pos }));
+                    break;
+                }
+
                 u8 *interned_identifier = string_intern_with_length(&context->string_table, identifier, length);
 
                 bool is_keyword = false;
@@ -5956,6 +6028,9 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                                         }
 
                                         file_pos.line += 1;
+                                        file_pos.character = 1;
+                                        start_line = file_pos.line;
+                                        start_i = i;
                                     } break;
 
                                     case '/': {
@@ -6211,7 +6286,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             } break;
 
             case '\'': {
-                if (i + 2 > file_length || (file[i + 1] == '\\' && i + 3 < file_length)) {
+                if ((i + 2 > file_length) || ((file[i + 1] == '\\') && (i + 3 > file_length))) {
                     print_file_pos(&file_pos);
                     printf("Encountered end of file inside charater literal\n");
                     valid = false;
@@ -7853,6 +7928,13 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     if (r != TYPECHECK_RESULT_DONE) return r;
                 }
             }
+
+            if (stmt->switch_.default_case != null) {
+                for (Stmt* inner = stmt->switch_.default_case->body; inner->kind != STMT_END; inner = inner->next) {
+                    Typecheck_Result r = typecheck_stmt(context, stmt->switch_.default_case->scope, inner);
+                    if (r != TYPECHECK_RESULT_DONE) return r;
+                }
+            }
         } break;
 
         case STMT_FOR: {
@@ -8415,16 +8497,25 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             } break;
 
             case STMT_SWITCH: {
-                bool has_returned = stmt->switch_.case_count == primitive_size_of(primitive_of(stmt->switch_.index->type));
+                has_returned =
+                    stmt->switch_.case_count == primitive_size_of(primitive_of(stmt->switch_.index->type)) ||
+                    stmt->switch_.default_case != null;
 
-                // TODO set 'has_returned' to true if we have a default case!
-                // In general, we have to expect that a switch can hit no cases, even with enums,
-                // because we can get malformed enum variants.
+                if (stmt->switch_.default_case != null) {
+                    Switch_Case *c = stmt->switch_.default_case;
+
+                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false);
+                    switch (case_result) {
+                        case CONTROL_FLOW_WILL_RETURN: break;
+                        case CONTROL_FLOW_MIGHT_RETURN: has_returned = false; break;
+                        case CONTROL_FLOW_INVALID: return CONTROL_FLOW_INVALID;
+                    }
+                }
 
                 for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
                     Switch_Case *c = &stmt->switch_.cases[i];
-                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false);
 
+                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false);
                     switch (case_result) {
                         case CONTROL_FLOW_WILL_RETURN: break;
                         case CONTROL_FLOW_MIGHT_RETURN: has_returned = false; break;
@@ -8772,6 +8863,11 @@ void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stm
                 typecheck_queue_include_stmts(context, queue, stmt->switch_.cases[i].body);
                 typecheck_queue_include_scope(context, queue, stmt->switch_.cases[i].scope);
             }
+
+            if (stmt->switch_.default_case != null) {
+                typecheck_queue_include_stmts(context, queue, stmt->switch_.default_case->body);
+                typecheck_queue_include_scope(context, queue, stmt->switch_.default_case->scope);
+            }
         }
     }
 }
@@ -9070,7 +9166,8 @@ u8 *REGISTER_NAMES[REGISTER_COUNT][4] = {
     [XMM14] = { null, null, "xmm14", "xmm14" },
     [XMM15] = { null, null, "xmm15", "xmm15" },
 
-    [RIP_OFFSET_DATA] = { null, null, null, "rip" },
+    [RIP_OFFSET_DATA]  = { null, null, null, "rip" },
+    [RIP_OFFSET_RDATA] = { null, null, null, "rip" },
 };
 
 u8 *register_name(Register reg, u8 size) {
@@ -9643,8 +9740,7 @@ void instruction_call(Context *context, Fn *callee) {
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8 *name = string_table_access(context->string_table, callee->name_index);
-    printf("call %s\n", name);
+    printf("call %s\n", callee->name);
     #endif
 }
 
@@ -9660,7 +9756,7 @@ void instruction_call_builtin(Context *context, u32 index) {
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     u8 *name;
-    switch (fn_index) {
+    switch (index) {
         case RUNTIME_BUILTIN_MEM_COPY:     name = "builtin_mem_copy"; break;
         case RUNTIME_BUILTIN_MEM_CLEAR:    name = "builtin_mem_clear"; break;
         default: assert(false);
@@ -9730,8 +9826,7 @@ void instruction_lea_call(Context *context, Fn *callee, Register reg) {
     }
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    u8 *callee_name = string_table_access(context->string_table, callee->name);
-    printf("mov %s, &%s\n", register_name(reg, POINTER_SIZE), callee_name);
+    printf("mov %s, &%s\n", register_name(reg, POINTER_SIZE), callee->name);
     #endif
 }
 
@@ -12154,7 +12249,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("; ");
-    print_stmt(context, fn, stmt, 0);
+    print_stmt(context, stmt, 0);
     #endif
 
     switch (stmt->kind) {
@@ -12268,6 +12363,15 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             machinecode_for_expr(context, fn, stmt->switch_.index, reg_allocator, x64_place_reg(index_reg));
             register_allocator_leave_frame(context, reg_allocator);
 
+            arena_stack_push(&context->stack);
+            u64 jmp_index_count = 0;
+            if (stmt->switch_.case_count > 1) {
+                jmp_index_count = stmt->switch_.case_count - 1;
+                if (stmt->switch_.default_case != null) jmp_index_count += 1;
+            }
+            u64 *jmp_indices = (u64*) arena_alloc(&context->stack, jmp_index_count * sizeof(u64));
+            jmp_index_count = 0;
+
             for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
                 Switch_Case *c = &stmt->switch_.cases[i];
                 instruction_cmp_imm(context, x64_place_reg(index_reg), c->key_value, index_size);
@@ -12277,10 +12381,30 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                     machinecode_for_stmt(context, fn, inner, reg_allocator);
                 }
 
+                if (!(i + 1 == stmt->switch_.case_count && stmt->switch_.default_case == null)) {
+                    jmp_indices[jmp_index_count] = instruction_jmp(context, sizeof(i32)); // jmp to end
+                    jmp_index_count += 1;
+                }
+
                 u64 jcc_to = buf_length(context->seg_text);
                 i32 *jcc_by = (i32*) (&context->seg_text[jcc_index]);
                 *jcc_by = jcc_to - (jcc_index + sizeof(i32));
             }
+
+            if (stmt->switch_.default_case != null) {
+                Switch_Case *c = stmt->switch_.default_case;
+                for (Stmt *inner = c->body; inner->kind != STMT_END; inner = inner->next) {
+                    machinecode_for_stmt(context, fn, inner, reg_allocator);
+                }
+            }
+
+            u64 jmp_to = buf_length(context->seg_text);
+            for (u64 i = 0; i < jmp_index_count; i += 1) {
+                u64 jmp_index = jmp_indices[i];
+                i32 *jmp_by = (i32*) (&context->seg_text[jmp_index]);
+                *jmp_by = jmp_to - (jmp_index + sizeof(i32));
+            }
+            arena_stack_pop(&context->stack);
         } break;
 
         case STMT_FOR: {
@@ -12560,8 +12684,7 @@ void build_machinecode(Context *context) {
         fn->body.text_start = buf_length(context->seg_text);
 
         #ifdef PRINT_GENERATED_INSTRUCTIONS
-        u8* name = string_table_access(context->string_table, fn->name);
-        printf("\n\n; --- fn %s ---\n", name);
+        printf("\n\n; --- fn %s ---\n", fn->name);
         #endif
 
         // Lay out stack
