@@ -3072,7 +3072,7 @@ f64 parse_f64(u8* string, u64 length) {
 
 Type *parse_primitive_name(Context *context, u8 *interned_name) {
     for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
-        Type* type = &context->primitive_types[i];
+        Type *type = &context->primitive_types[i];
         if (type->primitive_name == interned_name) {
             return type;
         }
@@ -10500,7 +10500,7 @@ void machinecode_lea(Context *context, Reg_Allocator *reg_allocator, X64_Address
 }
 
 void machinecode_zero_out_struct(Context *context, Reg_Allocator *reg_allocator, X64_Address address, u64 size, u64 align) {
-    if (size != align || size > 8) {
+    if (!(size == 1 || size == 2 || size == 4 || size == 8)) {
         register_allocator_enter_frame(context, reg_allocator);
 
         register_allocate_specific(context, reg_allocator, RAX);
