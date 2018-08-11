@@ -1411,10 +1411,10 @@ typedef enum Type_Kind {
 } Type_Kind;
 
 enum { POINTER_SIZE = 8 };
-Type_Kind TYPE_DEFAULT_INT   = TYPE_I64;
-Type_Kind TYPE_CHAR          = TYPE_U8;
-Type_Kind TYPE_DEFAULT_FLOAT = TYPE_F32;
-Type_Kind TYPE_POINTER_DIFF  = TYPE_I64;
+#define TYPE_DEFAULT_INT   ((Type_Kind) TYPE_I64)
+#define TYPE_CHAR          ((Type_Kind) TYPE_U8)
+#define TYPE_DEFAULT_FLOAT ((Type_Kind) TYPE_F32)
+#define TYPE_POINTER_DIFF  ((Type_Kind) TYPE_I64)
 
 u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_VOID] = "void",
@@ -1559,9 +1559,10 @@ struct Type_List {
 
 
 enum {
-    VAR_FLAG_REFERENCE = 0x01,
-    VAR_FLAG_CONSTANT  = 0x02,
-    VAR_FLAG_GLOBAL    = 0x04,
+    VAR_FLAG_REFERENCE  = 0x01, // for parameters
+    VAR_FLAG_CONSTANT   = 0x02, // not assignables, in .rdata if global
+    VAR_FLAG_GLOBAL     = 0x04, // in .data or .rdata
+    VAR_FLAG_LOOSE_TYPE = 0x08, // no type given, rhs is weak
 };
 
 struct Var {
@@ -6644,7 +6645,24 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 expr->flags |= EXPR_FLAG_ADDRESSABLE;
             }
 
-            expr->type = expr->variable.var->type;
+            Var *var = expr->variable.var;
+
+            if (
+                (var->flags & VAR_FLAG_CONSTANT) &&
+                (var->flags & VAR_FLAG_LOOSE_TYPE) &&
+                primitive_is_integer(solidify_to->kind) &&
+                var->type->kind == TYPE_DEFAULT_INT
+            ) {
+                // NB we play a bit fast and loose here, by allowing constant integers without a specific type
+                // given to be used as any integer type (assuming that downcasts from the default integer type
+                // is a no-op). This simplifies using constants in c-libraries like opengl, which is particularly
+                // wierd about switching around the specific types it expects in function signatures, largely
+                // (I pressume) because C does a lot of casts implicitly.
+                static_assert(TYPE_DEFAULT_INT == TYPE_I64, "Need to potentially generate upcasts if this assert fails!");
+                expr->type = solidify_to;
+            } else {
+                expr->type = var->type;
+            }
         } break;
 
         case EXPR_LITERAL: {
@@ -7473,11 +7491,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
     Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);
     if (r != TYPECHECK_RESULT_DONE) return r;
 
-    if (strong) {
-        return TYPECHECK_EXPR_STRONG;
-    } else {
-        return TYPECHECK_EXPR_WEAK ;
-    }
+    return strong? TYPECHECK_EXPR_STRONG : TYPECHECK_EXPR_WEAK;
 }
 
 Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
@@ -7526,37 +7540,46 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         } break;
 
         case STMT_LET: {
-            Var* var = stmt->let.var;
-            Expr* right = stmt->let.right;
+            Var *var = stmt->let.var;
+            Expr *right = stmt->let.right;
 
             if (var->type != null) {
                 Typecheck_Result r = resolve_type(context, scope, &var->type, &var->declaration_pos);
                 if (r != TYPECHECK_RESULT_DONE) return r;
             }
 
+            bool loose_types = false;
+
             if (right != null) {
-                Type* resolve_to = var->type;
+                Type *resolve_to = var->type;
                 if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
                 Typecheck_Expr_Result r = typecheck_expr(context, scope, right, resolve_to);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
                     var->type = &context->primitive_types[TYPE_INVALID];
                     return r;
-                } else {
-                    if (var->type == null || var->type->kind == TYPE_INVALID) {
-                        var->type = right->type;
-                    } else {
-                        if (!type_can_assign(var->type, right->type)) {
-                            print_file_pos(&stmt->pos);
-                            printf("Invalid declaration: '%s' has type ", var->name);
-                            print_type(context, var->type);
-                            printf(" but right hand side has type ");
-                            print_type(context, right->type);
-                            printf("\n");
-                            return TYPECHECK_RESULT_BAD;
-                        }
-                    }
                 }
+
+                if (var->type == null || var->type->kind == TYPE_INVALID) {
+                    if (r == TYPECHECK_EXPR_WEAK) loose_types = true;
+                    var->type = right->type;
+                }
+
+                if (!type_can_assign(var->type, right->type)) {
+                    print_file_pos(&stmt->pos);
+                    printf("Invalid declaration: '%s' has type ", var->name);
+                    print_type(context, var->type);
+                    printf(" but right hand side has type ");
+                    print_type(context, right->type);
+                    printf("\n");
+                    return TYPECHECK_RESULT_BAD;
+                }
+            }
+
+            if (loose_types) {
+                var->flags |= VAR_FLAG_LOOSE_TYPE;
+            } else {
+                var->flags &= ~VAR_FLAG_LOOSE_TYPE;
             }
 
             return TYPECHECK_RESULT_DONE;
@@ -8231,6 +8254,8 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
         if (r != TYPECHECK_RESULT_DONE) return r;
     }
 
+    bool loose_types = false;
+
     if (global->initial_expr != null) {
         Type *resolve_to = global->var->type;
         if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
@@ -8241,6 +8266,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
         }
 
         if (global->var->type == null) {
+            if (r == TYPECHECK_EXPR_WEAK) loose_types = true;
             global->var->type = global->initial_expr->type;
         }
         
@@ -8253,6 +8279,12 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
             printf("\n");
             return TYPECHECK_RESULT_BAD;
         }
+    }
+
+    if (loose_types) {
+        global->var->flags |= VAR_FLAG_LOOSE_TYPE;
+    } else {
+        global->var->flags &= ~VAR_FLAG_LOOSE_TYPE;
     }
 
     if (global->var->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
