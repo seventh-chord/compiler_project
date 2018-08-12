@@ -1540,7 +1540,11 @@ struct Type {
         
         struct {
             union {
-                Expr *expr; // discriminated by 'TYPE_FLAG_UNRESOLVED', must be a compile-time expr
+                // if 'TYPE_FLAG_UNRESOLVED' is set, we don't use 'length', if 'expr' is null,
+                // size has to be infered from a compound literal, if it is not null it is a
+                // compile time expr which evaluates to the proper length.
+                Expr *length_expr;
+
                 u64 length;
             };
             Type *of;
@@ -2641,6 +2645,8 @@ void print_file_pos(File_Pos* pos) {
     printf("%s(%u): ", name, (u64) pos->line);
 }
 
+void print_expr(Context *context, Expr *expr);
+
 void print_type(Context *context, Type* type) {
     while (type != null) {
         switch (type->kind) {
@@ -2667,7 +2673,16 @@ void print_type(Context *context, Type* type) {
             } break;
 
             case TYPE_ARRAY: {
-                printf("[%u]", type->array.length);
+                if (type->flags & TYPE_FLAG_UNRESOLVED && type->array.length_expr == null) {
+                    printf("[]");
+                } else if (type->flags & TYPE_FLAG_UNRESOLVED) {
+                    printf("[");
+                    print_expr(context, type->array.length_expr);
+                    printf("]");
+                } else {
+                    printf("[%u]", type->array.length);
+                }
+
                 type = type->array.of;
             } break;
 
@@ -2715,7 +2730,7 @@ void print_token(Token* t) {
     }
 }
 
-void print_expr(Context *context, Expr* expr) {
+void print_expr(Context *context, Expr *expr) {
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
@@ -3180,7 +3195,7 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
 
     typedef struct Prefix Prefix;
     struct Prefix {
-        enum { PREFIX_POINTER, PREFIX_ARRAY, PREFIX_ARRAY_EXPR } kind;
+        enum { PREFIX_POINTER, PREFIX_ARRAY, PREFIX_ARRAY_EXPR, PREFIX_ARRAY_UNSIZED } kind;
         union {
             Expr *array_length_expr;
             u64 array_length;
@@ -3219,10 +3234,17 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
                 new->link = prefix;
                 prefix = new;
 
+                // Fixed given size
                 if (t->kind == TOKEN_LITERAL_INT) {
                     prefix->kind = PREFIX_ARRAY;
                     prefix->array_length = t->literal_int;
                     t += 1;
+
+                // Size not given, this can only be used in compound literals
+                } else if (t->kind == TOKEN_BRACKET_SQUARE_CLOSE) {
+                    prefix->kind = PREFIX_ARRAY_UNSIZED;
+
+                // Size given by a compile time expr
                 } else {
                     u32 length_expr_length;
                     Expr *length_expr = parse_expr(context, scope, t, &length_expr_length, false);
@@ -3291,7 +3313,17 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
                 Type *array_type = arena_new(&context->arena, Type);
                 array_type->kind = TYPE_ARRAY;
                 array_type->flags |= TYPE_FLAG_UNRESOLVED;
-                array_type->array.expr = prefix->array_length_expr;
+                array_type->array.length_expr = prefix->array_length_expr;
+                array_type->array.of = type;
+
+                type = array_type;
+            } break;
+
+            case PREFIX_ARRAY_UNSIZED: {
+                Type *array_type = arena_new(&context->arena, Type);
+                array_type->kind = TYPE_ARRAY;
+                array_type->flags |= TYPE_FLAG_UNRESOLVED;
+                array_type->array.length_expr = null;
                 array_type->array.of = type;
 
                 type = array_type;
@@ -6690,56 +6722,63 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
 
             case TYPE_ARRAY: {
                 if (type->flags & TYPE_FLAG_UNRESOLVED) {
-                    Expr *length_expr = type->array.expr;
-                    Type *type_default_int = &context->primitive_types[TYPE_U64];
-                    Typecheck_Expr_Result check_result = typecheck_expr(context, scope, length_expr, type_default_int);
-                    if (check_result == TYPECHECK_EXPR_BAD || check_result == TYPECHECK_EXPR_DEPENDENT) {
-                        return check_result;
-                    }
+                    Expr *length_expr = type->array.length_expr;
 
-                    if (!primitive_is_integer(length_expr->type->kind)) {
-                        print_file_pos(&length_expr->pos);
-                        printf("Can only use unsigned integers as array sizes\n");
+                    if (length_expr == null) {
+                        print_file_pos(pos);
+                        printf("Can't infer array size in this context\n");
                         return TYPECHECK_RESULT_BAD;
-                    }
+                    } else {
+                        Type *type_default_int = &context->primitive_types[TYPE_U64];
+                        Typecheck_Expr_Result check_result = typecheck_expr(context, scope, length_expr, type_default_int);
+                        if (check_result == TYPECHECK_EXPR_BAD || check_result == TYPECHECK_EXPR_DEPENDENT) {
+                            return check_result;
+                        }
 
-                    u64 length = 0;
-                    arena_stack_push(&context->stack);
-                    Eval_Result eval_result = eval_compile_time_expr(context, length_expr, (u8*) &length);
-                    arena_stack_pop(&context->stack);
-
-                    switch (eval_result) {
-                        case EVAL_BAD:       return TYPECHECK_RESULT_BAD;
-                        case EVAL_DEPENDENT: return TYPECHECK_RESULT_DEPENDENT;
-
-                        case EVAL_DO_AT_RUNTIME: {
+                        if (!primitive_is_integer(length_expr->type->kind)) {
                             print_file_pos(&length_expr->pos);
-                            printf("Can't evaluate expression for array length at compile time\n");
-                            return false;
-                        } break;
+                            printf("Can only use unsigned integers as array sizes\n");
+                            return TYPECHECK_RESULT_BAD;
+                        }
 
-                        case EVAL_OK: {
-                            if (primitive_is_signed(length_expr->type->kind)) {
-                                i64 signed_length = length;
-                                switch (length_expr->type->kind) {
-                                    case TYPE_I8:  signed_length = (i64) (*((i8*)  &signed_length)); break;
-                                    case TYPE_I16: signed_length = (i64) (*((i16*) &signed_length)); break;
-                                    case TYPE_I32: signed_length = (i64) (*((i32*) &signed_length)); break;
-                                    case TYPE_I64: break;
-                                    default: assert(false);
+                        u64 length = 0;
+                        arena_stack_push(&context->stack);
+                        Eval_Result eval_result = eval_compile_time_expr(context, length_expr, (u8*) &length);
+                        arena_stack_pop(&context->stack);
+
+                        switch (eval_result) {
+                            case EVAL_BAD:       return TYPECHECK_RESULT_BAD;
+                            case EVAL_DEPENDENT: return TYPECHECK_RESULT_DEPENDENT;
+
+                            case EVAL_DO_AT_RUNTIME: {
+                                print_file_pos(&length_expr->pos);
+                                printf("Can't evaluate expression for array length at compile time\n");
+                                return false;
+                            } break;
+
+                            case EVAL_OK: {
+                                if (primitive_is_signed(length_expr->type->kind)) {
+                                    i64 signed_length = length;
+                                    switch (length_expr->type->kind) {
+                                        case TYPE_I8:  signed_length = (i64) (*((i8*)  &signed_length)); break;
+                                        case TYPE_I16: signed_length = (i64) (*((i16*) &signed_length)); break;
+                                        case TYPE_I32: signed_length = (i64) (*((i32*) &signed_length)); break;
+                                        case TYPE_I64: break;
+                                        default: assert(false);
+                                    }
+
+                                    if (signed_length < 0) {
+                                        print_file_pos(&length_expr->pos);
+                                        printf("Can't use negative array length %i\n", signed_length);
+                                        return TYPECHECK_RESULT_BAD;
+                                    }
                                 }
 
-                                if (signed_length < 0) {
-                                    print_file_pos(&length_expr->pos);
-                                    printf("Can't use negative array length %i\n", signed_length);
-                                    return TYPECHECK_RESULT_BAD;
-                                }
-                            }
+                                type = get_array_type(context, type->array.of, length);
+                            } break;
 
-                            type = get_array_type(context, type->array.of, length);
-                        } break;
-
-                        default: assert(false);
+                            default: assert(false);
+                        }
                     }
                 }
 
@@ -6965,6 +7004,13 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     return TYPECHECK_EXPR_BAD;
                 }
                 expr->type = solidify_to;
+            }
+
+            if (expr->type->kind == TYPE_ARRAY && (expr->type->flags & TYPE_FLAG_UNRESOLVED) && expr->type->array.length_expr == null) {
+                // Infer array length
+                u64 infered_length = expr->compound.count;
+                Type *array_of_type = expr->type->array.of;
+                expr->type = get_array_type(context, array_of_type, infered_length);
             }
 
             Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);

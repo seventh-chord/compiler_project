@@ -128,7 +128,7 @@ fn open_window() {
     );
     let wglCreateContextAttribsARB = cast(wglCreateContextAttribsARB_Type, get_gl_proc_address(gl32_lib, "wglCreateContextAttribsARB".data));
 
-    let context_attributes = [9]i32 {
+    let context_attributes = []i32 {
         WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
         WGL_CONTEXT_MINOR_VERSION_ARB, 3,
         WGL_CONTEXT_FLAGS_ARB, 0,
