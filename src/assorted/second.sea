@@ -22,6 +22,7 @@ fn assert(condition: bool, message: String) {
 
 fn main() {
     shifty_shafts();
+
     x64_eight_bit_register_bug();
     floating_away();
     division();
@@ -317,9 +318,9 @@ fn floating_away() {
     c = a / b;
 
     c = -c;
-    assert(c == -2.0, "Oops we sank\n");
-    assert(c < -1.0, "Oops we sank again\n");
-    assert(c > -3.0, "Oops we sank a third time\n");
+    assert(c == -2.0, "Oops we sank");
+    assert(c < -1.0, "Oops we sank again");
+    assert(c > -3.0, "Oops we sank a third time");
 
     assert(c == --c, "Slightly funky, but come on\n");
 
@@ -350,7 +351,8 @@ fn floating_away() {
     assert(i == 1, "Loops are hosed, but in a different way");
 
     let d = 1.0 + flow(1, 1.0, 1, 1.0) - 1.0;
-    assert(d == 4.0, "Oops we sank");
+    //let d = flow(1, 1.0, 1, 1.0);
+    assert(d == 4.0, "Stuff, doesn't work easy, for me");
 
     let n = f64(-7.9);
     assert(i8(n) == -7, "\"Sailing\"");
@@ -394,10 +396,10 @@ fn shifty_shafts() {
     y = x >> 1;
     assert(y == -5, "Slightly shifty!");
 
-    for i : 0..255 {
-        let x = i << 1;
-        let y = i * 2;
-        assert(x == y, "This is not a binary machine!");
+    for i : 1..255 {
+        let mul = i * 2;
+        let shift = i << 1;
+        assert(i << 1 == mul, "This is not a binary machine!");
     }
 
     assert(y == -5, "Hah, we got to test scopes too!");

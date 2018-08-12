@@ -10286,7 +10286,7 @@ void instruction_shift(Context *context, int instruction, X64_Place place, u8 op
     encode_instruction_modrm(context, rex, opcode, op_size == 1, place, opcode_extension);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("%s ");
+    printf("%s ", SHIFT_INSTRUCTION_NAMES[instruction]);
     print_x64_place(place, op_size);
     printf(", cl\n");
     #endif
@@ -10674,6 +10674,16 @@ X64_Address register_allocator_temp_stack_space(Reg_Allocator *allocator, u64 si
 #define RESERVE_RDX  0x04
 #define RESERVE_XMM0 0x08
 
+bool reserves_register(u32 flags, Register reg) {
+    switch (reg) {
+        case RAX:  return flags & RESERVE_RAX;
+        case RCX:  return flags & RESERVE_RCX;
+        case RDX:  return flags & RESERVE_RDX;
+        case XMM0: return flags & RESERVE_XMM0;
+        default:   return false;
+    }
+}
+
 
 // Allocate a register, but don't mark it as allocated so we don' need to push/pop a frame.
 // Should only be used in leaf code.
@@ -10688,10 +10698,7 @@ Register register_allocate_temp(Reg_Allocator *allocator, Register_Kind kind, u3
         if (
             reg == RSP ||
             reg == RBP ||
-            ((reserves & RESERVE_RAX) && reg == RAX) ||
-            ((reserves & RESERVE_RCX) && reg == RCX) ||
-            ((reserves & RESERVE_RDX) && reg == RDX) ||
-            ((reserves & RESERVE_XMM0) && reg == XMM0)
+            reserves_register(reserves, reg)
         ) {
             continue;
         }
@@ -10831,6 +10838,7 @@ void machinecode_move(Context *context, Reg_Allocator *reg_allocator, X64_Place 
             unimplemented();
             // TODO this would essentially require us to swap rax and rax, but that is complicated by the fact that
             // the registers can be used as either the base or the index
+            // NB NB Just use the XCHG instruction
         } else if (x64_address_uses_reg(dst.address, RAX)) {
             instruction_lea(context, dst.address, RDX);
             instruction_lea(context, src.address, RAX);
@@ -11838,8 +11846,6 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             reg_allocator->max_callee_param_count = max(reg_allocator->max_callee_param_count, callee_signature->param_count);
 
 
-            register_allocator_enter_frame(context, reg_allocator); // outer frame for return registers
-
             Register return_reg;
             if (primitive_is_float(expr->type->kind)) {
                 return_reg = XMM0;
@@ -11847,17 +11853,8 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 return_reg = RAX;
             }
 
-            bool move_from_return_reg =
-                !(place.kind == PLACE_REGISTER && place.reg == return_reg) &&
-                place.kind != PLACE_NOWHERE &&
-                callee_signature->has_return;
-
-            if (move_from_return_reg) {
-                register_allocate_specific(context, reg_allocator, return_reg);
-            }
-
             // Compute parameters
-            register_allocator_enter_frame(context, reg_allocator); // inner frame for parameters
+            register_allocator_enter_frame(context, reg_allocator);
 
             bool skip_first_param_reg = false;
             Register used_volatile_registers[INPUT_REGISTER_COUNT] = {0};
@@ -11883,9 +11880,11 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
             for (u32 p = 0; p < callee_signature->param_count; p += 1) {
                 Type *param_type = callee_signature->params[p].type;
+                Expr *param_expr = expr->call.params[p];
 
-                X64_Place target_place;
-
+                X64_Place target_place, compute_to_place;
+                bool target_and_compute_differ = false;
+ 
                 u32 r = skip_first_param_reg? (p + 1) : p;
                 if (r < INPUT_REGISTER_COUNT) {
                     Register reg;
@@ -11897,13 +11896,23 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
                     used_volatile_registers[r] = reg;
                     target_place = x64_place_reg(reg);
+
+                    u32 param_reserves = machinecode_expr_reserves(param_expr);
+                    if (reserves_register(param_reserves, reg)) {
+                        target_and_compute_differ = true;
+
+                        register_allocator_enter_frame(context, reg_allocator);
+                        Register_Kind reg_kind = primitive_is_float(param_type->kind)? REGISTER_KIND_XMM : REGISTER_KIND_GPR;
+                        Register other_reg = register_allocate(reg_allocator, reg_kind, param_reserves);
+                        compute_to_place = x64_place_reg(other_reg);
+                    } else {
+                        compute_to_place = target_place;
+                    }
                 } else {
                     target_place = (X64_Place) { .kind = PLACE_ADDRESS, .address = { .base = RSP, .immediate_offset = r*POINTER_SIZE } };
+                    compute_to_place = target_place;
                 }
 
-                if (target_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && target_place.reg == place.reg)) {
-                    register_allocate_specific(context, reg_allocator, target_place.reg);
-                }
 
                 if (callee_signature->params[p].reference_semantics) {
                     u64 size = type_size_of(param_type);
@@ -11913,13 +11922,26 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                         X64_Address tmp_address = register_allocator_temp_stack_space(reg_allocator, size, align);
                         X64_Place tmp_place = { .kind = PLACE_ADDRESS, .address = tmp_address };
 
-                        machinecode_for_expr(context, fn, expr->call.params[p], reg_allocator, tmp_place);
-                        if (target_place.kind == PLACE_REGISTER) register_allocate_specific(context, reg_allocator, target_place.reg);
+                        machinecode_for_expr(context, fn, param_expr, reg_allocator, tmp_place);
+                        if (compute_to_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && compute_to_place.reg == place.reg)) {
+                            register_allocate_specific(context, reg_allocator, compute_to_place.reg);
+                        }
 
-                        machinecode_lea(context, reg_allocator, tmp_address, target_place);
+                        machinecode_lea(context, reg_allocator, tmp_address, compute_to_place);
                     }
                 } else {
-                    machinecode_for_expr(context, fn, expr->call.params[p], reg_allocator, target_place);
+                    if (compute_to_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && compute_to_place.reg == place.reg)) {
+                        register_allocate_specific(context, reg_allocator, compute_to_place.reg);
+                    }
+                    machinecode_for_expr(context, fn, param_expr, reg_allocator, compute_to_place);
+                }
+
+                if (target_and_compute_differ) {
+                    machinecode_move(context, reg_allocator, compute_to_place, target_place, type_size_of(param_type));
+                    register_allocator_leave_frame(context, reg_allocator);
+                    if (target_place.kind == PLACE_REGISTER && !(place.kind == PLACE_REGISTER && target_place.reg == place.reg)) {
+                        register_allocate_specific(context, reg_allocator, target_place.reg);
+                    }
                 }
             }
 
@@ -11956,6 +11978,14 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 }
             }
 
+            bool move_from_return_reg =
+                !(place.kind == PLACE_REGISTER && place.reg == return_reg) &&
+                place.kind != PLACE_NOWHERE &&
+                callee_signature->has_return;
+            if (move_from_return_reg) {
+                register_allocate_specific(context, reg_allocator, return_reg);
+            }
+
             // Call function and handle return value
             if (expr->call.pointer_call) {
                 instruction_call_indirect(context, x64_place_reg(pointer_reg));
@@ -11963,7 +11993,14 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 instruction_call(context, expr->call.callee);
             }
 
-            register_allocator_leave_frame(context, reg_allocator); // inner frame for parameters
+            X64_Address unflush_return_from;
+            bool unflush_return = reg_allocator->head->states[return_reg].flushed;
+            if (unflush_return) {
+                unflush_return_from = reg_allocator->head->states[return_reg].flushed_to;
+                reg_allocator->head->states[return_reg].flushed = false;
+            }
+
+            register_allocator_leave_frame(context, reg_allocator);
 
             if (move_from_return_reg) {
                 assert(place.kind != PLACE_NOWHERE && callee_signature->has_return);
@@ -11981,7 +12018,15 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 }
             }
 
-            register_allocator_leave_frame(context, reg_allocator); // outer frame for return value
+            if (unflush_return) {
+                if (is_gpr(return_reg)) {
+                    instruction_mov_reg_mem(context, MOVE_FROM_MEM, unflush_return_from, return_reg, POINTER_SIZE);
+                } else if (is_xmm(return_reg)) {
+                    instruction_float_movd(context, MOVE_FROM_MEM, return_reg, x64_place_address(unflush_return_from), false);
+                } else {
+                    assert(false);
+                }
+            }
         } break;
 
         case EXPR_CAST: {
