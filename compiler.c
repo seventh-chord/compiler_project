@@ -1625,6 +1625,9 @@ typedef enum Binary_Op {
     BINARY_OR,
     BINARY_XOR,
 
+    BINARY_SHR,
+    BINARY_SHL,
+
     BINARY_LOGICAL_AND,
     BINARY_LOGICAL_OR,
 
@@ -1639,15 +1642,21 @@ typedef enum Binary_Op {
 } Binary_Op;
 
 u8 BINARY_OP_PRECEDENCE[BINARY_OP_COUNT] = {
-    [BINARY_MUL] = 3,
-    [BINARY_DIV] = 3,
-    [BINARY_MOD] = 3,
-    [BINARY_AND] = 3,
-    [BINARY_XOR] = 3,
+    [BINARY_MUL] = 4,
+    [BINARY_DIV] = 4,
+    [BINARY_MOD] = 4,
 
-    [BINARY_ADD] = 2,
-    [BINARY_SUB] = 2,
+    [BINARY_ADD] = 3,
+    [BINARY_SUB] = 3,
+
+    // NB we do this differently from what many other languages do, because I don't find
+    // that I actually remember what the precedence of these is. Having them be on the
+    // same precedence level and then just using parentheses seems simpler.
+    [BINARY_AND] = 2,
+    [BINARY_XOR] = 2,
     [BINARY_OR]  = 2,
+    [BINARY_SHR] = 2,
+    [BINARY_SHL] = 2,
 
     [BINARY_NEQ] = 1,
     [BINARY_EQ] = 1,
@@ -1679,6 +1688,9 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [BINARY_AND] = "&",
     [BINARY_OR]  = "|",
     [BINARY_XOR] = "^",
+
+    [BINARY_SHL] = "<<",
+    [BINARY_SHR] = ">>",
 
     [BINARY_LOGICAL_AND]  = "&&",
     [BINARY_LOGICAL_OR]   = "||",
@@ -4440,23 +4452,22 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                         case TOKEN_MUL:                op = BINARY_MUL; break;
                         case TOKEN_DIV:                op = BINARY_DIV; break;
                         case TOKEN_MOD:                op = BINARY_MOD; break;
+
                         case TOKEN_AND:                op = BINARY_AND; break;
                         case TOKEN_OR:                 op = BINARY_OR; break;
                         case TOKEN_XOR:                op = BINARY_XOR; break;
+                        case TOKEN_SHIFT_RIGHT:        op = BINARY_SHR; break;
+                        case TOKEN_SHIFT_LEFT:         op = BINARY_SHL; break;
+
                         case TOKEN_LOGICAL_AND:        op = BINARY_LOGICAL_AND; break;
                         case TOKEN_LOGICAL_OR:         op = BINARY_LOGICAL_OR; break;
+
                         case TOKEN_GREATER:            op = BINARY_GT; break;
                         case TOKEN_GREATER_OR_EQUAL:   op = BINARY_GTEQ; break;
                         case TOKEN_LESS:               op = BINARY_LT; break;
                         case TOKEN_LESS_OR_EQUAL:      op = BINARY_LTEQ; break;
                         case TOKEN_EQUAL:              op = BINARY_EQ; break;
                         case TOKEN_NOT_EQUAL:          op = BINARY_NEQ; break;
-
-                        case TOKEN_SHIFT_LEFT:
-                        case TOKEN_SHIFT_RIGHT:
-                        {
-                            unimplemented(); // TODO bitwise operators
-                        } break;
                     }
 
                     if (op != BINARY_OP_INVALID) {
@@ -7309,6 +7320,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         [BINARY_OR]  = { true,  true,  false, true  },
                         [BINARY_XOR] = { true,  true,  false, true  },
 
+                        [BINARY_SHL] = { true,  true,  false, false  },
+                        [BINARY_SHR] = { true,  true,  false, false  },
+
                         [BINARY_LOGICAL_AND] = { false, false, false, true },
                         [BINARY_LOGICAL_OR]  = { false, false, false, true },
                     };
@@ -8347,6 +8361,9 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                     case BINARY_OR:   result = left |  right; break;
                     case BINARY_XOR:  result = left ^  right; break;
 
+                    case BINARY_SHL:  result = left << right; break;
+                    case BINARY_SHR:  result = left >> right; break;
+
                     case BINARY_LOGICAL_AND: result = left && right; break;
                     case BINARY_LOGICAL_OR:  result = left || right;
 
@@ -8379,6 +8396,9 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                     case BINARY_AND:  result = left &  right; break;
                     case BINARY_OR:   result = left |  right; break;
                     case BINARY_XOR:  result = left ^  right; break;
+
+                    case BINARY_SHL:  result = left << right; break;
+                    case BINARY_SHR:  result = left >> right; break;
 
                     case BINARY_LOGICAL_AND: result = left && right; break;
                     case BINARY_LOGICAL_OR:  result = left || right;
@@ -10226,6 +10246,52 @@ void instruction_integer_imm(Context *context, int instruction, X64_Place place,
     #endif
 }
 
+enum {
+    SHIFT_LEFT, // shifts in zeroes
+    SHIFT_RIGHT, // shifts in zeroes
+    SHIFT_RIGHT_ARITHMETIC, // shifts in the sign bit
+
+    SHIFT_INSTRUCTION_COUNT,
+};
+
+u8 *SHIFT_INSTRUCTION_NAMES[SHIFT_INSTRUCTION_COUNT] = {
+    [SHIFT_LEFT]             = "shl",
+    [SHIFT_RIGHT]            = "shr",
+    [SHIFT_RIGHT_ARITHMETIC] = "sar",
+};
+
+// Shifts the given place by the count in RCX. Only the bottom 6 bits of RCX are used!
+void instruction_shift(Context *context, int instruction, X64_Place place, u8 op_size) {
+    if (place.kind == PLACE_REGISTER) assert(is_gpr(place.reg));
+
+    Register opcode_extension = REGISTER_OPCODE_0;
+    switch (instruction) {
+        case SHIFT_LEFT:             opcode_extension += 4; break;
+        case SHIFT_RIGHT:            opcode_extension += 5; break;
+        case SHIFT_RIGHT_ARITHMETIC: opcode_extension += 7; break;
+        default: assert(false);
+    }
+
+    u8 opcode = 0xd3;
+    u8 rex = REX_BASE;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_modrm(context, rex, opcode, op_size == 1, place, opcode_extension);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("%s ");
+    print_x64_place(place, op_size);
+    printf(", cl\n");
+    #endif
+}
+
 void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
     assert(is_gpr(reg));
 
@@ -10604,8 +10670,9 @@ X64_Address register_allocator_temp_stack_space(Reg_Allocator *allocator, u64 si
 
 
 #define RESERVE_RAX  0x01
-#define RESERVE_RDX  0x02
-#define RESERVE_XMM0 0x04
+#define RESERVE_RCX  0x02
+#define RESERVE_RDX  0x04
+#define RESERVE_XMM0 0x08
 
 
 // Allocate a register, but don't mark it as allocated so we don' need to push/pop a frame.
@@ -10622,6 +10689,7 @@ Register register_allocate_temp(Reg_Allocator *allocator, Register_Kind kind, u3
             reg == RSP ||
             reg == RBP ||
             ((reserves & RESERVE_RAX) && reg == RAX) ||
+            ((reserves & RESERVE_RCX) && reg == RCX) ||
             ((reserves & RESERVE_RDX) && reg == RDX) ||
             ((reserves & RESERVE_XMM0) && reg == XMM0)
         ) {
@@ -10980,6 +11048,10 @@ u32 machinecode_expr_reserves(Expr *expr) {
                 if (primitive_is_integer(primitive_of(expr->type))) {
                     flags |= RESERVE_RAX;
                 }
+            }
+
+            if (expr->binary.op == BINARY_SHL || expr->binary.op == BINARY_SHR) {
+                flags |= RESERVE_RCX;
             }
 
             flags |= machinecode_expr_reserves(expr->binary.left);
@@ -11510,6 +11582,35 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                                 instruction_idiv_pointer_imm(context, left_reg, pointer_scale);
                             }
                         }
+
+                        register_allocator_leave_frame(context, reg_allocator);
+                    } break;
+
+                    case BINARY_SHL:
+                    case BINARY_SHR:
+                    {
+                        Type_Kind primitive = expr->type->kind;
+                        u8 op_size = primitive_size_of(primitive);
+                        int instruction;
+                        if (expr->binary.op == BINARY_SHL) {
+                            instruction = SHIFT_LEFT;
+                        } else {
+                            if (primitive_is_signed(primitive)) {
+                                instruction = SHIFT_RIGHT_ARITHMETIC;
+                            } else {
+                                instruction = SHIFT_RIGHT;
+                            }
+                        }
+
+                        register_allocator_enter_frame(context, reg_allocator);
+
+                        assert(left_reg != RCX);
+                        if (right_reg != RCX) {
+                            register_allocate_specific(context, reg_allocator, RCX);
+                            instruction_mov_reg_reg(context, right_reg, RCX, op_size);
+                        }
+
+                        instruction_shift(context, instruction, x64_place_reg(left_reg), op_size);
 
                         register_allocator_leave_frame(context, reg_allocator);
                     } break;

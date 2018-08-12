@@ -21,8 +21,8 @@ fn assert(condition: bool, message: String) {
 }
 
 fn main() {
+    shifty_shafts();
     x64_eight_bit_register_bug();
-
     floating_away();
     division();
     division_take_two();
@@ -383,4 +383,22 @@ fn division_take_two() {
 fn x64_eight_bit_register_bug() {
     let a: u8 = 1 + (1 + (1 + (1 + (1 % (1 + (1 + 1))))));
     assert(a == 5, "Why is x64 such a hodgepodge?");
+}
+
+fn shifty_shafts() {
+    let x = 10;
+    let y = x >> 1;
+    assert(y == 5, "Shifty?");
+
+    x = -10;
+    y = x >> 1;
+    assert(y == -5, "Slightly shifty!");
+
+    for i : 0..255 {
+        let x = i << 1;
+        let y = i * 2;
+        assert(x == y, "This is not a binary machine!");
+    }
+
+    assert(y == -5, "Hah, we got to test scopes too!");
 }

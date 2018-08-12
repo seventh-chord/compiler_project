@@ -18,7 +18,6 @@ Language features
     a 'any' type (pointer + type info)
     uninitialized (zeroed) global variables in .bss
     unions
-    shifting operators (<< >>)
     assignment operators (*= /= &= |= ^= <<= >>=), not sure if I want all of them...
     taking the address of temporaries (c doesn't support this though, and it messes with potential optimization)
     a defer statement

@@ -189,7 +189,9 @@ fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
         WM_CLOSE: close_window_requested = true;
 
         WM_KEYUP: {}
-        WM_KEYDOWN: {}
+        WM_KEYDOWN: {
+            let scancode = (l >> 16) & 0xff;
+        }
 
         WM_CHAR: {}
         WM_INPUT: {} // For raw input
