@@ -6,7 +6,9 @@ fn main() {
     let r = 0.0;
     let up = true;
     
-    for {
+    for !close_window_requested {
+        poll_events();
+
         if up {
             r += 0.01;
             if r > 1.0 { up = false; }
@@ -20,8 +22,6 @@ fn main() {
         swap_buffers();
     }
 
-    Sleep(1000);
-
     close_window();
     ExitProcess(0);
 }
@@ -30,6 +30,7 @@ let wgl_swap_function: wglSwapIntervalEXT_Type;
 let window_handle: Handle;
 let gl_context: Handle;
 let device_context: Handle;
+let close_window_requested = false;
 
 fn open_window() {
     print("Creating window and initializing OpenGL\n");
@@ -151,6 +152,23 @@ fn open_window() {
 
     print("Showing window!\n");
     ShowWindow(window_handle, SW_SHOW);
+
+    close_window_requested = false;
+}
+
+fn poll_events() {
+    let message: Window_Message;
+
+    for {
+        let result = PeekMessageA(&message, window_handle, 0, 0, PM_REMOVE);
+
+        if result > 0 {
+            TranslateMessage(&message);
+            DispatchMessageA(&message);
+        } else {
+            break;
+        }
+    }
 }
 
 fn close_window() {
@@ -165,10 +183,30 @@ fn swap_buffers() {
 // This is 'WNDPROC'
 fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
     switch message {
+        WM_SIZE: {}
+        WM_MOVE: {}
+
+        WM_CLOSE: close_window_requested = true;
+
+        WM_KEYUP: {}
+        WM_KEYDOWN: {}
+
+        WM_CHAR: {}
+        WM_INPUT: {} // For raw input
+        WM_MOUSEWHEEL: {}
+        WM_MOUSEMOVE:  {}
+
+        WM_LBUTTONDOWN: {}
+        WM_LBUTTONUP:   {}
+        WM_MBUTTONDOWN: {}
+        WM_MBUTTONUP:   {}
+        WM_RBUTTONDOWN: {}
+        WM_RBUTTONUP:   {}
+        
+        _: return DefWindowProcA(window, message, w, l);
     }
 
-    // TODO
-    return DefWindowProcA(window, message, w, l);
+    return 0;
 }
 
 
@@ -224,6 +262,17 @@ struct Pixel_Format_Descriptor {
     damage_mask: u32;
 }
 
+struct Window_Message {
+    window: Handle;
+    message: u32;
+    w: u64;
+    l: i64;
+    time: u32;
+    pt: Window_Message_Point;
+}
+
+struct Window_Message_Point { x, y: i32; }
+
 extern "kernel32.lib" {
     fn ExitProcess(exit_code: u32);
     fn GetStdHandle(key: u32) -> u64;
@@ -250,6 +299,14 @@ extern "user32.lib" {
     fn DefWindowProcA(window: Handle, msg: u32, w: u64, l: i64) -> i64;
     fn ShowWindow(window: Handle, cmd: i32) -> i32;
     fn DestroyWindow(window: Handle) -> i32;
+    fn PeekMessageA(
+        message: *Window_Message,
+        window: Handle,
+        filter_min, filter_max: u32,
+        remove_message: u32,
+    ) -> i32;
+    fn TranslateMessage(message: *Window_Message) -> i32;
+    fn DispatchMessageA(message: *Window_Message) -> i64;
 }
 
 extern "gdi32.lib" {
@@ -269,56 +326,227 @@ typedef wglGetExtensionsStringARB_Type  = *fn(device_context: Handle) -> *u8;
 typedef wglCreateContextAttribsARB_Type = *fn(device_context: Handle, gl_context: Handle, attributes: *i32) -> Handle;
 typedef wglSwapIntervalEXT_Type         = *fn(interval: i32) -> i32;
 
-let WS_OVERLAPPED: u32   = 0x00000000;
-let WS_CAPTION: u32      = 0x00C00000;
-let WS_SYSMENU: u32      = 0x00080000;
-let WS_THICKFRAME: u32   = 0x00040000;
-let WS_MINIMIZEBOX: u32  = 0x00020000;
-let WS_MAXIMIZEBOX: u32  = 0x00010000;
-let WS_POPUP: u32        = 0x80000000;
-let WS_CHILD: u32        = 0x40000000;
-let WS_MINIMIZE: u32     = 0x20000000;
-let WS_VISIBLE: u32      = 0x10000000;
-let WS_DISABLED: u32     = 0x08000000;
-let WS_CLIPSIBLINGS: u32 = 0x04000000;
-let WS_CLIPCHILDREN: u32 = 0x02000000;
-let WS_MAXIMIZE: u32     = 0x01000000;
-let WS_BORDER: u32       = 0x00800000;
-let WS_DLGFRAME: u32     = 0x00400000;
-let WS_VSCROLL: u32      = 0x00200000;
-let WS_HSCROLL: u32      = 0x00100000;
-let WS_GROUP: u32        = 0x00020000;
-let WS_TABSTOP: u32      = 0x00010000;
-let WS_OVERLAPPEDWINDOW  = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+const WS_OVERLAPPED   = 0x00000000;
+const WS_CAPTION      = 0x00C00000;
+const WS_SYSMENU      = 0x00080000;
+const WS_THICKFRAME   = 0x00040000;
+const WS_MINIMIZEBOX  = 0x00020000;
+const WS_MAXIMIZEBOX  = 0x00010000;
+const WS_POPUP        = 0x80000000;
+const WS_CHILD        = 0x40000000;
+const WS_MINIMIZE     = 0x20000000;
+const WS_VISIBLE      = 0x10000000;
+const WS_DISABLED     = 0x08000000;
+const WS_CLIPSIBLINGS = 0x04000000;
+const WS_CLIPCHILDREN = 0x02000000;
+const WS_MAXIMIZE     = 0x01000000;
+const WS_BORDER       = 0x00800000;
+const WS_DLGFRAME     = 0x00400000;
+const WS_VSCROLL      = 0x00200000;
+const WS_HSCROLL      = 0x00100000;
+const WS_GROUP        = 0x00020000;
+const WS_TABSTOP      = 0x00010000;
 
-let CW_USEDEFAULT: i32   = 0x80000000;
+const WS_OVERLAPPEDWINDOW =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
+    WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 
-let PFD_DRAW_TO_WINDOW: u32 = 0x00000004;
-let PFD_SUPPORT_OPENGL: u32 = 0x00000020;
-let PFD_DOUBLEBUFFER: u32   = 0x00000001;
-let PFD_TYPE_RGBA: u8       = 0;
-let PFD_MAIN_PLANE: u8      = 0;
+const CW_USEDEFAULT   = 0x80000000;
 
-let WGL_CONTEXT_MAJOR_VERSION_ARB:    i32 = 0x2091;
-let WGL_CONTEXT_MINOR_VERSION_ARB:    i32 = 0x2092;
-let WGL_CONTEXT_FLAGS_ARB:            i32 = 0x2094;
-let WGL_CONTEXT_PROFILE_MASK_ARB:     i32 = 0x9126;
-let WGL_CONTEXT_CORE_PROFILE_BIT_ARB: i32 = 0x00000001;
+const PFD_DRAW_TO_WINDOW = 0x00000004;
+const PFD_SUPPORT_OPENGL = 0x00000020;
+const PFD_DOUBLEBUFFER   = 0x00000001;
+const PFD_TYPE_RGBA      = 0;
+const PFD_MAIN_PLANE     = 0;
 
-let SW_HIDE: i32            = 0;
-let SW_SHOWNORMAL: i32      = 1;
-let SW_NORMAL: i32          = 1;
-let SW_SHOWMINIMIZED: i32   = 2;
-let SW_SHOWMAXIMIZED: i32   = 3;
-let SW_MAXIMIZE: i32        = 3;
-let SW_SHOWNOACTIVATE: i32  = 4;
-let SW_SHOW: i32            = 5;
-let SW_MINIMIZE: i32        = 6;
-let SW_SHOWMINNOACTIVE: i32 = 7;
-let SW_SHOWNA: i32          = 8;
-let SW_RESTORE: i32         = 9;
-let SW_SHOWDEFAULT: i32     = 10;
-let SW_FORCEMINIMIZE: i32   = 11;
+const WGL_CONTEXT_MAJOR_VERSION_ARB    = 0x2091;
+const WGL_CONTEXT_MINOR_VERSION_ARB    = 0x2092;
+const WGL_CONTEXT_FLAGS_ARB            = 0x2094;
+const WGL_CONTEXT_PROFILE_MASK_ARB     = 0x9126;
+const WGL_CONTEXT_CORE_PROFILE_BIT_ARB = 0x00000001;
+
+const SW_HIDE            = 0;
+const SW_SHOWNORMAL      = 1;
+const SW_NORMAL          = 1;
+const SW_SHOWMINIMIZED   = 2;
+const SW_SHOWMAXIMIZED   = 3;
+const SW_MAXIMIZE        = 3;
+const SW_SHOWNOACTIVATE  = 4;
+const SW_SHOW            = 5;
+const SW_MINIMIZE        = 6;
+const SW_SHOWMINNOACTIVE = 7;
+const SW_SHOWNA          = 8;
+const SW_RESTORE         = 9;
+const SW_SHOWDEFAULT     = 10;
+const SW_FORCEMINIMIZE   = 11;
+
+const WM_NULL               = 0x0000;
+const WM_CREATE             = 0x0001;
+const WM_DESTROY            = 0x0002;
+const WM_MOVE               = 0x0003;
+const WM_SIZE               = 0x0005;
+const WM_ACTIVATE           = 0x0006;
+const WA_INACTIVE           = 0;
+const WA_ACTIVE             = 1;
+const WA_CLICKACTIVE        = 2;
+const WM_SETFOCUS           = 0x0007;
+const WM_KILLFOCUS          = 0x0008;
+const WM_ENABLE             = 0x000a;
+const WM_SETREDRAW          = 0x000b;
+const WM_SETTEXT            = 0x000c;
+const WM_GETTEXT            = 0x000d;
+const WM_GETTEXTLENGTH      = 0x000e;
+const WM_PAINT              = 0x000f;
+const WM_CLOSE              = 0x0010;
+const WM_QUERYENDSESSION    = 0x0011;
+const WM_QUERYOPEN          = 0x0013;
+const WM_ENDSESSION         = 0x0016;
+const WM_QUIT               = 0x0012;
+const WM_ERASEBKGND         = 0x0014;
+const WM_SYSCOLORCHANGE     = 0x0015;
+const WM_SHOWWINDOW         = 0x0018;
+const WM_WININICHANGE       = 0x001a;
+const WM_SETTINGCHANGE      = WM_WININICHANGE;
+const WM_DEVMODECHANGE      = 0x001b;
+const WM_ACTIVATEAPP        = 0x001c;
+const WM_FONTCHANGE         = 0x001d;
+const WM_TIMECHANGE         = 0x001e;
+const WM_CANCELMODE         = 0x001f;
+const WM_SETCURSOR          = 0x0020;
+const WM_MOUSEACTIVATE      = 0x0021;
+const WM_CHILDACTIVATE      = 0x0022;
+const WM_QUEUESYNC          = 0x0023;
+const WM_PAINTICON          = 0x0026;
+const WM_ICONERASEBKGND     = 0x0027;
+const WM_NEXTDLGCTL         = 0x0028;
+const WM_SPOOLERSTATUS      = 0x002a;
+const WM_DRAWITEM           = 0x002b;
+const WM_MEASUREITEM        = 0x002c;
+const WM_DELETEITEM         = 0x002d;
+const WM_VKEYTOITEM         = 0x002e;
+const WM_CHARTOITEM         = 0x002f;
+const WM_SETFONT            = 0x0030;
+const WM_GETFONT            = 0x0031;
+const WM_SETHOTKEY          = 0x0032;
+const WM_GETHOTKEY          = 0x0033;
+const WM_QUERYDRAGICON      = 0x0037;
+const WM_COMPAREITEM        = 0x0039;
+const WM_GETOBJECT          = 0x003d;
+const WM_COMPACTING         = 0x0041;
+const WM_COMMNOTIFY         = 0x0044;
+const WM_WINDOWPOSCHANGING  = 0x0046;
+const WM_WINDOWPOSCHANGED   = 0x0047;
+const WM_POWER              = 0x0048;
+const WM_NOTIFY             = 0x004E;
+const WM_INPUTLANGCHANGEREQUEST = 0x0050;
+const WM_INPUTLANGCHANGE    = 0x0051;
+const WM_TCARD              = 0x0052;
+const WM_HELP               = 0x0053;
+const WM_USERCHANGED        = 0x0054;
+const WM_NOTIFYFORMAT       = 0x0055;
+const NFR_ANSIULT           = 1;
+const NFR_UNICODEULT        = 2;
+const NF_QUERYAM            = 3;
+const NF_REQUERYAM          = 4;
+const WM_CONTEXTMENU        = 0x007B;
+const WM_STYLECHANGING      = 0x007C;
+const WM_STYLECHANGED       = 0x007D;
+const WM_DISPLAYCHANGE      = 0x007E;
+const WM_GETICON            = 0x007F;
+const WM_SETICON            = 0x0080;
+const WM_NCCREATE           = 0x0081;
+const WM_NCDESTROY          = 0x0082;
+const WM_NCCALCSIZE         = 0x0083;
+const WM_NCHITTEST          = 0x0084;
+const WM_NCPAINT            = 0x0085;
+const WM_NCACTIVATE         = 0x0086;
+const WM_GETDLGCODE         = 0x0087;
+const WM_SYNCPAINT          = 0x0088;
+const WM_NCMOUSEMOVE        = 0x00A0;
+const WM_NCLBUTTONDOWN      = 0x00A1;
+const WM_NCLBUTTONUP        = 0x00A2;
+const WM_NCLBUTTONDBLCLK    = 0x00A3;
+const WM_NCRBUTTONDOWN      = 0x00A4;
+const WM_NCRBUTTONUP        = 0x00A5;
+const WM_NCRBUTTONDBLCLK    = 0x00A6;
+const WM_NCMBUTTONDOWN      = 0x00A7;
+const WM_NCMBUTTONUP        = 0x00A8;
+const WM_NCMBUTTONDBLCLK    = 0x00A9;
+const WM_NCXBUTTONDOWN      = 0x00AB;
+const WM_NCXBUTTONUP        = 0x00AC;
+const WM_NCXBUTTONDBLCLK    = 0x00AD;
+const WM_INPUT_DEVICE_CHANGE = 0x00FE;
+const WM_INPUT              = 0x00FF;
+const WM_KEYFIRST           = 0x0100;
+const WM_KEYDOWN            = 0x0100;
+const WM_KEYUP              = 0x0101;
+const WM_CHAR               = 0x0102;
+const WM_DEADCHAR           = 0x0103;
+const WM_SYSKEYDOWN         = 0x0104;
+const WM_SYSKEYUP           = 0x0105;
+const WM_SYSCHAR            = 0x0106;
+const WM_SYSDEADCHAR        = 0x0107;
+const WM_UNICHAR            = 0x0109;
+const WM_KEYLAST            = 0x0109;
+const UNICODE_NOCHARAM      = 0xFFFF;
+const WM_IME_STARTCOMPOSITION = 0x010D;
+const WM_IME_ENDCOMPOSITION = 0x010E;
+const WM_IME_COMPOSITION    = 0x010F;
+const WM_IME_KEYLAST        = 0x010F;
+const WM_INITDIALOG         = 0x0110;
+const WM_COMMAND            = 0x0111;
+const WM_SYSCOMMAND         = 0x0112;
+const WM_TIMER              = 0x0113;
+const WM_HSCROLL            = 0x0114;
+const WM_VSCROLL            = 0x0115;
+const WM_INITMENU           = 0x0116;
+const WM_INITMENUPOPUP      = 0x0117;
+const WM_GESTURE            = 0x0119;
+const WM_GESTURENOTIFY      = 0x011A;
+const WM_MENUSELECT         = 0x011F;
+const WM_MENUCHAR           = 0x0120;
+const WM_ENTERIDLE          = 0x0121;
+const WM_MENURBUTTONUP      = 0x0122;
+const WM_MENUDRAG           = 0x0123;
+const WM_MENUGETOBJECT      = 0x0124;
+const WM_UNINITMENUPOPUP    = 0x0125;
+const WM_MENUCOMMAND        = 0x0126;
+const WM_CHANGEUISTATE      = 0x0127;
+const WM_UPDATEUISTATE      = 0x0128;
+const WM_QUERYUISTATE       = 0x0129;
+const UIS_SET               = 1;
+const UIS_CLEAR             = 2;
+const UIS_INITIALIZE        = 3;
+const UISF_HIDEFOCUS        = 0x1;
+const UISF_HIDEACCEL        = 0x2;
+const UISF_ACTIVE           = 0x4;
+const WM_CTLCOLORMSGBOX     = 0x0132;
+const WM_CTLCOLOREDIT       = 0x0133;
+const WM_CTLCOLORLISTBOX    = 0x0134;
+const WM_CTLCOLORBTN        = 0x0135;
+const WM_CTLCOLORDLG        = 0x0136;
+const WM_CTLCOLORSCROLLBAR  = 0x0137;
+const WM_CTLCOLORSTATIC     = 0x0138;
+const MN_GETHMENU           = 0x01E1;
+const WM_MOUSEFIRST         = 0x0200;
+const WM_MOUSEMOVE          = 0x0200;
+const WM_LBUTTONDOWN        = 0x0201;
+const WM_LBUTTONUP          = 0x0202;
+const WM_LBUTTONDBLCLK      = 0x0203;
+const WM_RBUTTONDOWN        = 0x0204;
+const WM_RBUTTONUP          = 0x0205;
+const WM_RBUTTONDBLCLK      = 0x0206;
+const WM_MBUTTONDOWN        = 0x0207;
+const WM_MBUTTONUP          = 0x0208;
+const WM_MBUTTONDBLCLK      = 0x0209;
+const WM_MOUSEWHEEL         = 0x020A;
+const WM_XBUTTONDOWN        = 0x020B;
+const WM_XBUTTONUP          = 0x020C;
+const WM_XBUTTONDBLCLK      = 0x020D;
+const WM_MOUSEHWHEEL        = 0x020E;
+const WM_MOUSELAST          = 0x020E;
+
+const PM_REMOVE             = 1;
 
 fn get_gl_proc_address(gl32_lib: Handle, name: *u8) -> *void {
     let address = wglGetProcAddress(name);
