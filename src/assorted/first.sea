@@ -32,8 +32,8 @@ fn print_direction(dir: Direction) {
 
 fn get_direction_instruction(dir: Direction) -> String {
     switch dir {
-        NORTH: return "Go upwards\n";
-        SOUTH: return "Don't go upwards\n";
+        NORTH: { return "Go upwards\n"; }
+        SOUTH: { return "Don't go upwards\n"; }
         WEST:  return "Go left\n";
         EAST:  return "Go right\n";
         _:     return "That's not a direction\n";

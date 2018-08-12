@@ -1447,9 +1447,11 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
 };
 
 
-#define TYPE_FLAG_SIZE_NOT_COMPUTED 0x01
-#define TYPE_FLAG_UNRESOLVED        0x02
-#define TYPE_FLAG_UNRESOLVED_CHILD  0x04
+enum {
+    TYPE_FLAG_SIZE_NOT_COMPUTED = 0x01,
+    TYPE_FLAG_UNRESOLVED        = 0x02,
+    TYPE_FLAG_UNRESOLVED_CHILD  = 0x04,
+};
 
 typedef struct Type Type;
 typedef struct Type_List Type_List;
@@ -2209,12 +2211,19 @@ Type *get_pointer_type(Context *context, Type *type) {
         }
     }
 
+    if (!(type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD))) {
+        type->pointer_type->flags &= ~TYPE_FLAG_UNRESOLVED_CHILD;
+    }
+
     return type->pointer_type;
 }
 
 Type *get_array_type(Context *context, Type *type, u64 length) {
     for (Type_List* node = type->array_types; node != null; node = node->next) {
         if (node->type.array.length == length) {
+            if (!(type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD))) {
+                node->type.flags &= ~TYPE_FLAG_UNRESOLVED_CHILD;
+            }
             return &node->type;
         }
     }
@@ -3507,7 +3516,7 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
 
     bool unresolved = false;
     for (u32 p = 0; p < signature.param_count; p += 1) {
-        if (signature.params[p].type->flags & TYPE_FLAG_UNRESOLVED) {
+        if (signature.params[p].type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
             unresolved = true;
             break;
         }
@@ -4973,6 +4982,7 @@ Stmt *parse_case_body(Context *context, Scope *scope, Token *t, u32 *length) {
             *length = t - t_start;
             return null;
         }
+        t += 1;
     } else {
         u32 body_length;
         body = parse_stmts(context, scope, t, &body_length, true);
@@ -5759,7 +5769,7 @@ bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32
         switch (body[i].kind) {
             case TOKEN_KEYWORD_FN: {
                 u32 length;
-                Fn* fn = parse_fn(context, scope, &body[i], &length);
+                Fn *fn = parse_fn(context, scope, &body[i], &length);
 
                 if (fn == null) {
                     valid = false;
@@ -6709,9 +6719,6 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
 
         switch (type->kind) {
             case TYPE_POINTER: {
-                assert(type->flags & TYPE_FLAG_UNRESOLVED_CHILD);
-                assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
-
                 Prefix* new = arena_new(&context->stack, Prefix);
                 new->kind = PREFIX_POINTER;
                 new->link = prefix;
@@ -6797,55 +6804,57 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
 
             case TYPE_UNRESOLVED_NAME: {
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
-                assert(type->flags & TYPE_FLAG_UNRESOLVED);
 
-                Type *new = parse_user_type_name(scope, type->unresolved_name);
+                if (type->flags & TYPE_FLAG_UNRESOLVED) {
+                    Type *new = parse_user_type_name(scope, type->unresolved_name);
 
-                if (new == null) {
-                    print_file_pos(pos);
-                    printf("No such type in scope: '%s'\n", type->unresolved_name);
-                    return TYPECHECK_RESULT_BAD;
+                    if (new == null) {
+                        print_file_pos(pos);
+                        printf("No such type in scope: '%s'\n", type->unresolved_name);
+                        return TYPECHECK_RESULT_BAD;
+                    }
+
+                    type = new;
                 }
-
-                type = new;
 
                 done = true;
             } break;
 
             case TYPE_FN_POINTER: {
-                assert(type->flags & TYPE_FLAG_UNRESOLVED_CHILD);
-                assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
+                if (type->flags & TYPE_FLAG_UNRESOLVED_CHILD) {
+                    Fn_Signature signature = type->fn_signature;
 
-                Fn_Signature signature = type->fn_signature;
+                    for (u32 p = 0; p < signature.param_count; p += 1) {
+                        Type **param = &signature.params[p].type;
+                        Typecheck_Result r = resolve_type(context, scope, &signature.params[p].type, pos);
+                        if (r != TYPECHECK_RESULT_DONE) return r;
+                    }
 
-                for (u32 p = 0; p < signature.param_count; p += 1) {
-                    Typecheck_Result r = resolve_type(context, scope, &signature.params[p].type, pos);
+                    Typecheck_Result r = resolve_type(context, scope, &signature.return_type, pos);
                     if (r != TYPECHECK_RESULT_DONE) return r;
+
+                    type = fn_signature_canonicalize(context, &signature);
                 }
 
-                Typecheck_Result r = resolve_type(context, scope, &signature.return_type, pos);
-                if (r != TYPECHECK_RESULT_DONE) return r;
-
-                type = fn_signature_canonicalize(context, &signature);
                 done = true;
             } break;
 
             case TYPE_STRUCT: {
-                assert(type->flags & TYPE_FLAG_UNRESOLVED_CHILD);
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED));
 
-                for (u32 m = 0; m < type->structure.member_count; m += 1) {
-                    Typecheck_Result r = resolve_type(context, scope, &type->structure.members[m].type, pos);
-                    if (r != TYPECHECK_RESULT_DONE) return r;
-                }
+                if (type->flags & TYPE_FLAG_UNRESOLVED_CHILD) {
+                    for (u32 m = 0; m < type->structure.member_count; m += 1) {
+                        Typecheck_Result r = resolve_type(context, scope, &type->structure.members[m].type, pos);
+                        if (r != TYPECHECK_RESULT_DONE) return r;
+                    }
 
-                type->flags &= ~TYPE_FLAG_UNRESOLVED_CHILD;
+                    type->flags &= ~TYPE_FLAG_UNRESOLVED_CHILD;
+                }
 
                 if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
                     Typecheck_Result r = compute_size_of_struct(type);
                     if (r != TYPECHECK_RESULT_DONE) return r;
                 }
-
 
                 done = true;
             } break;
@@ -6915,6 +6924,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 // (I pressume) because C does a lot of casts implicitly.
                 static_assert(TYPE_DEFAULT_INT == TYPE_I64, "Need to potentially generate upcasts if this assert fails!");
                 expr->type = solidify_to;
+                strong = false;
             } else {
                 expr->type = var->type;
             }
@@ -7452,6 +7462,11 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 Decl *fn_decl = find_declaration(scope, expr->call.unresolved_name, DECL_FN);
 
                 if (fn_decl != null) {
+                    Type *signature = fn_decl->fn->signature_type;
+                    if (signature->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
+                        return TYPECHECK_EXPR_DEPENDENT;
+                    }
+
                     expr->call.callee = fn_decl->fn;
                 } else {
                     Var *var = find_var(scope, expr->call.unresolved_name, &expr->pos);
@@ -7932,10 +7947,17 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     Var *key_var = find_var(scope, c->key_identifier, &c->pos);
 
                     if (key_var != null) {
+                        if (key_var->flags & VAR_FLAG_GLOBAL) {
+                            Global_Var *global = &context->global_vars[key_var->global_index];
+                            if (!global->checked) {
+                                return TYPECHECK_RESULT_DEPENDENT;
+                            }
+                        }
+
                         c->key_is_identifier = false;
                         c->key_expr = arena_new(&context->arena, Expr);
                         *c->key_expr = (Expr) {
-                            .kind = EXPR_STATIC_MEMBER_ACCESS,
+                            .kind = EXPR_VARIABLE,
                             .flags = EXPR_FLAG_ADDRESSABLE,
                             .type = key_var->type,
                             .pos = c->pos,
@@ -7947,7 +7969,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                         if (automatch_enum != null) {
                             printf(" or member of 'enum %s'", automatch_enum->enumeration.name);
                         }
-                        printf(": %s", c->key_identifier);
+                        printf(": %s\n", c->key_identifier);
                         return TYPECHECK_EXPR_BAD;
                     }
                 }
@@ -8141,8 +8163,6 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             if (global->compute_at_runtime) {
                 return EVAL_DO_AT_RUNTIME;
             } else if (global->valid) {
-                u64 other_size = type_size_of(global->var->type);
-                assert(other_size == type_size);
                 u8* other_value = &(global->in_rdata? context->seg_rdata : context->seg_data)[global->data_offset];
                 mem_copy(other_value, result_into, type_size);
                 return EVAL_OK;
@@ -8661,7 +8681,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
 
     if (global->initial_expr != null) {
         Type *resolve_to = global->var->type;
-        if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
+        if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_DEFAULT_INT];
 
         Typecheck_Expr_Result r = typecheck_expr(context, scope, global->initial_expr, resolve_to);
         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
@@ -8867,21 +8887,21 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                     },
                 }));
 
-                buf_push(queue->items, ((Typecheck_Item) {
-                    .kind = TYPECHECK_FN_BODY,
-                    .scope = scope,
-                    .fn = fn,
-                }));
-
-                buf_push(queue->all_fns, fn);
-
                 if (fn->kind == FN_KIND_NORMAL) {
+                    buf_push(queue->items, ((Typecheck_Item) {
+                        .kind = TYPECHECK_FN_BODY,
+                        .scope = scope,
+                        .fn = fn,
+                    }));
+
                     assert(fn->body.local_vars == null);
                     fn->body.local_vars = (Var**) arena_alloc(&context->arena, fn->body.var_count * sizeof(Var*));
 
                     typecheck_queue_include_stmts(context, queue, fn->body.first_stmt);
                     typecheck_queue_include_scope(context, queue, &fn->body.scope);
                 }
+
+                buf_push(queue->all_fns, fn);
             } break;
 
             case DECL_VAR: {
