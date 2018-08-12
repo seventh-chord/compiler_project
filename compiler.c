@@ -7006,11 +7006,26 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 expr->type = solidify_to;
             }
 
-            if (expr->type->kind == TYPE_ARRAY && (expr->type->flags & TYPE_FLAG_UNRESOLVED) && expr->type->array.length_expr == null) {
-                // Infer array length
-                u64 infered_length = expr->compound.count;
-                Type *array_of_type = expr->type->array.of;
-                expr->type = get_array_type(context, array_of_type, infered_length);
+            // Infer array length if it is not given, so we can write '[]Foo { ... }', without specifying
+            // a length explicitly.
+            if (expr->type->kind == TYPE_ARRAY) {
+                Type **array_layer = &expr->type;
+                Expr *compound_expr = expr;
+
+                while ((*array_layer)->kind == TYPE_ARRAY && compound_expr->kind == EXPR_COMPOUND) {
+                    if (((*array_layer)->flags & TYPE_FLAG_UNRESOLVED) && (*array_layer)->array.length_expr == null) {
+                        u64 infered_length = compound_expr->compound.count;
+                        Type *array_of_type = (*array_layer)->array.of;
+                        *array_layer = get_array_type(context, array_of_type, infered_length);
+                    }
+
+                    if (compound_expr->compound.count <= 0) {
+                        break;
+                    }
+
+                    array_layer = &((*array_layer)->array.of);
+                    compound_expr = compound_expr->compound.content[0].expr;
+                }
             }
 
             Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);
