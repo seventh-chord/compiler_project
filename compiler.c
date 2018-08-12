@@ -11527,6 +11527,9 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                 if (place.kind == PLACE_ADDRESS) {
                     register_allocator_enter_frame(context, reg_allocator);
                     u32 reserves_for_rhs = machinecode_expr_reserves(expr->binary.right);
+                    if (expr->binary.op == BINARY_SHL || expr->binary.op == BINARY_SHR) {
+                        reserves_for_rhs |= RESERVE_RCX;
+                    }
                     left_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves_for_rhs);
                 } else {
                     left_reg = place.reg;
@@ -11536,7 +11539,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
                 register_allocator_enter_frame(context, reg_allocator);
 
-                u32 reserves_for_result = 0;
+                u32 reserves_for_result = machinecode_expr_reserves(expr->binary.right);
                 if (expr->binary.op == BINARY_MUL) {
                     reserves_for_result |= RESERVE_RAX;
                 }

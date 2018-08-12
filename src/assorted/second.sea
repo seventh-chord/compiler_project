@@ -400,6 +400,7 @@ fn shifty_shafts() {
         let mul = i * 2;
         let shift = i << 1;
         assert(i << 1 == mul, "This is not a binary machine!");
+        assert(i << 1 == i << 1, "This was producing register allocation errors at some point");
     }
 
     assert(y == -5, "Hah, we got to test scopes too!");
