@@ -13456,8 +13456,9 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     u64 text_length = buf_length(context->seg_text);
     u64 data_length = buf_length(context->seg_data);
 
-    u32 section_count = 2;
+    u32 section_count = 1; // .text
     if (data_length > 0) section_count += 1;
+    if (buf_length(context->seg_rdata) > 0 || debug_path != null || !buf_empty(context->imports)) section_count += 1;
 
     u64 in_file_alignment = 0x200;
     // NB If this becomes lower than the page size, stuff like page protection won't work anymore. That will also
@@ -13529,75 +13530,81 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     }
 
     // Write import data into .rdata
-    typedef struct Import_Entry {
-        u32 lookup_table_address;
-        u32 timestamp;
-        u32 forwarder_chain;
-        u32 name_address;
-        u32 address_table_address;
-    } Import_Entry;
 
     u64 rdata_import_offset = buf_length(rdata);
-    str_push_zeroes(&rdata, (buf_length(context->imports) + 1) * sizeof(Import_Entry));
-    for (u64 i = 0; i < buf_length(context->imports); i += 1) {
-        Library_Import* import = &context->imports[i];
-        if (!parse_library(context, import)) {
-            return false;
-        }
+    u64 import_header_size;
 
-        assert(import->dll_name != null);
+    if (!buf_empty(context->imports)) {
+        typedef struct Import_Entry {
+            u32 lookup_table_address;
+            u32 timestamp;
+            u32 forwarder_chain;
+            u32 name_address;
+            u32 address_table_address;
+        } Import_Entry;
 
-        u64 table_size = sizeof(u64) * (1 + buf_length(import->function_names));
-        u64 address_table_start = buf_length(rdata);
-        u64 lookup_table_start = address_table_start + table_size;
-
-        str_push_zeroes(&rdata, 2*table_size); // Make space for the address & lookup table
-
-        u64 name_table_start = buf_length(rdata);
-        str_push_cstr(&rdata, import->dll_name);
-        buf_push(rdata, 0);
-
-        for (u64 j = 0; j < buf_length(import->function_names); j += 1) {
-            u64 function_name_address = rdata_memory_start + buf_length(rdata);
-            if ((function_name_address & 0x7fffffff) != function_name_address) {
-                panic("Import data will be invalid, because it has functions at to high rvas: %x!", function_name_address);
+        import_header_size = (buf_length(context->imports) + 1) * sizeof(Import_Entry);
+        str_push_zeroes(&rdata, import_header_size);
+        for (u64 i = 0; i < buf_length(context->imports); i += 1) {
+            Library_Import* import = &context->imports[i];
+            if (!parse_library(context, import)) {
+                return false;
             }
 
-            u8 *name = import->function_names[j];
-            u16 hint = import->function_hints[j];
+            assert(import->dll_name != null);
 
-            buf_push(rdata, (u8) (hint & 0xff));
-            buf_push(rdata, (u8) ((hint >> 8) & 0xff));
-            str_push_cstr(&rdata, name);
+            u64 table_size = sizeof(u64) * (1 + buf_length(import->function_names));
+            u64 address_table_start = buf_length(rdata);
+            u64 lookup_table_start = address_table_start + table_size;
+
+            str_push_zeroes(&rdata, 2*table_size); // Make space for the address & lookup table
+
+            u64 name_table_start = buf_length(rdata);
+            str_push_cstr(&rdata, import->dll_name);
             buf_push(rdata, 0);
-            if (buf_length(rdata) & 1) { buf_push(rdata, 0); } // align
 
-            *((u64*) (rdata + address_table_start + sizeof(u64)*j)) = function_name_address;
-            *((u64*) (rdata + lookup_table_start  + sizeof(u64)*j)) = function_name_address;
-        }
+            for (u64 j = 0; j < buf_length(import->function_names); j += 1) {
+                u64 function_name_address = rdata_memory_start + buf_length(rdata);
+                if ((function_name_address & 0x7fffffff) != function_name_address) {
+                    panic("Import data will be invalid, because it has functions at to high rvas: %x!", function_name_address);
+                }
 
-        // Write into the space we prefilled before the loop
-        Import_Entry* entry = (void*) (rdata + rdata_import_offset + i*sizeof(Import_Entry));
-        entry->address_table_address = rdata_memory_start + address_table_start;
-        entry->lookup_table_address  = rdata_memory_start + lookup_table_start;
-        entry->name_address          = rdata_memory_start + name_table_start;
+                u8 *name = import->function_names[j];
+                u16 hint = import->function_hints[j];
 
-        // Apply fixups for this library
-        buf_foreach (Rip_Fixup, fixup, context->fixups) {
-            if (fixup->kind != RIP_FIXUP_IMPORT_CALL || fixup->import_index.library != i) continue;
-            assert(fixup->rip_offset + 4 <= fixup->next_instruction);
+                buf_push(rdata, (u8) (hint & 0xff));
+                buf_push(rdata, (u8) ((hint >> 8) & 0xff));
+                str_push_cstr(&rdata, name);
+                buf_push(rdata, 0);
+                if (buf_length(rdata) & 1) { buf_push(rdata, 0); } // align
 
-            u32 function = fixup->import_index.function;
-            u64 function_address = rdata_memory_start + address_table_start + sizeof(u64)*function;
+                *((u64*) (rdata + address_table_start + sizeof(u64)*j)) = function_name_address;
+                *((u64*) (rdata + lookup_table_start  + sizeof(u64)*j)) = function_name_address;
+            }
 
-            i32* text_value = (i32*) (context->seg_text + fixup->rip_offset);
-            assert(*text_value == 0xdeadbeef);
-            *text_value = function_address - (text_memory_start + fixup->next_instruction);
+            // Write into the space we prefilled before the loop
+            Import_Entry* entry = (void*) (rdata + rdata_import_offset + i*sizeof(Import_Entry));
+            entry->address_table_address = rdata_memory_start + address_table_start;
+            entry->lookup_table_address  = rdata_memory_start + lookup_table_start;
+            entry->name_address          = rdata_memory_start + name_table_start;
+
+            // Apply fixups for this library
+            buf_foreach (Rip_Fixup, fixup, context->fixups) {
+                if (fixup->kind != RIP_FIXUP_IMPORT_CALL || fixup->import_index.library != i) continue;
+                assert(fixup->rip_offset + 4 <= fixup->next_instruction);
+
+                u32 function = fixup->import_index.function;
+                u64 function_address = rdata_memory_start + address_table_start + sizeof(u64)*function;
+
+                i32* text_value = (i32*) (context->seg_text + fixup->rip_offset);
+                assert(*text_value == 0xdeadbeef);
+                *text_value = function_address - (text_memory_start + fixup->next_instruction);
+            }
         }
     }
-    u64 rdata_length = buf_length(rdata);
 
     // Knowing rdata size, we can compute final size
+    u64 rdata_length = buf_length(rdata);
     u64 file_image_size   = rdata_file_start   + round_to_next(rdata_length, in_file_alignment);
     u64 memory_image_size = rdata_memory_start + round_to_next(rdata_length, in_memory_alignment);
 
@@ -13646,14 +13653,16 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
         data_header->pointer_to_raw_data = data_file_start;
     }
 
-    Section_Header* rdata_header = &section_headers[section_index];
-    section_index += 1;
-    mem_copy(".rdata", rdata_header->name, 6);
-    rdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
-    rdata_header->virtual_size = rdata_length;
-    rdata_header->virtual_address = rdata_memory_start;
-    rdata_header->size_of_raw_data = round_to_next(rdata_length, in_file_alignment);
-    rdata_header->pointer_to_raw_data = rdata_file_start;
+    if (rdata_length > 0) {
+        Section_Header* rdata_header = &section_headers[section_index];
+        section_index += 1;
+        mem_copy(".rdata", rdata_header->name, 6);
+        rdata_header->flags = SECTION_FLAGS_READ | SECTION_FLAGS_INITIALIZED_DATA;
+        rdata_header->virtual_size = rdata_length;
+        rdata_header->virtual_address = rdata_memory_start;
+        rdata_header->size_of_raw_data = round_to_next(rdata_length, in_file_alignment);
+        rdata_header->pointer_to_raw_data = rdata_file_start;
+    }
 
     // Allocate space and fill in the image
     u8* output_file = alloc(file_image_size);
@@ -13731,8 +13740,10 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     image.heap_commit   = 0x100000;
 
     image.number_of_rva_and_sizes = 16;
-    image.data_directories[1].virtual_address = rdata_memory_start + rdata_import_offset;
-    image.data_directories[1].size = (buf_length(context->imports) + 1)*sizeof(Import_Entry);
+    if (import_header_size > 0) {
+        image.data_directories[1].virtual_address = rdata_memory_start + rdata_import_offset;
+        image.data_directories[1].size = import_header_size;
+    }
     image.data_directories[6].virtual_address = rdata_memory_start + rdata_debug_offset;
     image.data_directories[6].size = debug_size;
 

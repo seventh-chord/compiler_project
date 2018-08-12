@@ -2,6 +2,8 @@
 @echo RUNNING TESTS
 @echo.
 
+build\sea src\assorted\zeroth.sea build\test0.exe -r
+@echo.
 build\sea src\assorted\first.sea build\test1.exe -r
 @echo.
 build\sea src\assorted\second.sea build\test2.exe -r
