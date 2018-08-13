@@ -1839,6 +1839,8 @@ struct Expr { // 'typedef'd earlier!
 };
 
 typedef struct Switch_Case_Key {
+    File_Pos pos;
+
     bool is_identifier;
     union { u8 *identifier; Expr *expr; };
     u64 value;
@@ -5220,6 +5222,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                         while (true) {
                             Key_Entry *key_entry = arena_new(&context->stack, Key_Entry);
                             last_key = ((first_key == null)? (first_key = key_entry) : (last_key->next = key_entry));
+                            key_entry->key.pos = t[0].pos;
 
                             if (t[0].kind == TOKEN_IDENTIFIER && (t[1].kind == TOKEN_COLON || t[1].kind == TOKEN_COMMA)) {
                                 key_entry->key.is_identifier = true;
@@ -8077,6 +8080,24 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                         } break;
                         case EVAL_OK: break;
                         default: assert(false);
+                    }
+
+
+                    for (u32 i2 = 0; i2 <= i; i2 += 1) {
+                        Switch_Case *c2 = &stmt->switch_.cases[i2];
+                        u32 max_j = c2 == c? j : c2->key_count;
+                        for (u32 j2 = 0; j2 < max_j; j2 += 1) {
+                            Switch_Case_Key *key2 = &c2->keys[j2];
+                            if (key2->value == key->value) {
+                                print_file_pos(&key->pos);
+                                printf("Multiple cases with key %u: ", key->value);
+                                if (key->is_identifier)  printf(key->identifier);  else print_expr(context, key->expr);
+                                printf(" and ");
+                                if (key2->is_identifier) printf(key2->identifier); else print_expr(context, key2->expr);
+                                printf(". First case on line %u\n", key2->pos.line);
+                                return TYPECHECK_RESULT_BAD;
+                            }
+                        }
                     }
                 }
 
