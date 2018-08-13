@@ -1838,12 +1838,17 @@ struct Expr { // 'typedef'd earlier!
     };
 };
 
+typedef struct Switch_Case_Key {
+    bool is_identifier;
+    union { u8 *identifier; Expr *expr; };
+    u64 value;
+} Switch_Case_Key;
+
 typedef struct Switch_Case {
     File_Pos pos;
 
-    bool key_is_identifier;
-    union { u8 *key_identifier; Expr *key_expr; };
-    u64 key_value;
+    u32 key_count;
+    Switch_Case_Key *keys;
 
     Stmt *body;
     Scope *scope;
@@ -3033,10 +3038,16 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                 for (u32 i = 0; i <= indent_level; i += 1) printf("    ");
 
                 Switch_Case *c = &stmt->switch_.cases[i];
-                if (c->key_is_identifier) {
-                    printf(c->key_identifier);
-                } else {
-                    print_expr(context, c->key_expr);
+
+                for (u32 i = 0; i < c->key_count; i += 1) {
+                    Switch_Case_Key *key = &c->keys[i];
+
+                    if (i > 0) printf(", ");
+                    if (key->is_identifier) {
+                        printf(key->identifier);
+                    } else {
+                        print_expr(context, key->expr);
+                    }
                 }
                 printf(": {\n");
 
@@ -5138,7 +5149,15 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                 t += 1;
 
                 typedef struct Entry Entry;
+                typedef struct Key_Entry Key_Entry;
+
+                struct Key_Entry {
+                    Switch_Case_Key key;
+                    Key_Entry *next;
+                };
                 struct Entry {
+                    Key_Entry *first_key;
+
                     Switch_Case c;
                     Entry *next;
                 };
@@ -5191,31 +5210,52 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
 
                         entry->c.pos = t[0].pos;
                         entry->c.scope = arena_new(&context->arena, Scope);
-
                         entry->c.scope->parent = scope;
                         entry->c.scope->fn = scope->fn;
 
-                        if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-                            entry->c.key_is_identifier = true;
-                            entry->c.key_identifier = t[0].identifier;
-                            t += 2;
-                        } else {
-                            u32 key_expr_length;
-                            entry->c.key_expr = parse_expr(context, scope, t, &key_expr_length, false);
-                            t += key_expr_length;
+                        // Parse keys
+                        Key_Entry *first_key = null;
+                        Key_Entry *last_key = null;
 
-                            if (entry->c.key_expr == null) {
-                                *length = t - t_first_stmt_start;
-                                return null;
+                        while (true) {
+                            Key_Entry *key_entry = arena_new(&context->stack, Key_Entry);
+                            last_key = ((first_key == null)? (first_key = key_entry) : (last_key->next = key_entry));
+
+                            if (t[0].kind == TOKEN_IDENTIFIER && (t[1].kind == TOKEN_COLON || t[1].kind == TOKEN_COMMA)) {
+                                key_entry->key.is_identifier = true;
+                                key_entry->key.identifier = t[0].identifier;
+                                t += 1;
+                            } else {
+                                u32 key_expr_length;
+                                key_entry->key.expr = parse_expr(context, scope, t, &key_expr_length, false);
+                                t += key_expr_length;
+
+                                if (key_entry->key.expr == null) {
+                                    *length = t - t_first_stmt_start;
+                                    return null;
+                                }
                             }
 
-                            if (!expect_single_token(context, t, ':', "after case")) {
+                            entry->c.key_count += 1;
+
+                            if (t[0].kind == TOKEN_COLON) {
+                                t += 1;
+                                break;
+                            } else if (t[0].kind == TOKEN_COMMA) {
+                                t += 1;
+                                continue;
+                            } else {
+                                print_file_pos(&t->pos);
+                                printf("Expected a colon ':' or a comma ',' after case, but got ");
+                                print_token(t);
+                                printf("\n");
                                 *length = t - t_start;
                                 return null;
                             }
-                            t += 1;
                         }
+                        entry->first_key = first_key;
 
+                        // Parse body
                         u32 body_length;
                         entry->c.body = parse_case_body(context, entry->c.scope, t, &body_length);
                         t += body_length;
@@ -5229,10 +5269,21 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                 }
 
                 stmt->switch_.cases = (void*) arena_alloc(&context->arena, stmt->switch_.case_count * sizeof(Switch_Case));
+
                 Entry *entry = first;
                 for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
                     assert(entry != null);
                     stmt->switch_.cases[i] = entry->c;
+
+                    stmt->switch_.cases[i].keys = (void*) arena_alloc(&context->arena, entry->c.key_count * sizeof(Switch_Case_Key));
+
+                    Key_Entry *key_entry = entry->first_key;
+                    for (u32 j = 0; j < entry->c.key_count; j += 1) {
+                        assert(key_entry != null);
+                        stmt->switch_.cases[i].keys[j] = key_entry->key;
+                        key_entry = key_entry->next;
+                    }
+
                     entry = entry->next;
                 }
 
@@ -7945,84 +7996,88 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
                 Switch_Case *c = &stmt->switch_.cases[i];
 
-                if (c->key_is_identifier && automatch_enum != null) {
-                    u32 member_index = find_enum_member(automatch_enum, c->key_identifier);
-                    if (member_index != U32_MAX) {
-                        c->key_is_identifier = false;
-                        c->key_expr = arena_new(&context->arena, Expr);
-                        *c->key_expr = (Expr) {
-                            .kind = EXPR_STATIC_MEMBER_ACCESS,
-                            .type = automatch_enum,
-                            .pos = c->pos,
-                            .static_member_access = {
-                                .parent_type = automatch_enum,
-                                .member_index = member_index,
-                            },
-                        };
+                for (u32 j = 0; j < c->key_count; j += 1) {
+                    Switch_Case_Key *key = &c->keys[j];
+
+                    if (key->is_identifier && automatch_enum != null) {
+                        u32 member_index = find_enum_member(automatch_enum, key->identifier);
+                        if (member_index != U32_MAX) {
+                            key->is_identifier = false;
+                            key->expr = arena_new(&context->arena, Expr);
+                            *key->expr = (Expr) {
+                                .kind = EXPR_STATIC_MEMBER_ACCESS,
+                                .type = automatch_enum,
+                                .pos = c->pos,
+                                .static_member_access = {
+                                    .parent_type = automatch_enum,
+                                    .member_index = member_index,
+                                },
+                            };
+                        }
                     }
-                }
 
-                if (c->key_is_identifier) {
-                    Var *key_var = find_var(scope, c->key_identifier, &c->pos);
+                    if (key->is_identifier) {
+                        Var *key_var = find_var(scope, key->identifier, &c->pos);
 
-                    if (key_var != null) {
-                        if (key_var->flags & VAR_FLAG_GLOBAL) {
-                            Global_Var *global = &context->global_vars[key_var->global_index];
-                            if (!global->checked) {
-                                return TYPECHECK_RESULT_DEPENDENT;
+                        if (key_var != null) {
+                            if (key_var->flags & VAR_FLAG_GLOBAL) {
+                                Global_Var *global = &context->global_vars[key_var->global_index];
+                                if (!global->checked) {
+                                    return TYPECHECK_RESULT_DEPENDENT;
+                                }
                             }
-                        }
 
-                        c->key_is_identifier = false;
-                        c->key_expr = arena_new(&context->arena, Expr);
-                        *c->key_expr = (Expr) {
-                            .kind = EXPR_VARIABLE,
-                            .flags = EXPR_FLAG_ADDRESSABLE,
-                            .type = key_var->type,
-                            .pos = c->pos,
-                            .variable = { .var = key_var },
-                        };
-                    } else {
-                        print_file_pos(&c->pos);
-                        printf("Invalid case, no such variable");
-                        if (automatch_enum != null) {
-                            printf(" or member of 'enum %s'", automatch_enum->enumeration.name);
+                            key->is_identifier = false;
+                            key->expr = arena_new(&context->arena, Expr);
+                            *key->expr = (Expr) {
+                                .kind = EXPR_VARIABLE,
+                                .flags = EXPR_FLAG_ADDRESSABLE,
+                                .type = key_var->type,
+                                .pos = c->pos,
+                                .variable = { .var = key_var },
+                            };
+                        } else {
+                            print_file_pos(&c->pos);
+                            printf("Invalid case, no such variable");
+                            if (automatch_enum != null) {
+                                printf(" or member of 'enum %s'", automatch_enum->enumeration.name);
+                            }
+                            printf(": %s\n", key->identifier);
+                            return TYPECHECK_EXPR_BAD;
                         }
-                        printf(": %s\n", c->key_identifier);
-                        return TYPECHECK_EXPR_BAD;
                     }
-                }
 
-                assert(!c->key_is_identifier);
+                    assert(!key->is_identifier);
 
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, c->key_expr, stmt->switch_.index->type);
-                if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
+                    Typecheck_Expr_Result r = typecheck_expr(context, scope, key->expr, stmt->switch_.index->type);
+                    if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-                if (stmt->switch_.index->type != c->key_expr->type) {
-                    print_file_pos(&c->pos);
-                    printf("Invalid type for case, expected ");
-                    print_type(context, stmt->switch_.index->type);
-                    printf(" but got ");
-                    print_type(context, c->key_expr->type);
-                    printf("\n");
-                }
-                
-                // TODO ensure that the key expr is actually a constant!
+                    if (stmt->switch_.index->type != key->expr->type) {
+                        print_file_pos(&c->pos);
+                        printf("Invalid type for case, expected ");
+                        print_type(context, stmt->switch_.index->type);
+                        printf(" but got ");
+                        print_type(context, key->expr->type);
+                        printf("\n");
+                    }
+                    
+                    // TODO ensure that the key expr is actually a constant!
 
-                arena_stack_push(&context->stack);
-                Eval_Result eval_result = eval_compile_time_expr(context, c->key_expr, (u8*) &c->key_value);
-                arena_stack_pop(&context->stack);
+                    arena_stack_push(&context->stack);
+                    Eval_Result eval_result = eval_compile_time_expr(context, key->expr, (u8*) &key->value);
+                    arena_stack_pop(&context->stack);
 
-                switch (eval_result) {
-                    case EVAL_DEPENDENT: return TYPECHECK_RESULT_DEPENDENT;
-                    case EVAL_BAD: return TYPECHECK_RESULT_BAD;
-                    case EVAL_DO_AT_RUNTIME: {
-                        print_file_pos(&c->key_expr->pos);
-                        printf("Can't compute case at compile time\n");
-                        return TYPECHECK_RESULT_BAD;
-                    } break;
-                    case EVAL_OK: break;
-                    default: assert(false);
+                    switch (eval_result) {
+                        case EVAL_DEPENDENT: return TYPECHECK_RESULT_DEPENDENT;
+                        case EVAL_BAD: return TYPECHECK_RESULT_BAD;
+                        case EVAL_DO_AT_RUNTIME: {
+                            print_file_pos(&key->expr->pos);
+                            printf("Can't compute case at compile time\n");
+                            return TYPECHECK_RESULT_BAD;
+                        } break;
+                        case EVAL_OK: break;
+                        default: assert(false);
+                    }
                 }
 
                 for (Stmt* inner = c->body; inner->kind != STMT_END; inner = inner->next) {
@@ -12609,8 +12664,32 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
             for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
                 Switch_Case *c = &stmt->switch_.cases[i];
-                instruction_cmp_imm(context, x64_place_reg(index_reg), c->key_value, index_size);
-                u64 jcc_index = instruction_jcc(context, COND_NE, sizeof(i32));
+                assert(c->key_count >= 1);
+
+                u64 skip_jmp_index;
+
+                if (c->key_count == 1) {
+                    u64 key_value = c->keys[0].value;
+                    instruction_cmp_imm(context, x64_place_reg(index_reg), key_value, index_size);
+                    skip_jmp_index = instruction_jcc(context, COND_NE, sizeof(i32));
+                } else {
+                    u64 *forward_jmp_indices = (u64*) arena_alloc(&context->stack, c->key_count * sizeof(u64));
+
+                    for (u32 j = 0; j < c->key_count; j += 1) {
+                        u64 key_value = c->keys[j].value;
+                        instruction_cmp_imm(context, x64_place_reg(index_reg), key_value, index_size);
+                        forward_jmp_indices[j] = instruction_jcc(context, COND_E, sizeof(i8));
+                    }
+
+                    skip_jmp_index = instruction_jmp(context, sizeof(i32));
+
+                    u64 forward_jmp_to = buf_length(context->seg_text);
+                    for (u32 j = 0; j < c->key_count; j += 1) {
+                        u64 forward_jmp_index = forward_jmp_indices[j];
+                        i8 *forward_jmp_by = (i8*) (&context->seg_text[forward_jmp_index]);
+                        *forward_jmp_by = forward_jmp_to - (forward_jmp_index + sizeof(i8));
+                    }
+                }
 
                 for (Stmt *inner = c->body; inner->kind != STMT_END; inner = inner->next) {
                     machinecode_for_stmt(context, fn, inner, reg_allocator);
@@ -12621,9 +12700,9 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                     jmp_index_count += 1;
                 }
 
-                u64 jcc_to = buf_length(context->seg_text);
-                i32 *jcc_by = (i32*) (&context->seg_text[jcc_index]);
-                *jcc_by = jcc_to - (jcc_index + sizeof(i32));
+                u64 skip_jmp_to = buf_length(context->seg_text);
+                i32 *skip_jmp_by = (i32*) (&context->seg_text[skip_jmp_index]);
+                *skip_jmp_by = skip_jmp_to - (skip_jmp_index + sizeof(i32));
             }
 
             if (stmt->switch_.default_case != null) {

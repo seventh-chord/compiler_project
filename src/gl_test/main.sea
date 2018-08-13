@@ -196,12 +196,14 @@ fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
 
         WM_CLOSE: close_window_requested = true;
 
-        //WM_KEYUP:
-        WM_KEYDOWN:
+        WM_KEYDOWN, WM_KEYUP:
         {
             let scancode = (l >> 16) & 0x1ff;
             let down = message == WM_KEYDOWN;
             assert(scancode < enum_length(Key), "Invalid scancode\n");
+
+            print(enum_member_name(cast(Key, scancode)));
+            print(down? " got pressed\n" : " got released\n");
 
             /*
             if down {
