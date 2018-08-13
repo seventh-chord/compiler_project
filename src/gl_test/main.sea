@@ -31,6 +31,7 @@ let window_handle: Handle;
 let gl_context: Handle;
 let device_context: Handle;
 let close_window_requested = false;
+let key_states: [enum_length(Key)]Key_State;
 
 fn open_window() {
     print("Creating window and initializing OpenGL\n");
@@ -159,6 +160,13 @@ fn open_window() {
 fn poll_events() {
     let message: Window_Message;
 
+    /*
+    for key : 0..enum_length(Key) {
+        if key_states[key] == Key_State::Pressed  { key_states[key] = Key_State::Down; }
+        if key_states[key] == Key_State::Released { key_states[key] = Key_State::Up; }
+    }
+    */
+
     for {
         let result = PeekMessageA(&message, window_handle, 0, 0, PM_REMOVE);
 
@@ -188,13 +196,20 @@ fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
 
         WM_CLOSE: close_window_requested = true;
 
-        WM_KEYUP: {}
-        WM_KEYDOWN: {
+        //WM_KEYUP:
+        WM_KEYDOWN:
+        {
             let scancode = (l >> 16) & 0x1ff;
-            let key = cast(Key, scancode);
+            let down = message == WM_KEYDOWN;
+            assert(scancode < enum_length(Key), "Invalid scancode\n");
 
-            print(enum_member_name(key));
-            print(" just got pressed!\n");
+            /*
+            if down {
+                key_states[scancode] = Key_State::Pressed;
+            } else {
+                key_states[scancode] = Key_State::Released;
+            }
+            */
         }
 
         WM_CHAR: {}
@@ -222,38 +237,42 @@ fn set_vsync(vsync: bool) {
     }
 }
 
+enum Key_State(u8) { Up, Released, Down, Pressed }
+
 // NB These are scancodes on a scandinavian layout!
 enum Key(u16) {
-    Key1 = 0x2, Key2 = 0x3, Key3 = 0x4, Key4 = 0x5, Key5 = 0x6,
-    Key6 = 0x7, Key7 = 0x8, Key8 = 0x9, Key9 = 0xa, Key0 = 0xb,
+    KEY_1 = 0x2, KEY_2 = 0x3, KEY_3 = 0x4, KEY_4 = 0x5, KEY_5 = 0x6,
+    KEY_6 = 0x7, KEY_7 = 0x8, KEY_8 = 0x9, KEY_9 = 0xa, KEY_0 = 0xb,
 
     Q = 0x10, W = 0x11, E = 0x12, R = 0x13, T = 0x14, Y = 0x15, U = 0x16, I = 0x17, O = 0x18, P = 0x19,
     A = 0x1e, S = 0x1f, D = 0x20, F = 0x21, G = 0x22, H = 0x23, J = 0x24, K = 0x25, L = 0x26, 
     Z = 0x2c, X = 0x2d, C = 0x2e, V = 0x2f, B = 0x30, N = 0x31, M = 0x32,
     AE = 0x28, OE = 0x27, AA = 0x1a,
 
-    Comma = 0x33, Dot = 0x34, Hyphen = 0x35,
-    Star = 0x2b, Caret = 0x1b, Bar = 0x29,
+    COMMA = 0x33, DOT = 0x34, HYPHEN = 0x35,
+    STAR = 0x2b, CARET = 0x1b, BAR = 0x29,
 
-    Space = 0x39,
-    Escape = 0x1, 
-    Tab = 0xf,
-    Return = 0x1c,
-    Back = 0xe,
+    SPACE = 0x39,
+    ESCAPE = 0x1, 
+    TAB = 0xf,
+    RETURN = 0x1c,
+    BACK = 0xe,
 
-    LShift = 0x2a,
-    LCtrl  = 0x1d,
-    LAlt   = 0x38,
-    RShift = 0x36,
-    RCtrl  = 0x11d,
-    RAlt   = 0x138,
+    L_SHIFT = 0x2a,
+    L_CTRL  = 0x1d,
+    L_ALT   = 0x38,
+    R_SHIFT = 0x36,
+    R_CTRL  = 0x11d,
+    R_ALT   = 0x138,
 
-    Right = 0x4d, Left = 0x4b, Down = 0x50, Up = 0x48,
+    RIGHT = 0x4d, LEFT = 0x4b, DOWN = 0x50, UP = 0x48,
 
-    Insert = 0x52, Delete = 0x53, Home = 0x47, End = 0x4f, PageUp = 0x49, PageDown = 0x51,
+    INSERT = 0x52, DELETE = 0x53, HOME = 0x47, END = 0x4f, PAGEUP = 0x49, PAGEDOWN = 0x51,
 
     F1 = 0x3b, F2 = 0x3c, F3 = 0x3d, F4 = 0x3e,  F5 = 0x3f,  F6 = 0x40,
     F7 = 0x41, F8 = 0x42, F9 = 0x43, F10 = 0x44, F11 = 0x57, F12 = 0x58,
+
+    MAX_KEY = 0x1ff,
 }
 
 typedef Handle = *void;

@@ -6925,7 +6925,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             if (
                 (var->flags & VAR_FLAG_CONSTANT) &&
                 (var->flags & VAR_FLAG_LOOSE_TYPE) &&
-                primitive_is_integer(solidify_to->kind) &&
+                (primitive_is_integer(solidify_to->kind) || solidify_to->kind == TYPE_VOID) &&
                 var->type->kind == TYPE_DEFAULT_INT
             ) {
                 // NB we play a bit fast and loose here, by allowing constant integers without a specific type
@@ -6934,7 +6934,12 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 // wierd about switching around the specific types it expects in function signatures, largely
                 // (I pressume) because C does a lot of casts implicitly.
                 static_assert(TYPE_DEFAULT_INT == TYPE_I64, "Need to potentially generate upcasts if this assert fails!");
-                expr->type = solidify_to;
+
+                if (solidify_to->kind == TYPE_VOID) {
+                    expr->type = &context->primitive_types[TYPE_DEFAULT_INT];
+                } else {
+                    expr->type = solidify_to;
+                }
                 strong = false;
             } else {
                 expr->type = var->type;
@@ -8701,7 +8706,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global
 
     if (global->initial_expr != null) {
         Type *resolve_to = global->var->type;
-        if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_DEFAULT_INT];
+        if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
         Typecheck_Expr_Result r = typecheck_expr(context, scope, global->initial_expr, resolve_to);
         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
