@@ -2166,7 +2166,7 @@ Var *find_var(Scope *scope, u8 *interned_name, File_Pos *pos) {
     if (start_fn == null) start_fn = (Fn*) U64_MAX;
 
     while (true) {
-        for (u32 i = 0; i < scope->decls_length; i += 1) {
+        for (u32 i = scope->decls_length - 1; i < scope->decls_length; i -= 1) {
             Decl *decl = &scope->decls[i];
 
             if (scope->fn == start_fn && file_pos_is_greater(&decl->pos, pos)) {
@@ -6334,10 +6334,16 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 bool valid = true;
                 for (; i < file_length; i += 1) {
                     if (file[i] == '\n' || file[i] == '\r') {
-                        valid = false;
-                        print_file_pos(&file_pos);
-                        printf("Strings can't span multiple lines\n");
-                        break;
+                        if (i + 1 < file_length && (file[i]+file[i + 1] == '\n'+'\r')) {
+                            i += 1;
+                        }
+
+                        file_pos.line += 1;
+                        file_pos.character = 1;
+                        start_line = file_pos.line;
+                        start_i = i;
+
+                        continue;
                     }
 
                     if (file[i] == '\\') {
@@ -8269,44 +8275,53 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
         } break;
 
         case EXPR_CAST: {
-            Type_Kind primitive = primitive_of(expr->type);
-            Type_Kind inner_primitive = primitive_of(expr->cast_from->type);
+            Type_Kind to   = primitive_of(expr->type);
+            Type_Kind from = primitive_of(expr->cast_from->type);
 
             u64 inner_type_size = type_size_of(expr->cast_from->type);
             assert(type_size <= 8 && inner_type_size <= 8);
-            assert(primitive_is_integer(primitive) && primitive_is_integer(inner_primitive));
 
             u64 inner = 0;
             Eval_Result result = eval_compile_time_expr(context, expr->cast_from, (u8*) &inner);
             if (result != EVAL_OK) return result;
 
-            u64 after_cast;
-            if (primitive_is_signed(primitive) && primitive_is_signed(inner_primitive)) {
-                i64 inner_signed;
-                // Sign-extend
-                switch (inner_type_size) {
-                    case 1: inner_signed = (i64) *((i8*)  &inner); break;
-                    case 2: inner_signed = (i64) *((i16*) &inner); break;
-                    case 4: inner_signed = (i64) *((i32*) &inner); break;
-                    case 8: inner_signed = (i64) *((i64*) &inner); break;
-                    default: assert(false);
-                }
-                after_cast = *((u64*) &inner_signed);
+            u64 outer;
+            if ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) {
+                outer = inner;
+            } else if (primitive_is_float(from) && primitive_is_float(to)) {
+                unimplemented(); // TODO
+            } else if (primitive_is_float(from) && primitive_is_integer(to)) {
+                unimplemented(); // TODO
+            } else if (primitive_is_integer(from) && primitive_is_float(to)) {
+                unimplemented(); // TODO
             } else {
-                switch (inner_type_size) {
-                    case 1: after_cast = (u64) *((u8*)  &inner); break;
-                    case 2: after_cast = (u64) *((u16*) &inner); break;
-                    case 4: after_cast = (u64) *((u32*) &inner); break;
-                    case 8: after_cast = (u64) *((u64*) &inner); break;
-                    default: assert(false);
+                if (primitive_is_signed(from) && primitive_is_signed(to)) {
+                    i64 inner_signed;
+                    // Sign-extend
+                    switch (inner_type_size) {
+                        case 1: inner_signed = (i64) *((i8*)  &inner); break;
+                        case 2: inner_signed = (i64) *((i16*) &inner); break;
+                        case 4: inner_signed = (i64) *((i32*) &inner); break;
+                        case 8: inner_signed = (i64) *((i64*) &inner); break;
+                        default: assert(false);
+                    }
+                    outer = *((u64*) &inner_signed);
+                } else {
+                    switch (inner_type_size) {
+                        case 1: outer = (u64) *((u8*)  &inner); break;
+                        case 2: outer = (u64) *((u16*) &inner); break;
+                        case 4: outer = (u64) *((u32*) &inner); break;
+                        case 8: outer = (u64) *((u64*) &inner); break;
+                        default: assert(false);
+                    }
                 }
             }
 
             switch (type_size) {
-                case 1: *((u8*)  result_into) = (u8)  after_cast; break;
-                case 2: *((u16*) result_into) = (u16) after_cast; break;
-                case 4: *((u32*) result_into) = (u32) after_cast; break;
-                case 8: *((u64*) result_into) = (u64) after_cast; break;
+                case 1: *((u8*)  result_into) = (u8)  outer; break;
+                case 2: *((u16*) result_into) = (u16) outer; break;
+                case 4: *((u32*) result_into) = (u32) outer; break;
+                case 8: *((u64*) result_into) = (u64) outer; break;
                 default: assert(false);
             }
 
@@ -11194,6 +11209,13 @@ X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *r
         assert(((i64) address.immediate_offset) + offset <= I32_MAX);
         address.immediate_offset += offset;
     } else {
+        if (address.base == RIP_OFFSET_DATA || address.base == RIP_OFFSET_RDATA) {
+            u32 reserves = machinecode_expr_reserves(index);
+            Register new_base = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
+            instruction_lea(context, address, new_base);
+            address = (X64_Address) { .base = new_base };
+        }
+
         Register index_reg = REGISTER_NONE;
 
         if (address.index != REGISTER_NONE) {
@@ -11210,7 +11232,6 @@ X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *r
         }
         
         if (index_reg == REGISTER_NONE) {
-            // TODO I don't really remember what checking for reserves here is supposed to acomplish
             u32 reserves = machinecode_expr_reserves(index);
             index_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
         }
