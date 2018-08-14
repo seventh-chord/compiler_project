@@ -5,9 +5,12 @@ fn main() {
 
     let r = 0.0;
     let up = true;
+
+    let draw_group = draw_group_init();
     
     for !close_window_requested {
         poll_events();
+        if key_pressed(Key::ESCAPE) { close_window_requested = true; }
 
         if up {
             r += 0.01;
@@ -17,14 +20,148 @@ fn main() {
             if r < 0.0 { up = true; }
         }
 
+        draw_group_triangle(&draw_group, Vertex {{ -0.5, 0.5 }}, Vertex {{ 0.5, 0.5 }}, Vertex {{ 0.0, -0.5 }});
+
+        glViewport(0, 0, i32(window_width), i32(window_height));
         glClearColor(r, 1.0, 0.2 + (1.0 - r)*0.8, 1.0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        draw_group_draw(&draw_group);
         swap_buffers();
     }
 
+    print("Exiting!");
     close_window();
     ExitProcess(0);
 }
+
+
+struct v2 { x, y: f32; }
+
+
+const MAX_VERTICES = 4096;
+
+struct Vertex {
+    pos: v2;
+}
+
+struct Draw_Group {
+    shader, vbo, vao: u32;
+    vertex_count: i64;
+    vertices: *Vertex; // TODO Make this a slice, or something of that nature
+}
+
+fn draw_group_init() -> Draw_Group {
+    const vertex_shader_source = "
+        #version 330 core
+
+        layout(location = 0) in vec2 pos;
+
+        void main() {
+            gl_Position = vec4(pos, 0.0, 1.0);
+        }
+    ";
+
+    const fragment_shader_source = "
+        #version 330 core
+
+        out vec4 color;
+
+        void main() {
+            color = vec4(1.0, 1.0, 0.8, 1.0);
+        }
+    ";
+
+    let shader = load_shader(vertex_shader_source, fragment_shader_source);
+
+    let vertex_count = 0;
+    let vertices = cast(*Vertex, alloc(MAX_VERTICES * size_of(Vertex)));
+
+    let vbo, vao: u32;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, MAX_VERTICES * size_of(Vertex), null, GL_DYNAMIC_DRAW);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, 0));
+
+    return Draw_Group { shader, vbo, vao, vertex_count, vertices };
+}
+
+fn draw_group_triangle(draw_group: *Draw_Group, a, b, c: Vertex) {
+    let i = draw_group.vertex_count;
+    draw_group.vertex_count += 3;
+    assert(draw_group.vertex_count <= MAX_VERTICES, "Out of space in draw group");
+
+    *(draw_group.vertices + i + 0) = a;
+    *(draw_group.vertices + i + 1) = b;
+    *(draw_group.vertices + i + 2) = c;
+}
+
+fn draw_group_draw(draw_group: *Draw_Group) {
+    glUseProgram(draw_group.shader);
+
+    glBindBuffer(GL_ARRAY_BUFFER, draw_group.vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, draw_group.vertex_count * size_of(Vertex), cast(*void, draw_group.vertices));
+
+    glBindVertexArray(draw_group.vao);
+    glDrawArrays(GL_TRIANGLES, 0, i32(draw_group.vertex_count / 3));
+}
+
+
+fn load_shader(vertex_source, fragment_source: String) -> u32 {
+    let status: i32;
+
+    let vertex = glCreateShader(GL_VERTEX_SHADER);
+    let vertex_source_length = i32(vertex_source.length);
+    glShaderSource(vertex, 1, &vertex_source.data, &vertex_source_length);
+    glCompileShader(vertex);
+    glGetShaderiv(vertex, GL_COMPILE_STATUS, &status);
+    if status == GL_FALSE {
+        let log_length: i32;
+        glGetShaderiv(vertex, GL_INFO_LOG_LENGTH, &log_length);
+        let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
+        glGetShaderInfoLog(vertex, log_length, null, log_string.data);
+        print(log_string);
+        ExitProcess(0);
+    }
+
+    let fragment = glCreateShader(GL_FRAGMENT_SHADER);
+    let fragment_source_length = i32(fragment_source.length);
+    glShaderSource(fragment, 1, &fragment_source.data, &fragment_source_length);
+    glCompileShader(fragment);
+    glGetShaderiv(fragment, GL_COMPILE_STATUS, &status);
+    if status == GL_FALSE {
+        let log_length: i32;
+        glGetShaderiv(fragment, GL_INFO_LOG_LENGTH, &log_length);
+        let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
+        glGetShaderInfoLog(fragment, log_length, null, log_string.data);
+        print(log_string);
+        ExitProcess(0);
+    }
+
+    let program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+
+    glGetProgramiv(fragment, GL_LINK_STATUS, &status);
+    if status == GL_FALSE {
+        let log_length: i32;
+        glGetProgramiv(fragment, GL_INFO_LOG_LENGTH, &log_length);
+        let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
+        glGetProgramInfoLog(fragment, log_length, null, log_string.data);
+        print(log_string);
+        ExitProcess(0);
+    }
+
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    return program;
+}
+
 
 let wgl_swap_function: wglSwapIntervalEXT_Type;
 let window_handle: Handle;
@@ -32,6 +169,8 @@ let gl_context: Handle;
 let device_context: Handle;
 let close_window_requested = false;
 let key_states: [enum_length(Key)]Key_State;
+let window_width: i64;
+let window_height: i64;
 
 fn open_window() {
     print("Creating window and initializing OpenGL\n");
@@ -157,15 +296,22 @@ fn open_window() {
     close_window_requested = false;
 }
 
+fn swap_buffers() {
+    SwapBuffers(device_context);
+}
+
+fn close_window() {
+    wglDeleteContext(gl_context);
+    DestroyWindow(window_handle);
+}
+
 fn poll_events() {
     let message: Window_Message;
 
-    /*
     for key : 0..enum_length(Key) {
         if key_states[key] == Key_State::Pressed  { key_states[key] = Key_State::Down; }
         if key_states[key] == Key_State::Released { key_states[key] = Key_State::Up; }
     }
-    */
 
     for {
         let result = PeekMessageA(&message, window_handle, 0, 0, PM_REMOVE);
@@ -179,20 +325,26 @@ fn poll_events() {
     }
 }
 
-fn close_window() {
-    wglDeleteContext(gl_context);
-    DestroyWindow(window_handle);
+fn key_down(key: Key) -> bool {
+    return key_states[key] == Key_State::Down || key_states[key] == Key_State::Pressed;
 }
 
-fn swap_buffers() {
-    SwapBuffers(device_context);
+fn key_pressed(key: Key) -> bool {
+    return key_states[key] == Key_State::Pressed;
 }
 
 // This is 'WNDPROC'
 fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
     switch message {
-        WM_SIZE: {}
-        WM_MOVE: {}
+        WM_SIZE: {
+            let new_width  = l & 0xffff;
+            let new_height = (l >> 16) & 0xffff;
+
+            if new_width > 0 && new_height > 0 {
+                window_width = new_width;
+                window_height = new_height;
+            }
+        }
 
         WM_CLOSE: close_window_requested = true;
 
@@ -202,16 +354,7 @@ fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
             let down = message == WM_KEYDOWN;
             assert(scancode < enum_length(Key), "Invalid scancode\n");
 
-            print(enum_member_name(cast(Key, scancode)));
-            print(down? " got pressed\n" : " got released\n");
-
-            /*
-            if down {
-                key_states[scancode] = Key_State::Pressed;
-            } else {
-                key_states[scancode] = Key_State::Released;
-            }
-            */
+            key_states[scancode] = down? Key_State::Pressed : Key_State::Released;
         }
 
         WM_CHAR: {}
@@ -267,14 +410,14 @@ enum Key(u16) {
     R_CTRL  = 0x11d,
     R_ALT   = 0x138,
 
-    RIGHT = 0x4d, LEFT = 0x4b, DOWN = 0x50, UP = 0x48,
-
-    INSERT = 0x52, DELETE = 0x53, HOME = 0x47, END = 0x4f, PAGEUP = 0x49, PAGEDOWN = 0x51,
+    INSERT = 0x152,  HOME = 0x147, PAGEUP = 0x149,
+    DELETE = 0x153,  END = 0x14f,  PAGEDOWN = 0x151,
+    RIGHT = 0x14d, LEFT = 0x14b, DOWN = 0x150, UP = 0x148,
 
     F1 = 0x3b, F2 = 0x3c, F3 = 0x3d, F4 = 0x3e,  F5 = 0x3f,  F6 = 0x40,
     F7 = 0x41, F8 = 0x42, F9 = 0x43, F10 = 0x44, F11 = 0x57, F12 = 0x58,
 
-    MAX_KEY = 0x1ff,
+    MAX_KEY = 0x1ff, // NB this is the largest scancode windows can pass us
 }
 
 typedef Handle = *void;
@@ -633,9 +776,44 @@ fn string_cmp(a, b: String) -> bool {
 }
 
 let stdout_handle = GetStdHandle(u32(-11));
+
 fn print(string: String) {
     let written: u32;
     WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
+}
+
+fn print_u64(value: u64) {
+    let buffer: [30]u8;
+    let length = 0;
+
+    if value == 0 {
+        buffer[0] = '0';
+        length = 1;
+    } else {
+        let i: u64 = 0;
+        for value > 0 {
+            let char = u8(value % 10);
+            value = value / 10;
+
+            buffer[i] = '0' + char;
+            i += 1;
+            length += 1;
+        }
+        i -= 1;
+
+        let j: u64 = 0;
+        for j < i {
+            let temp = buffer[j];
+            buffer[j] = buffer[i];
+            buffer[i] = temp;
+
+            i -= 1;
+            j += 1;
+        }
+    }
+
+    let string = String { data: &buffer, length: length };
+    print(string);
 }
 
 fn assert(condition: bool, message: String) {
@@ -645,6 +823,12 @@ fn assert(condition: bool, message: String) {
         print("\n");
         ExitProcess(-1);
     }
+}
+
+let process_heap = GetProcessHeap();
+
+fn alloc(bytes: i64) -> *u8 {
+    return HeapAlloc(process_heap, 0, u64(bytes));
 }
 
 fn load_gl(gl32_lib: Handle) {
