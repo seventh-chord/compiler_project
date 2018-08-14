@@ -1879,7 +1879,9 @@ struct Stmt {
 
     union {
         struct {
-            Var *var;
+            Var *vars;
+            u32 var_count;
+
             Expr *right; // 'right' might be null
         } let;
 
@@ -2981,10 +2983,17 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
         } break;
 
         case STMT_LET: {
-            u8 *var_name = stmt->let.var->name;
-            printf("let %s: ", var_name);
+            assert(stmt->let.var_count >= 1);
 
-            print_type(context, stmt->let.var->type);
+            printf("let ");
+            for (u32 i = 0; i < stmt->let.var_count; i += 1) {
+                if (i > 0) printf(", ");
+                Var *var = &stmt->let.vars[i];
+                printf(var->name);
+            }
+            printf(": ");
+
+            print_type(context, stmt->let.vars[0].type);
 
             if (stmt->let.right != null) {
                 printf(" = ");
@@ -5444,16 +5453,48 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
             case TOKEN_KEYWORD_LET: {
                 t += 1;
 
-                if (t->kind != TOKEN_IDENTIFIER) {
-                    print_file_pos(&t->pos);
-                    printf("Expected variable name, but found ");
-                    print_token(t);
-                    printf("\n");
-                    *length = t - t_first_stmt_start;
-                    return null;
+                arena_stack_push(&context->stack);
+
+                typedef struct Name_Entry Name_Entry;
+                struct Name_Entry {
+                    u8 *name;
+                    Name_Entry *next;
+                };
+                Name_Entry *first = null;
+                Name_Entry *last = null;
+                u32 var_count = 0;
+
+                while (true) {
+                    if (t->kind != TOKEN_IDENTIFIER) {
+                        print_file_pos(&t->pos);
+                        printf("Expected variable name, but found ");
+                        print_token(t);
+                        printf("\n");
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    u8 *name = t->identifier;
+                    t += 1;
+
+                    Name_Entry *entry = arena_new(&context->stack, Name_Entry);
+                    entry->name = name;
+                    last = (first == null? (first = entry) : (last->next = entry));
+                    var_count += 1;
+
+                    if (t->kind == TOKEN_COMMA) {
+                        t += 1;
+                        continue;
+                    } else if (t->kind == TOKEN_COLON || t->kind == TOKEN_ASSIGN) {
+                        break;
+                    } else {
+                        print_file_pos(&t->pos);
+                        printf("Expected a comma ',', a colon ':', or a =, but got a ");
+                        print_token(t);
+                        printf("\n");
+                        return null;
+                    }
                 }
-                u8 *name = t->identifier;
-                t += 1;
 
                 Type* type = null;
                 if (t->kind == TOKEN_COLON) {
@@ -5481,35 +5522,54 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                     t += right_length;
                 }
 
-                if (expr == null && type == null) {
-                    print_file_pos(&t->pos);
-                    printf("Declared variable '%s' without giving type or initial value.\n", name);
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-
-                Var *var = arena_new(&context->arena, Var);
-                var->name = name;
-                var->declaration_pos = stmt->pos,
-                var->type = type;
-                var->local_index = scope->fn->body.var_count;
-                scope->fn->body.var_count += 1;
-
-                Decl *decl = add_declaration(&context->arena, scope);
-                decl->kind = DECL_VAR;
-                decl->name = name;
-                decl->pos = stmt->pos,
-                decl->var = var;
-
-                stmt->kind = STMT_LET;
-                stmt->let.var = var;
-                stmt->let.right = expr;
-
                 if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after variable declaration")) {
                     *length = t - t_first_stmt_start;
                     return null;
                 }
                 t += 1;
+
+                if (expr == null && type == null) {
+                    print_file_pos(&t->pos);
+                    printf("Declared ");
+                    if (var_count > 1) {
+                        printf("variables ");
+                        for (Name_Entry *e = first; e->next != null; e = e->next) {
+                            if (e != first) printf(", ");
+                            printf("'%s'", e->name);
+                        }
+                    } else {
+                        printf("variable '%s'", first->name);
+                    }
+                    printf("without giving type or initial value\n");
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+
+                assert(var_count >= 0);
+                Var *vars = (Var*) arena_alloc(&context->arena, var_count * sizeof(Var));
+                Name_Entry *entry = first;
+                for (u32 i = 0; i < var_count; i += 1, entry = entry->next) {
+                    assert(entry != null);
+                    Var *var = &vars[i];
+                    var->name = entry->name;
+                    var->declaration_pos = stmt->pos,
+                    var->type = type;
+                    var->local_index = scope->fn->body.var_count;
+                    scope->fn->body.var_count += 1;
+
+                    Decl *decl = add_declaration(&context->arena, scope);
+                    decl->kind = DECL_VAR;
+                    decl->name = entry->name;
+                    decl->pos = stmt->pos,
+                    decl->var = var;
+                }
+
+                arena_stack_pop(&context->stack);
+
+                stmt->kind = STMT_LET;
+                stmt->let.vars = vars;
+                stmt->let.var_count = var_count;
+                stmt->let.right = expr; 
             } break;
 
             case TOKEN_KEYWORD_ENUM: {
@@ -7911,35 +7971,45 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         } break;
 
         case STMT_LET: {
-            Var *var = stmt->let.var;
+            u32 var_count = stmt->let.var_count;
+            Var *vars = stmt->let.vars;
             Expr *right = stmt->let.right;
 
-            if (var->type != null) {
-                Typecheck_Result r = resolve_type(context, scope, &var->type, &var->declaration_pos);
+            assert(var_count >= 1);
+            Type *var_type = vars[0].type;
+            for (u32 i = 1; i < var_count; i += 1) assert(vars[i].type == var_type);
+
+            if (var_type != null) {
+                Typecheck_Result r = resolve_type(context, scope, &var_type, &stmt->pos);
                 if (r != TYPECHECK_RESULT_DONE) return r;
             }
 
             bool loose_types = false;
 
             if (right != null) {
-                Type *resolve_to = var->type;
+                Type *resolve_to = var_type;
                 if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
                 Typecheck_Expr_Result r = typecheck_expr(context, scope, right, resolve_to);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
-                    var->type = &context->primitive_types[TYPE_INVALID];
+                    var_type = &context->primitive_types[TYPE_INVALID];
                     return r;
                 }
 
-                if (var->type == null || var->type->kind == TYPE_INVALID) {
+                if (var_type == null || var_type->kind == TYPE_INVALID) {
                     if (r == TYPECHECK_EXPR_WEAK) loose_types = true;
-                    var->type = right->type;
+                    var_type = right->type;
                 }
 
-                if (!type_can_assign(var->type, right->type)) {
+                if (!type_can_assign(var_type, right->type)) {
                     print_file_pos(&stmt->pos);
-                    printf("Invalid declaration: '%s' has type ", var->name);
-                    print_type(context, var->type);
+                    printf("Invalid declaration: ");
+                    for (u32 i = 0; i < var_count; i += 1) {
+                        if (i > 0) printf(", ");
+                        printf("'%s'", vars[i].name);
+                    }
+                    printf(var_count > 1? " have type " : " has type ");
+                    print_type(context, var_type);
                     printf(" but right hand side has type ");
                     print_type(context, right->type);
                     printf("\n");
@@ -7947,10 +8017,13 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 }
             }
 
-            if (loose_types) {
-                var->flags |= VAR_FLAG_LOOSE_TYPE;
-            } else {
-                var->flags &= ~VAR_FLAG_LOOSE_TYPE;
+            for (u32 i = 0; i < var_count; i += 1) {
+                vars[i].type = var_type;
+                if (loose_types) {
+                    vars[i].flags |= VAR_FLAG_LOOSE_TYPE;
+                } else {
+                    vars[i].flags &= ~VAR_FLAG_LOOSE_TYPE;
+                }
             }
 
             return TYPECHECK_RESULT_DONE;
@@ -12586,17 +12659,32 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
     switch (stmt->kind) {
         case STMT_LET: {
-            Var *var = stmt->let.var;
-            assert(!(var->flags & VAR_FLAG_GLOBAL));
+            assert(stmt->let.var_count >= 1);
 
-            u64 size = type_size_of(var->type);
-            u64 align = type_align_of(var->type);
+            Type *type = stmt->let.vars[0].type;
+            u64 size = type_size_of(type);
+            u64 align = type_align_of(type);
 
-            X64_Address address = reg_allocator->var_mem_infos[var->local_index].address;
             if (stmt->let.right == null) {
-                machinecode_zero_out_struct(context, reg_allocator, address, size, align);
+                for (u32 i = 0; i < stmt->let.var_count; i += 1) {
+                    Var *var = &stmt->let.vars[i];
+                    assert(var->type == type);
+                    assert(!(var->flags & VAR_FLAG_GLOBAL));
+
+                    X64_Address address = reg_allocator->var_mem_infos[var->local_index].address;
+                    machinecode_zero_out_struct(context, reg_allocator, address, size, align);
+                }
             } else {
-                machinecode_for_expr(context, fn, stmt->let.right, reg_allocator, x64_place_address(address));
+                Var *first_var = &stmt->let.vars[0];
+                X64_Address first_address = reg_allocator->var_mem_infos[first_var->local_index].address;
+                machinecode_for_expr(context, fn, stmt->let.right, reg_allocator, x64_place_address(first_address));
+
+                for (u32 i = 0; i < stmt->let.var_count; i += 1) {
+                    Var *next_var = &stmt->let.vars[i];
+                    assert(next_var->type == type);
+                    X64_Address next_address = reg_allocator->var_mem_infos[next_var->local_index].address;
+                    machinecode_move(context, reg_allocator, x64_place_address(first_address), x64_place_address(next_address), size);
+                }
             }
         } break;
 

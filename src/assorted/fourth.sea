@@ -138,6 +138,7 @@ fn main() {
     farwell(); // to kings
     vector_test();
     enum_test();
+    funky_decls();
 
     ExitProcess(0);
 }
@@ -458,3 +459,14 @@ fn arena_new(arena: *Arena, size: i64) -> *u8 {
     assert(arena.used <= arena.capacity, "arena.used <= arena.capacity");
     return result;
 } 
+
+
+fn funky_decls() {
+    let x, y, z = 7;
+    print_u64(u64(x), 10);
+    print(", ");
+    print_u64(u64(y), 10);
+    print(", ");
+    print_u64(u64(z), 10);
+    print("\n");
+}
