@@ -10157,164 +10157,6 @@ void instruction_lea(Context *context, X64_Address mem, Register reg) {
     #endif
 }
 
-void instruction_mov_reg_mem(Context *context, Move_Mode mode, X64_Address mem, Register reg, u8 op_size) {
-    assert(is_gpr(reg));
-
-    u8 rex = REX_BASE;
-
-    u8 opcode;
-    switch (mode) {
-        case MOVE_FROM_MEM: opcode = 0x8b; break;
-        case MOVE_TO_MEM:   opcode = 0x89; break;
-        default: assert(false);
-    }
-
-    switch (op_size) {
-        case 1: opcode -= 1; break;
-        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
-        case 4: break;
-        case 8: rex |= REX_W; break;
-        default: assert(false);
-    }
-
-    encode_instruction_modrm(context, rex, opcode, op_size == 1, x64_place_address(mem), reg);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    if (mode == MOVE_FROM_MEM) {
-        printf("mov %s, ", register_name(reg, op_size));
-        print_x64_address(mem);
-        printf("\n");
-    } else {
-        printf("mov ");
-        print_x64_address(mem);
-        printf(", %s\n", register_name(reg, op_size));
-    }
-    #endif
-}
-
-void instruction_mov_reg_reg(Context *context, Register src, Register dst, u8 op_size) {
-    assert(is_gpr(src) && is_gpr(dst));
-
-    u8 opcode = 0x89;
-    u8 rex = REX_BASE;
-
-    switch (op_size) {
-        case 1: opcode -= 1; break;
-        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
-        case 4: break;
-        case 8: rex |= REX_W; break;
-        default: assert(false);
-    }
-
-    encode_instruction_modrm(context, rex, opcode, op_size == 1, x64_place_reg(dst), src);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov %s, %s\n", register_name(dst, op_size), register_name(src, op_size));
-    #endif
-}
-
-void instruction_movzx(Context *context, X64_Place src, Register dst, u8 src_size, u8 dst_size) {
-    assert(is_gpr(dst));
-
-    u32 opcode;
-    u8 rex = REX_BASE;
-
-    if (src_size == 1 && dst_size == 2) {
-        opcode = 0xb60f;
-        buf_push(context->seg_text, WORD_OPERAND_PREFIX);
-    } else if (src_size == 1 && dst_size == 4) {
-        opcode = 0xb60f;
-    } else if (src_size == 1 && dst_size == 8) {
-        opcode = 0xb60f;
-        rex |= REX_W;
-    } else if (src_size == 2 && dst_size == 4) {
-        opcode = 0xb70f;
-    } else if (src_size == 2 && dst_size == 8) {
-        opcode = 0xb70f;
-        rex |= REX_W;
-    } else {
-        assert(false);
-    }
-
-    encode_instruction_modrm(context, rex, opcode, false, src, dst);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("movzx %s, ", register_name(dst, dst_size));
-    print_x64_place(src, src_size);
-    printf("\n");
-    #endif
-}
-
-void instruction_mov_imm_mem(Context *context, X64_Address mem, u64 immediate, u8 op_size) {
-    u8 imm_size = op_size;
-
-    if (op_size == 8) {
-        // NB there is no 'mov mem64, imm64' instruction, so we have to improvize
-        // Also, 'mov mem64, imm32' sign-extends, hens I32_MAX
-        if (immediate > I32_MAX) {
-            instruction_mov_imm_mem(context, mem, immediate & U32_MAX, 4);
-            mem.immediate_offset += 4;
-            instruction_mov_imm_mem(context, mem, immediate >> 32, 4);
-            return;
-        } else {
-            imm_size = 4;
-        }
-    }
-
-    u8 rex = REX_BASE;
-    u8 opcode = 0xc7;
-
-    switch (op_size) {
-        case 1: opcode -= 1; break;
-        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
-        case 4: break;
-        case 8: rex |= REX_W; break;
-        default: assert(false);
-    }
-
-    encode_instruction_modrm_with_immediate(context, rex, opcode, op_size == 1, x64_place_address(mem), REGISTER_OPCODE_0, immediate, imm_size);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov ");
-    print_x64_place(x64_place_address(mem), op_size);
-    printf(", %x\n", immediate);
-    #endif
-}
-
-void instruction_mov_imm_reg(Context *context, Register reg, u64 immediate, u8 op_size) {
-    assert(is_gpr(reg));
-
-    if (immediate < U32_MAX && op_size == 8) {
-        // 32-bit instructions still clear the upper bits, so this is fine, and costs us 4-5 bytes less (depending on whether we still need REX)
-        op_size = 4;
-    }
-
-    u8 rex = REX_BASE;
-    u8 opcode = 0xb8;
-
-    switch (op_size) {
-        case 1: opcode = 0xb0; break;
-        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
-        case 4: break;
-        case 8: rex |= REX_W; break;
-        default: assert(false);
-    }
-
-    opcode |= REGISTER_INDICES[reg] & 0x07;
-    if (REGISTER_INDICES[reg] & 0x08) {
-        rex |= REX_B;
-    }
-    if (rex != REX_BASE || (op_size == 1 && reg >= RSP && reg <= RDI)) {
-        buf_push(context->seg_text, rex);
-    }
-    buf_push(context->seg_text, opcode);
-    str_push_integer(&context->seg_text, op_size, immediate);
-
-    #ifdef PRINT_GENERATED_INSTRUCTIONS
-    printf("mov %s, %x\n", register_name(reg, op_size), (u64) immediate);
-    #endif
-}
-
 enum {
     INTEGER_ADD,
     INTEGER_AND,
@@ -10596,6 +10438,169 @@ void instruction_sign_extend_for_division(Context *context, u8 op_size) {
         case 8: printf("cqo\n"); break;
         default: assert(false);
     }
+    #endif
+}
+
+void instruction_mov_reg_mem(Context *context, Move_Mode mode, X64_Address mem, Register reg, u8 op_size) {
+    assert(is_gpr(reg));
+
+    u8 rex = REX_BASE;
+
+    u8 opcode;
+    switch (mode) {
+        case MOVE_FROM_MEM: opcode = 0x8b; break;
+        case MOVE_TO_MEM:   opcode = 0x89; break;
+        default: assert(false);
+    }
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_modrm(context, rex, opcode, op_size == 1, x64_place_address(mem), reg);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    if (mode == MOVE_FROM_MEM) {
+        printf("mov %s, ", register_name(reg, op_size));
+        print_x64_address(mem);
+        printf("\n");
+    } else {
+        printf("mov ");
+        print_x64_address(mem);
+        printf(", %s\n", register_name(reg, op_size));
+    }
+    #endif
+}
+
+void instruction_mov_reg_reg(Context *context, Register src, Register dst, u8 op_size) {
+    assert(is_gpr(src) && is_gpr(dst));
+
+    u8 opcode = 0x89;
+    u8 rex = REX_BASE;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_modrm(context, rex, opcode, op_size == 1, x64_place_reg(dst), src);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov %s, %s\n", register_name(dst, op_size), register_name(src, op_size));
+    #endif
+}
+
+void instruction_movzx(Context *context, X64_Place src, Register dst, u8 src_size, u8 dst_size) {
+    assert(is_gpr(dst));
+
+    u32 opcode;
+    u8 rex = REX_BASE;
+
+    if (src_size == 1 && dst_size == 2) {
+        opcode = 0xb60f;
+        buf_push(context->seg_text, WORD_OPERAND_PREFIX);
+    } else if (src_size == 1 && dst_size == 4) {
+        opcode = 0xb60f;
+    } else if (src_size == 1 && dst_size == 8) {
+        opcode = 0xb60f;
+        rex |= REX_W;
+    } else if (src_size == 2 && dst_size == 4) {
+        opcode = 0xb70f;
+    } else if (src_size == 2 && dst_size == 8) {
+        opcode = 0xb70f;
+        rex |= REX_W;
+    } else {
+        assert(false);
+    }
+
+    encode_instruction_modrm(context, rex, opcode, false, src, dst);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("movzx %s, ", register_name(dst, dst_size));
+    print_x64_place(src, src_size);
+    printf("\n");
+    #endif
+}
+
+void instruction_mov_imm_mem(Context *context, X64_Address mem, u64 immediate, u8 op_size) {
+    u8 imm_size = op_size;
+
+    if (op_size == 8) {
+        // NB there is no 'mov mem64, imm64' instruction, so we have to improvize
+        // Also, 'mov mem64, imm32' sign-extends, hens I32_MAX
+        if (immediate > I32_MAX) {
+            instruction_mov_imm_mem(context, mem, immediate & U32_MAX, 4);
+            mem.immediate_offset += 4;
+            instruction_mov_imm_mem(context, mem, immediate >> 32, 4);
+            return;
+        } else {
+            imm_size = 4;
+        }
+    }
+
+    u8 rex = REX_BASE;
+    u8 opcode = 0xc7;
+
+    switch (op_size) {
+        case 1: opcode -= 1; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    encode_instruction_modrm_with_immediate(context, rex, opcode, op_size == 1, x64_place_address(mem), REGISTER_OPCODE_0, immediate, imm_size);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov ");
+    print_x64_place(x64_place_address(mem), op_size);
+    printf(", %x\n", immediate);
+    #endif
+}
+
+void instruction_mov_imm_reg(Context *context, Register reg, u64 immediate, u8 op_size) {
+    assert(is_gpr(reg));
+
+    if (immediate == 0) {
+        instruction_integer(context, INTEGER_XOR, MOVE_FROM_MEM, reg, x64_place_reg(reg), op_size);
+        return;
+    }
+
+    if (immediate < U32_MAX && op_size == 8) {
+        // 32-bit instructions still clear the upper bits, so this is fine, and costs us 4-5 bytes less (depending on whether we still need REX)
+        op_size = 4;
+    }
+
+    u8 rex = REX_BASE;
+    u8 opcode = 0xb8;
+
+    switch (op_size) {
+        case 1: opcode = 0xb0; break;
+        case 2: buf_push(context->seg_text, WORD_OPERAND_PREFIX); break;
+        case 4: break;
+        case 8: rex |= REX_W; break;
+        default: assert(false);
+    }
+
+    opcode |= REGISTER_INDICES[reg] & 0x07;
+    if (REGISTER_INDICES[reg] & 0x08) {
+        rex |= REX_B;
+    }
+    if (rex != REX_BASE || (op_size == 1 && reg >= RSP && reg <= RDI)) {
+        buf_push(context->seg_text, rex);
+    }
+    buf_push(context->seg_text, opcode);
+    str_push_integer(&context->seg_text, op_size, immediate);
+
+    #ifdef PRINT_GENERATED_INSTRUCTIONS
+    printf("mov %s, %x\n", register_name(reg, op_size), (u64) immediate);
     #endif
 }
 
