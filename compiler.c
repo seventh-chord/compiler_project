@@ -12665,7 +12665,24 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             u64 size = type_size_of(type);
             u64 align = type_align_of(type);
 
-            if (stmt->let.right == null) {
+            if (!primitive_is_compound(primitive_of(type)) && stmt->let.var_count > 1) {
+                u32 reserves = stmt->let.right == null? 0 : machinecode_expr_reserves(stmt->let.right);
+                Register_Kind reg_kind = primitive_is_float(primitive_of(type))? REGISTER_KIND_XMM : REGISTER_KIND_GPR;
+                Register reg = register_allocate(reg_allocator, reg_kind, reserves & RESERVE_RCX);
+
+                if (stmt->let.right == null) {
+                    machinecode_immediate_to_place(context, reg_allocator, x64_place_reg(reg), 0, size);
+                } else {
+                    machinecode_for_expr(context, fn, stmt->let.right, reg_allocator, x64_place_reg(reg));
+                }
+
+                for (u32 i = 0; i < stmt->let.var_count; i += 1) {
+                    Var *var = &stmt->let.vars[i];
+                    assert(var->type == type);
+                    X64_Address address = reg_allocator->var_mem_infos[var->local_index].address;
+                    machinecode_move(context, reg_allocator, x64_place_reg(reg), x64_place_address(address), size);
+                }
+            } else if (stmt->let.right == null) {
                 for (u32 i = 0; i < stmt->let.var_count; i += 1) {
                     Var *var = &stmt->let.vars[i];
                     assert(var->type == type);
@@ -12679,7 +12696,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 X64_Address first_address = reg_allocator->var_mem_infos[first_var->local_index].address;
                 machinecode_for_expr(context, fn, stmt->let.right, reg_allocator, x64_place_address(first_address));
 
-                for (u32 i = 0; i < stmt->let.var_count; i += 1) {
+                for (u32 i = 1; i < stmt->let.var_count; i += 1) {
                     Var *next_var = &stmt->let.vars[i];
                     assert(next_var->type == type);
                     X64_Address next_address = reg_allocator->var_mem_infos[next_var->local_index].address;
