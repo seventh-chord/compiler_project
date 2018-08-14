@@ -29,7 +29,7 @@ fn main() {
         swap_buffers();
     }
 
-    print("Exiting!");
+    print("Exiting!\n");
     close_window();
     ExitProcess(0);
 }
@@ -169,8 +169,7 @@ let gl_context: Handle;
 let device_context: Handle;
 let close_window_requested = false;
 let key_states: [enum_length(Key)]Key_State;
-let window_width: i64;
-let window_height: i64;
+let window_width, window_height: i64;
 
 fn open_window() {
     print("Creating window and initializing OpenGL\n");

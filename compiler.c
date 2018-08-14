@@ -1584,7 +1584,6 @@ struct Var {
 
 typedef struct Global_Var {
     Var *var;
-    Expr *initial_expr;
 
     u32 data_offset;
 
@@ -1593,6 +1592,15 @@ typedef struct Global_Var {
     bool compute_at_runtime;
     bool in_rdata;
 } Global_Var;
+
+typedef struct Global_Let {
+    File_Pos pos;
+    Var *vars;
+    u32 var_count;
+    Expr *expr;
+    bool compute_at_runtime;
+} Global_Let;
+
 
 typedef enum Unary_Op {
     UNARY_OP_INVALID = 0,
@@ -2111,6 +2119,7 @@ typedef struct Context {
     Scope global_scope;
     Fn **all_fns; // generated in 'typecheck', stretchy buffer
     Global_Var *global_vars; // stretchy buffer
+    Global_Let *global_lets; // stretchy buffer
 
     Type **fn_signatures; // stretchy buffer
 
@@ -5031,7 +5040,145 @@ Stmt *parse_case_body(Context *context, Scope *scope, Token *t, u32 *length) {
     return body;
 }
 
-Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool single_stmt) {
+typedef struct Var_Decl_Info {
+    Var *vars;
+    u32 var_count;
+    Expr *expr;
+} Var_Decl_Info;
+
+bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *length, Var_Decl_Info *info) {
+    File_Pos decl_pos = t->pos;
+    Token *t_start = t;
+
+    bool constant = t->kind == TOKEN_KEYWORD_CONST;
+    t += 1;
+
+    arena_stack_push(&context->stack);
+
+    typedef struct Name_Entry Name_Entry;
+    struct Name_Entry {
+        u8 *name;
+        Name_Entry *next;
+    };
+    Name_Entry *first = null;
+    Name_Entry *last = null;
+    info->var_count = 0;
+
+    while (true) {
+        if (t->kind != TOKEN_IDENTIFIER) {
+            print_file_pos(&t->pos);
+            printf("Expected variable name, but found ");
+            print_token(t);
+            printf("\n");
+            *length = t - t_start;
+            return false;
+        }
+
+        u8 *name = t->identifier;
+        t += 1;
+
+        Name_Entry *entry = arena_new(&context->stack, Name_Entry);
+        entry->name = name;
+        last = (first == null? (first = entry) : (last->next = entry));
+        info->var_count += 1;
+
+        if (t->kind == TOKEN_COMMA) {
+            t += 1;
+            continue;
+        } else if (t->kind == TOKEN_COLON || t->kind == TOKEN_ASSIGN) {
+            break;
+        } else {
+            print_file_pos(&t->pos);
+            printf("Expected a comma ',', a colon ':', or a =, but got a ");
+            print_token(t);
+            printf("\n");
+            return false;
+        }
+    }
+
+    Type *type = null;
+    if (t->kind == TOKEN_COLON) {
+        t += 1;
+
+        u32 type_length = 0;
+        type = parse_type(context, scope, t, &type_length);
+        if (type == null) {
+            *length = t - t_start;
+            return false;
+        }
+        t += type_length;
+    }
+
+    info->expr = null;
+    if (t->kind == TOKEN_ASSIGN) {
+        t += 1;
+
+        u32 right_length = 0;
+        info->expr = parse_expr(context, scope, t, &right_length, false); 
+        if (info->expr == null) {
+            *length = t - t_start;
+            return false;
+        }
+        t += right_length;
+    }
+
+    if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after variable declaration")) {
+        *length = t - t_start;
+        return false;
+    }
+    t += 1;
+
+    if (info->expr == null && type == null) {
+        print_file_pos(&t->pos);
+        printf("Declared ");
+        if (info->var_count > 1) {
+            printf("variables ");
+            for (Name_Entry *e = first; e->next != null; e = e->next) {
+                if (e != first) printf(", ");
+                printf("'%s'", e->name);
+            }
+        } else {
+            printf("variable '%s'", first->name);
+        }
+        printf("without giving type or initial value\n");
+        *length = t - t_start;
+        return false;
+    }
+
+    assert(info->var_count >= 0);
+    info->vars = (Var*) arena_alloc(&context->arena, info->var_count * sizeof(Var));
+    Name_Entry *entry = first;
+    for (u32 i = 0; i < info->var_count; i += 1, entry = entry->next) {
+        assert(entry != null);
+        Var *var = &info->vars[i];
+        var->name = entry->name;
+        var->declaration_pos = decl_pos;
+        var->type = type;
+        if (constant) var->flags |= VAR_FLAG_CONSTANT;
+
+        if (scope->fn != null) {
+            var->local_index = scope->fn->body.var_count;
+            scope->fn->body.var_count += 1;
+        } else {
+            var->flags |= VAR_FLAG_GLOBAL;
+            var->global_index = buf_length(context->global_vars);
+            buf_push(context->global_vars, ((Global_Var) { .var = var, .data_offset = U32_MAX }));
+        }
+
+        Decl *decl = add_declaration(&context->arena, scope);
+        decl->kind = DECL_VAR;
+        decl->name = entry->name;
+        decl->pos = decl_pos;
+        decl->var = var;
+    }
+
+    arena_stack_pop(&context->stack);
+
+    *length = t - t_start;
+    return true;
+}
+
+Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool single_stmt) {
     Token* t_first_stmt_start = t;
 
     u32 stmt_count = 0;
@@ -5453,127 +5600,21 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
             case TOKEN_KEYWORD_CONST:
             case TOKEN_KEYWORD_LET:
             {
-                bool constant = t->kind == TOKEN_KEYWORD_CONST;
-                t += 1;
+                Var_Decl_Info info;
 
-                arena_stack_push(&context->stack);
+                u32 decl_length;
+                bool success = parse_variable_declaration(context, scope, t, &decl_length, &info);
+                t += decl_length;
 
-                typedef struct Name_Entry Name_Entry;
-                struct Name_Entry {
-                    u8 *name;
-                    Name_Entry *next;
-                };
-                Name_Entry *first = null;
-                Name_Entry *last = null;
-                u32 var_count = 0;
-
-                while (true) {
-                    if (t->kind != TOKEN_IDENTIFIER) {
-                        print_file_pos(&t->pos);
-                        printf("Expected variable name, but found ");
-                        print_token(t);
-                        printf("\n");
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-
-                    u8 *name = t->identifier;
-                    t += 1;
-
-                    Name_Entry *entry = arena_new(&context->stack, Name_Entry);
-                    entry->name = name;
-                    last = (first == null? (first = entry) : (last->next = entry));
-                    var_count += 1;
-
-                    if (t->kind == TOKEN_COMMA) {
-                        t += 1;
-                        continue;
-                    } else if (t->kind == TOKEN_COLON || t->kind == TOKEN_ASSIGN) {
-                        break;
-                    } else {
-                        print_file_pos(&t->pos);
-                        printf("Expected a comma ',', a colon ':', or a =, but got a ");
-                        print_token(t);
-                        printf("\n");
-                        return null;
-                    }
-                }
-
-                Type* type = null;
-                if (t->kind == TOKEN_COLON) {
-                    t += 1;
-
-                    u32 type_length = 0;
-                    type = parse_type(context, scope, t, &type_length);
-                    if (type == null) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-                    t += type_length;
-                }
-
-                Expr* expr = null;
-                if (t->kind == TOKEN_ASSIGN) {
-                    t += 1;
-
-                    u32 right_length = 0;
-                    expr = parse_expr(context, scope, t, &right_length, false); 
-                    if (expr == null) {
-                        *length = t - t_first_stmt_start;
-                        return null;
-                    }
-                    t += right_length;
-                }
-
-                if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after variable declaration")) {
+                if (!success) {
                     *length = t - t_first_stmt_start;
                     return null;
                 }
-                t += 1;
-
-                if (expr == null && type == null) {
-                    print_file_pos(&t->pos);
-                    printf("Declared ");
-                    if (var_count > 1) {
-                        printf("variables ");
-                        for (Name_Entry *e = first; e->next != null; e = e->next) {
-                            if (e != first) printf(", ");
-                            printf("'%s'", e->name);
-                        }
-                    } else {
-                        printf("variable '%s'", first->name);
-                    }
-                    printf("without giving type or initial value\n");
-                    *length = t - t_first_stmt_start;
-                    return null;
-                }
-
-                assert(var_count >= 0);
-                Var *vars = (Var*) arena_alloc(&context->arena, var_count * sizeof(Var));
-                Name_Entry *entry = first;
-                for (u32 i = 0; i < var_count; i += 1, entry = entry->next) {
-                    assert(entry != null);
-                    Var *var = &vars[i];
-                    var->name = entry->name;
-                    var->declaration_pos = stmt->pos,
-                    var->type = type;
-                    var->local_index = scope->fn->body.var_count;
-                    if (constant) var->flags |= VAR_FLAG_CONSTANT;
-                    scope->fn->body.var_count += 1;
-
-                    Decl *decl = add_declaration(&context->arena, scope);
-                    decl->kind = DECL_VAR;
-                    decl->name = entry->name;
-                    decl->pos = stmt->pos,
-                    decl->var = var;
-                }
-
-                arena_stack_pop(&context->stack);
 
                 stmt->kind = STMT_LET;
-                stmt->let.vars = vars;
-                stmt->let.var_count = var_count;
-                stmt->let.right = expr; 
+                stmt->let.vars = info.vars;
+                stmt->let.var_count = info.var_count;
+                stmt->let.right = info.expr; 
             } break;
 
             case TOKEN_KEYWORD_ENUM: {
@@ -6615,90 +6656,24 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
         case TOKEN_KEYWORD_CONST:
         case TOKEN_KEYWORD_LET:
         {
-            bool constant = t->kind == TOKEN_KEYWORD_CONST;
+            File_Pos decl_pos = t->pos;
 
-            File_Pos start_pos = t->pos;
-            t += 1;
+            Var_Decl_Info info;
 
-            if (t->kind != TOKEN_IDENTIFIER) {
-                print_file_pos(&t->pos);
-                printf("Expected global variable name, but found ");
-                print_token(t);
-                printf("\n");
+            u32 decl_length;
+            bool success = parse_variable_declaration(context, &context->global_scope, t, &decl_length, &info);
+            t += decl_length;
+
+            if (!success) {
                 valid = false;
-                break;
+            } else {
+                buf_push(context->global_lets, ((Global_Let) {
+                    .pos = decl_pos,
+                    .vars = info.vars,
+                    .var_count = info.var_count,
+                    .expr = info.expr,
+                }));
             }
-            u8 *name = t->identifier;
-            t += 1;
-
-            Type *type = null;
-            if (t->kind == TOKEN_COLON) {
-                t += 1;
-
-                u32 type_length = 0;
-                type = parse_type(context, &context->global_scope, t, &type_length);
-                t += type_length;
-                if (type == null) {
-                    valid = false;
-                    break;
-                }
-            }
-
-            Expr *expr = null;
-            if (t->kind == TOKEN_ASSIGN) {
-                t += 1;
-
-                u32 right_length = 0;
-                expr = parse_expr(context, &context->global_scope, t, &right_length, false); 
-                if (expr == null) {
-                    valid = false;
-                    break;
-                }
-                t += right_length;
-            }
-
-            if (expr == null && type == null) {
-                print_file_pos(&t->pos);
-                printf("Declared global variable '%s' without specifying type or initial value. Hence can't infer type\n", name);
-                valid = false;
-                break;
-            }
-
-            if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after global variable declaration")) {
-                valid = false;
-                break;
-            }
-            t += 1;
-
-            Var *old_var = find_var(&context->global_scope, name, null);
-            if (old_var != null) {
-                u32 initial_decl_line = old_var->declaration_pos.line;
-                print_file_pos(&start_pos);
-                printf("Redeclaration of global '%s'. Initial declaration on line %u\n", name, (u64) initial_decl_line);
-                valid = false;
-                break;
-            }
-
-            Var *var = arena_new(&context->arena, Var);
-
-            u32 global_index = buf_length(context->global_vars);
-            buf_push(context->global_vars, ((Global_Var) {
-                .var = var,
-                .initial_expr = expr,
-            }));
-
-            var->name = name;
-            var->declaration_pos = start_pos;
-            var->type = type;
-            var->flags = VAR_FLAG_GLOBAL;
-            if (constant) var->flags |= VAR_FLAG_CONSTANT;
-            var->global_index = global_index;
-
-            Decl *decl = add_declaration(&context->arena, &context->global_scope);
-            decl->kind = DECL_VAR;
-            decl->name = name;
-            decl->pos = start_pos;
-            decl->var = var;
         } break;
 
         case TOKEN_KEYWORD_ENUM: {
@@ -8835,7 +8810,7 @@ typedef struct Typecheck_Item {
         TYPECHECK_RESOLVE_TYPE,
         TYPECHECK_COMPUTE_SIZE,
         TYPECHECK_FN_BODY,
-        TYPECHECK_GLOBAL_VAR,
+        TYPECHECK_GLOBAL_LET,
     } kind;
 
     Scope *scope;
@@ -8850,7 +8825,7 @@ typedef struct Typecheck_Item {
 
         Fn *fn;
 
-        u32 global_index;
+        u32 global_let_index;
     };
 } Typecheck_Item;
 
@@ -8860,106 +8835,148 @@ typedef struct Typecheck_Queue {
 } Typecheck_Queue;
 
 
-Typecheck_Result check_global(Context *context, Scope *scope, Global_Var *global) {
-    if (global->var->type != null) {
-        Typecheck_Result r = resolve_type(context, scope, &global->var->type, &global->var->declaration_pos);
+Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global_let) {
+    assert(global_let->var_count > 0);
+    Type *var_type = global_let->vars[0].type;
+    for (u32 i = 1; i < global_let->var_count; i += 1) assert(global_let->vars[i].type == var_type);
+
+    if (var_type != null) {
+        Typecheck_Result r = resolve_type(context, scope, &var_type, &global_let->pos);
         if (r != TYPECHECK_RESULT_DONE) return r;
     }
 
     bool loose_types = false;
 
-    if (global->initial_expr != null) {
-        Type *resolve_to = global->var->type;
+    if (global_let->expr != null) {
+        Type *resolve_to = var_type;
         if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
-        Typecheck_Expr_Result r = typecheck_expr(context, scope, global->initial_expr, resolve_to);
+        Typecheck_Expr_Result r = typecheck_expr(context, scope, global_let->expr, resolve_to);
         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
             return r;
         }
 
-        if (global->var->type == null) {
+        if (var_type == null) {
             if (r == TYPECHECK_EXPR_WEAK) loose_types = true;
-            global->var->type = global->initial_expr->type;
+            var_type = global_let->expr->type;
         }
         
-        if (!type_can_assign(global->var->type, global->initial_expr->type)) {
-            print_file_pos(&global->var->declaration_pos);
+        if (!type_can_assign(var_type, global_let->expr->type)) {
+            print_file_pos(&global_let->pos);
             printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
-            print_type(context, global->var->type);
+            print_type(context, var_type);
             printf(" but got ");
-            print_type(context, global->initial_expr->type);
+            print_type(context, global_let->expr->type);
             printf("\n");
             return TYPECHECK_RESULT_BAD;
         }
     }
 
-    if (loose_types) {
-        global->var->flags |= VAR_FLAG_LOOSE_TYPE;
-    } else {
-        global->var->flags &= ~VAR_FLAG_LOOSE_TYPE;
-    }
-
-    if (global->var->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+    if (var_type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
         return TYPECHECK_RESULT_DEPENDENT;
     }
 
-    u64 type_size = type_size_of(global->var->type);
-    u64 type_align = type_align_of(global->var->type);
 
-    global->in_rdata = global->var->flags & VAR_FLAG_CONSTANT;
-    global->data_offset = add_exe_data(context, global->in_rdata, null, type_size, type_align);
-    u8* result_into = &(global->in_rdata? context->seg_rdata : context->seg_data)[global->data_offset];
+    u64 type_size = type_size_of(var_type);
+    u64 type_align = type_align_of(var_type);
 
-    //printf("%s at .data + %u\n", string_table_access(context->string_table, global->var.name), (u64) global->data_offset);
+    for (u32 i = 0; i < global_let->var_count; i += 1) {
+        Var *var = &global_let->vars[i];
+        assert(var->flags & VAR_FLAG_GLOBAL);
+        var->type = var_type;
 
-    if (global->initial_expr != null) {
+        if (loose_types) {
+            var->flags |= VAR_FLAG_LOOSE_TYPE;
+        } else {
+            var->flags &= ~VAR_FLAG_LOOSE_TYPE;
+        }
+
+        Global_Var *global = &context->global_vars[var->global_index];
+        if (global->data_offset == U32_MAX) {
+            global->in_rdata = var->flags & VAR_FLAG_CONSTANT;
+            global->data_offset = add_exe_data(context, global->in_rdata, null, type_size, type_align);
+        }
+    }
+
+    if (global_let->expr != null) {
+        Var *var = &global_let->vars[0];
+        Global_Var *global = &context->global_vars[var->global_index];
+        u8 *result_into = &(global->in_rdata? context->seg_rdata : context->seg_data)[global->data_offset];
+
         arena_stack_push(&context->stack);
-        Eval_Result result = eval_compile_time_expr(context, global->initial_expr, result_into);
+        Eval_Result eval_result = eval_compile_time_expr(context, global_let->expr, result_into);
         arena_stack_pop(&context->stack);
 
-        switch (result) {
+        Typecheck_Result result = -1;
+        switch (eval_result) {
             case EVAL_OK: {
                 global->checked = true;
                 global->valid = true;
                 global->compute_at_runtime = false;
+                result = TYPECHECK_RESULT_DONE;
             } break;
 
             case EVAL_DO_AT_RUNTIME: {
-                if (global->var->flags & VAR_FLAG_CONSTANT) {
+                if (var->flags & VAR_FLAG_CONSTANT) {
                     global->checked = true;
                     global->valid = false;
                     global->compute_at_runtime = false;
 
                     u8 *var_name = global->var->name;
                     print_file_pos(&global->var->declaration_pos);
-                    printf("Can't compute right hand side of 'const %s' at compile time\n", var_name);
-                    return TYPECHECK_RESULT_BAD;
+                    printf("Can't compute right hand side of 'const ");
+                    for (u32 i = 0; i < global_let->var_count; i += 1) {
+                        if (i > 0) printf(", ");
+                        Var *var = &global_let->vars[i];
+                        printf(var->name);
+                    }
+                    printf("' at compile time\n", var_name);
+                    result = TYPECHECK_RESULT_BAD;
                 } else {
                     global->checked = true;
                     global->valid = true;
                     global->compute_at_runtime = true;
+                    global_let->compute_at_runtime = true;
+                    result = TYPECHECK_RESULT_DONE;
                 }
             } break;
 
             case EVAL_BAD: {
                 global->checked = true;
-                return TYPECHECK_RESULT_BAD;
+                result = TYPECHECK_RESULT_BAD;
             } break;
 
             case EVAL_DEPENDENT: {
                 global->checked = false;
-                return TYPECHECK_RESULT_DEPENDENT;
+                result = TYPECHECK_RESULT_DEPENDENT;
             } break;
 
             default: assert(false);
-        }
-    } else {
-        global->checked = true;
-        global->valid = true;
-        global->compute_at_runtime = false;
-    }
 
-    return TYPECHECK_RESULT_DONE;
+        }
+
+        for (u32 i = 1; i < global_let->var_count; i += 1) {
+            Var *other_var = &global_let->vars[0];
+            Global_Var *other_global = &context->global_vars[other_var->global_index];
+            other_global->checked = global->checked;
+            other_global->valid = global->valid;
+            u8 *other_result_into = &(global->in_rdata? context->seg_rdata : context->seg_data)[other_global->data_offset];
+            mem_copy(result_into, other_result_into, type_size);
+        }
+
+        assert(result != -1);
+        return result;
+    } else {
+
+        for (u32 i = 0; i < global_let->var_count; i += 1) {
+            Var *var = &global_let->vars[0];
+            Global_Var *global = &context->global_vars[var->global_index];
+            global->checked = true;
+            global->valid = true;
+            global->compute_at_runtime = false;
+        }
+        return TYPECHECK_RESULT_DONE;
+    }
 }
 
 Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) {
@@ -9014,9 +9031,9 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
             return TYPECHECK_RESULT_DONE;
         } break;
 
-        case TYPECHECK_GLOBAL_VAR: {
-            Global_Var *global = &context->global_vars[item->global_index];
-            return check_global(context, item->scope, global);
+        case TYPECHECK_GLOBAL_LET: {
+            Global_Let *global_let = &context->global_lets[item->global_let_index];
+            return check_global(context, item->scope, global_let);
         } break;
     }
 
@@ -9097,11 +9114,7 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                 Var *var = decl->var;
 
                 if (var->flags & VAR_FLAG_GLOBAL) {
-                    buf_push(queue->items, ((Typecheck_Item) {
-                        .kind = TYPECHECK_GLOBAL_VAR,
-                        .scope = scope,
-                        .global_index = var->global_index,
-                    }));
+                    // Do nothing, this is handled through context->global_lets
                 } else {
                     Fn *fn = scope->fn;
                     assert(fn != null && fn->kind == FN_KIND_NORMAL && fn->body.local_vars != null);
@@ -9145,6 +9158,13 @@ void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stm
 bool typecheck(Context *context) {
     Typecheck_Queue queue = {0};
     typecheck_queue_include_scope(context, &queue, &context->global_scope);
+    for (u32 i = 0; i < buf_length(context->global_lets); i += 1) {
+        buf_push(queue.items, ((Typecheck_Item) {
+            .kind = TYPECHECK_GLOBAL_LET,
+            .scope = &context->global_scope,
+            .global_let_index = i,
+        }));
+    }
 
     u64 passes = 0;
     while (true) {
@@ -9187,9 +9207,18 @@ bool typecheck(Context *context) {
                         printf("    The body of 'fn %s'\n", name);
                     } break;
 
-                    case TYPECHECK_GLOBAL_VAR: {
-                        Global_Var *global = &context->global_vars[item->global_index];
-                        printf("    The global '%s'\n", global->var->name);
+                    case TYPECHECK_GLOBAL_LET: {
+                        Global_Let *global_let = &context->global_lets[item->global_let_index];
+                        if (global_let->var_count == 1) {
+                            printf("    The global '%s'\n", global_let->vars[0].name);
+                        } else {
+                            printf("    The globals ");
+                            for (u32 i = 0; i < global_let->var_count; i += 1) {
+                                if (i > 0) printf(", ");
+                                printf("'%s'", global_let->vars[i].name);
+                            }
+                            printf("\n");
+                        }
                     } break;
 
                     default: assert(false);
@@ -13092,28 +13121,38 @@ void build_machinecode(Context *context) {
         Stmt *first_stmt = null;
         Stmt *last_stmt = null;
 
-        for (u32 i = 0; i < buf_length(context->global_vars); i += 1) {
-            Global_Var *global = &context->global_vars[i];
-            if (global->compute_at_runtime) {
-                assert(!(global->var->flags & VAR_FLAG_CONSTANT));
+        buf_foreach (Global_Let, global_let, context->global_lets) {
+            if (global_let->compute_at_runtime) {
+                Global_Var *first_global = &context->global_vars[global_let->vars[0].global_index];
+
+                // TODO This is hacky. We should generate STMT_LET here, which would lead to significant
+                // less code.
 
                 Expr *left = arena_new(&context->arena, Expr);
                 left->kind = EXPR_VARIABLE;
                 left->flags = EXPR_FLAG_ASSIGNABLE | EXPR_FLAG_ADDRESSABLE;
-                left->type = global->var->type;
-                left->variable.var = global->var;
+                left->type = first_global->var->type;
+                left->variable.var = first_global->var;
 
                 Stmt *stmt = arena_new(&context->arena, Stmt);
                 stmt->kind = STMT_ASSIGNMENT;
                 stmt->assignment.left = left;
-                stmt->assignment.right = global->initial_expr;
+                stmt->assignment.right = global_let->expr;
+                last_stmt = (first_stmt == null? (first_stmt = stmt) : (last_stmt->next = stmt));
 
-                if (first_stmt == null) {
-                    first_stmt = stmt;
-                } else {
-                    last_stmt->next = stmt;
+                for (u32 i = 1; i < global_let->var_count; i += 1) {
+                    Expr *other = arena_new(&context->arena, Expr);
+                    other->kind = EXPR_VARIABLE;
+                    other->flags = EXPR_FLAG_ASSIGNABLE | EXPR_FLAG_ADDRESSABLE;
+                    other->type = first_global->var->type;
+                    other->variable.var = &global_let->vars[i];
+
+                    Stmt *stmt = arena_new(&context->arena, Stmt);
+                    stmt->kind = STMT_ASSIGNMENT;
+                    stmt->assignment.left = other;
+                    stmt->assignment.right = left;
+                    last_stmt = (first_stmt == null? (first_stmt = stmt) : (last_stmt->next = stmt));
                 }
-                last_stmt = stmt;
             }
         }
 
