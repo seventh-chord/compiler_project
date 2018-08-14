@@ -5450,7 +5450,10 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                 t += 1;
             } break;
 
-            case TOKEN_KEYWORD_LET: {
+            case TOKEN_KEYWORD_CONST:
+            case TOKEN_KEYWORD_LET:
+            {
+                bool constant = t->kind == TOKEN_KEYWORD_CONST;
                 t += 1;
 
                 arena_stack_push(&context->stack);
@@ -5555,6 +5558,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
                     var->declaration_pos = stmt->pos,
                     var->type = type;
                     var->local_index = scope->fn->body.var_count;
+                    if (constant) var->flags |= VAR_FLAG_CONSTANT;
                     scope->fn->body.var_count += 1;
 
                     Decl *decl = add_declaration(&context->arena, scope);
@@ -5604,10 +5608,6 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token* t, u32* length, bool si
 
             case TOKEN_KEYWORD_FN: {
                 unimplemented(); // TODO functions declared inside another functions scope
-            } break;
-
-            case TOKEN_KEYWORD_CONST: {
-                unimplemented(); // TODO constants declared inside a functions scope
             } break;
 
             default: {

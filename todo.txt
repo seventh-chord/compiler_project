@@ -35,6 +35,7 @@ Compiler internals
     growing the stack? __chkstk
     static libraries (currently we only support dynamic libraries) (Although both static and dynamic libraries have a .lib file on windows, I think explicitly stating whether we expect to load a file as static or dynamic in code is good, as it serves to avoid confusion)
     can we toggle fp exceptions? Should we expose that?
+    'const's inside a function can still be modified through pointers
 
 Optimized code-gen
     constant folding
