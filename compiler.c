@@ -8840,6 +8840,10 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
     Type *var_type = global_let->vars[0].type;
     for (u32 i = 1; i < global_let->var_count; i += 1) assert(global_let->vars[i].type == var_type);
 
+    if (global_let->var_count == 3) {
+        printf("Ding ding ding!\n");
+    }
+
     if (var_type != null) {
         Typecheck_Result r = resolve_type(context, scope, &var_type, &global_let->pos);
         if (r != TYPECHECK_RESULT_DONE) return r;
@@ -8956,7 +8960,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
         }
 
         for (u32 i = 1; i < global_let->var_count; i += 1) {
-            Var *other_var = &global_let->vars[0];
+            Var *other_var = &global_let->vars[i];
             Global_Var *other_global = &context->global_vars[other_var->global_index];
             other_global->checked = global->checked;
             other_global->valid = global->valid;

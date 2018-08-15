@@ -438,7 +438,7 @@ fn arena_test() {
 
 
 let heap = GetProcessHeap();
-let ARENA_BLOCK_SIZE = 1024;
+const ARENA_BLOCK_SIZE = 1024;
 
 struct Arena {
     data: *u8;
@@ -461,12 +461,12 @@ fn arena_new(arena: *Arena, size: i64) -> *u8 {
 } 
 
 
+const FX, FY, FZ = 7;
 fn funky_decls() {
-    let x, y, z = 7;
-    print_u64(u64(x), 10);
+    print_u64(FX, 10);
     print(", ");
-    print_u64(u64(y), 10);
+    print_u64(FY, 10);
     print(", ");
-    print_u64(u64(z), 10);
+    print_u64(FZ, 10);
     print("\n");
 }
