@@ -1957,7 +1957,6 @@ struct Stmt {
         STMT_END = 0, // Sentinel, returned to mark that no more statements can be parsed
 
         STMT_LET,
-        STMT_DECL, // TODO remove!
         STMT_EXPR,
         STMT_ASSIGNMENT,
         STMT_OP_ASSIGNMENT,
@@ -3136,8 +3135,6 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
 
             printf(";");
         } break;
-
-        case STMT_DECL: {} break;
 
         case STMT_BLOCK: {
             printf("{\n");
@@ -5280,6 +5277,8 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
         Token* t_start = t;
         stmt->pos = t->pos;
 
+        bool no_stmt_generated = false;
+
         switch (t->kind) {
             case TOKEN_BRACKET_CURLY_CLOSE: {
                 stmt->kind = STMT_END;
@@ -5694,7 +5693,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
             } break;
 
             case TOKEN_KEYWORD_ENUM: {
-                stmt->kind = STMT_DECL;
+                no_stmt_generated = true;
 
                 u32 decl_length = 0;
                 bool valid = parse_enum_declaration(context, scope, t, &decl_length);
@@ -5707,7 +5706,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
             } break;
 
             case TOKEN_KEYWORD_STRUCT: {
-                stmt->kind = STMT_DECL;
+                no_stmt_generated = true;
 
                 u32 decl_length = 0;
                 bool valid = parse_struct_declaration(context, &context->global_scope, t, &decl_length);
@@ -5724,7 +5723,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
             } break;
 
             case TOKEN_KEYWORD_FN: {
-                stmt->kind = STMT_DECL;
+                no_stmt_generated = true;
 
                 u32 decl_length = 0;
                 Fn *fn = parse_fn(context, scope, t, &decl_length);
@@ -5799,7 +5798,9 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
         }
 
         // Try parsing more statements after this one
-        if (stmt->kind != STMT_END) {
+        if (no_stmt_generated) {
+            assert(stmt->kind == STMT_END);
+        } else if (stmt->kind != STMT_END) {
             stmt_count += 1;
             stmt->next = arena_new(&context->arena, Stmt);
             stmt = stmt->next;
@@ -8074,10 +8075,6 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             return TYPECHECK_RESULT_DONE;
         } break;
 
-        case STMT_DECL: {
-            return TYPECHECK_RESULT_DONE;
-        } break;
-
         case STMT_BLOCK: {
             for (Stmt* inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
                 Typecheck_Result r = typecheck_stmt(context, &stmt->block.scope, inner);
@@ -8781,7 +8778,6 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             case STMT_EXPR:
             case STMT_ASSIGNMENT:
             case STMT_OP_ASSIGNMENT:
-            case STMT_DECL:
             {} break;
 
             case STMT_BLOCK: {
@@ -12804,9 +12800,6 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                     machinecode_move(context, reg_allocator, x64_place_address(first_address), x64_place_address(next_address), size);
                 }
             }
-        } break;
-
-        case STMT_DECL: {
         } break;
 
         case STMT_EXPR: {
