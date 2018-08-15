@@ -20,7 +20,13 @@ fn main() {
             if r < 0.0 { up = true; }
         }
 
-        draw_group_triangle(&draw_group, Vertex {{ -0.5, 0.5 }}, Vertex {{ 0.5, 0.5 }}, Vertex {{ 0.0, -0.5 }});
+        for x : 0..10 {
+            for y : 0..100 {
+                draw_group_circle(&draw_group, { f32(x)*14.0, f32(y)*14.0 + (x&1==1? 7.0 : 0.0) }, 10.0 - f32(x));
+                draw_group_circle(&draw_group, { f32(window_width) - f32(x)*14.0, f32(y)*14.0 + (x&1==1? 7.0 : 0.0) }, 10.0 - f32(x));
+            }
+        }
+        //draw_group_circle(&draw_group, { 20.0, 20.0 }, 20.0);
 
         glViewport(0, 0, i32(window_width), i32(window_height));
         glClearColor(r, 1.0, 0.2 + (1.0 - r)*0.8, 1.0);
@@ -34,18 +40,27 @@ fn main() {
     ExitProcess(0);
 }
 
-
 struct v2 { x, y: f32; }
 
+fn add_v2(a, b: v2) -> v2 {
+    return { a.x + b.x, a.y + b.y };
+}
+fn scale_v2(a: v2, s: f32) -> v2 {
+    return { a.x * s, a.y * s };
+}
 
-const MAX_VERTICES = 4096;
+
+const MAX_VERTICES = 32768 * 8;
+const MAX_VERTICES_BYTES = MAX_VERTICES * size_of(Vertex);
 
 struct Vertex {
     pos: v2;
 }
 
 struct Draw_Group {
-    shader, vbo, vao: u32;
+    shader: u32;
+    shader_window_size_uniform: i32;
+    vbo, vao: u32;
     vertex_count: i64;
     vertices: *Vertex; // TODO Make this a slice, or something of that nature, so we get ABC
 }
@@ -54,10 +69,12 @@ fn draw_group_init() -> Draw_Group {
     const vertex_shader_source = "
         #version 330 core
 
+        uniform vec2 window_size;
+
         layout(location = 0) in vec2 pos;
 
         void main() {
-            gl_Position = vec4(pos, 0.0, 1.0);
+            gl_Position = vec4((pos / window_size)*2.0 - vec2(1.0), 0.0, 1.0);
         }
     ";
 
@@ -72,9 +89,10 @@ fn draw_group_init() -> Draw_Group {
     ";
 
     let shader = load_shader(vertex_shader_source, fragment_shader_source);
+    let shader_window_size_uniform = glGetUniformLocation(shader, "window_size".data);
 
     let vertex_count = 0;
-    let vertices = cast(*Vertex, alloc(MAX_VERTICES * size_of(Vertex)));
+    let vertices = cast(*Vertex, alloc(MAX_VERTICES_BYTES));
 
     let vbo, vao: u32;
     glGenBuffers(1, &vbo);
@@ -87,27 +105,50 @@ fn draw_group_init() -> Draw_Group {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, 0));
 
-    return Draw_Group { shader, vbo, vao, vertex_count, vertices };
+    return Draw_Group { shader, shader_window_size_uniform, vbo, vao, vertex_count, vertices };
 }
 
-fn draw_group_triangle(draw_group: *Draw_Group, a, b, c: Vertex) {
+fn draw_group_triangle(draw_group: *Draw_Group, a, b, c: v2) {
     let i = draw_group.vertex_count;
     draw_group.vertex_count += 3;
     assert(draw_group.vertex_count <= MAX_VERTICES, "Out of space in draw group");
 
-    *(draw_group.vertices + i + 0) = a;
-    *(draw_group.vertices + i + 1) = b;
-    *(draw_group.vertices + i + 2) = c;
+    *(draw_group.vertices + i + 0) = { a };
+    *(draw_group.vertices + i + 1) = { b };
+    *(draw_group.vertices + i + 2) = { c };
+}
+
+fn draw_group_circle(draw_group: *Draw_Group, center: v2, radius: f32) {
+    const CIRCLE = []v2 {
+        { +1.00, +0.00 },
+        { +0.62, +0.78 },
+        { -0.22, +0.97 },
+        { -0.90, +0.43 },
+        { -0.90, -0.43 },
+        { -0.22, -0.97 },
+        { +0.62, -0.78 },
+    };
+
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[0], radius)), add_v2(center, scale_v2(CIRCLE[1], radius)));
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[1], radius)), add_v2(center, scale_v2(CIRCLE[2], radius)));
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[2], radius)), add_v2(center, scale_v2(CIRCLE[3], radius)));
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[3], radius)), add_v2(center, scale_v2(CIRCLE[4], radius)));
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[4], radius)), add_v2(center, scale_v2(CIRCLE[5], radius)));
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[5], radius)), add_v2(center, scale_v2(CIRCLE[6], radius)));
+    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[6], radius)), add_v2(center, scale_v2(CIRCLE[0], radius)));
 }
 
 fn draw_group_draw(draw_group: *Draw_Group) {
     glUseProgram(draw_group.shader);
+    glUniform2f(draw_group.shader_window_size_uniform, f32(window_width), f32(window_height));
 
     glBindBuffer(GL_ARRAY_BUFFER, draw_group.vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, draw_group.vertex_count * size_of(Vertex), cast(*void, draw_group.vertices));
 
     glBindVertexArray(draw_group.vao);
-    glDrawArrays(GL_TRIANGLES, 0, i32(draw_group.vertex_count / 3));
+    glDrawArrays(GL_TRIANGLES, 0, i32(draw_group.vertex_count));
+
+    draw_group.vertex_count = 0;
 }
 
 
