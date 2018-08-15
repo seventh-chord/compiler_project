@@ -1462,10 +1462,9 @@ typedef struct Var Var;
 
 typedef struct Decl {
     enum {
-        DECL_VAR        = 1,
-        DECL_FN         = 2,
-        DECL_TYPE       = 4,
-        DECL_TYPEDEF    = 8,
+        DECL_VAR = 0,
+        DECL_FN = 1,
+        DECL_TYPE = 2,
     } kind;
 
     u8 *name;
@@ -2150,13 +2149,11 @@ bool file_pos_is_greater(File_Pos *a, File_Pos *b) {
 }
 
 
-#define DECL_ANY_KIND (-1)
-
 Decl *find_declaration(Scope *scope, u8 *interned_name, int kind) {
     while (true) {
         for (u32 i = 0; i < scope->decls_length; i += 1) {
             Decl *decl = &scope->decls[i];
-            if (decl->name == interned_name && ((decl->kind&kind) == decl->kind || kind == DECL_ANY_KIND)) {
+            if (decl->name == interned_name && decl->kind == kind) {
                 return decl;
             }
         }
@@ -2213,7 +2210,20 @@ u32 find_enum_member(Type *type, u8 *name) {
     return U32_MAX;
 }
 
-Decl *add_declaration(Arena *arena, Scope *scope) {
+Decl *add_declaration(
+    Arena *arena, Scope *scope,
+    int kind, u8 *name, File_Pos pos
+) {
+    bool allow_shadowing = (kind&DECL_VAR) && scope->fn != null;
+    if (!allow_shadowing) {
+        for (u32 i = 0; i < scope->decls_length; i += 1) {
+            Decl *other_decl = &scope->decls[i];
+            if (other_decl->kind == kind && other_decl->name == name) {
+                return null;
+            }
+        }
+    }
+
     if (scope->decls_length >= scope->decls_allocated) {
         u32 new_allocated = scope->decls_allocated * 2;
         if (new_allocated == 0) { new_allocated = 16; }
@@ -2227,6 +2237,11 @@ Decl *add_declaration(Arena *arena, Scope *scope) {
     Decl *result = &scope->decls[scope->decls_length];
     scope->decls_length += 1;
     assert(scope->decls_allocated >= scope->decls_length);
+
+    result->kind = kind;
+    result->name = name;
+    result->pos = pos;
+
     return result;
 }
 
@@ -3223,16 +3238,12 @@ Builtin_Fn parse_builtin_fn_name(Context *context, u8 *name) {
 }
 
 Type *parse_user_type_name(Scope *scope, u8 *interned_name) {
-    Decl *decl = find_declaration(scope, interned_name, DECL_TYPE | DECL_TYPEDEF);
+    Decl *decl = find_declaration(scope, interned_name, DECL_TYPE);
     if (decl == null) {
         return null;
-    } else if (decl->kind == DECL_TYPE) {
-        return decl->type;
-    } else if (decl->kind == DECL_TYPEDEF) {
-        return decl->def;
     } else {
-        assert(false);
-        return null;
+        assert(decl->kind == DECL_TYPE);
+        return decl->type;
     }
 }
 
@@ -3521,10 +3532,8 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
                 var->local_index = fn->body.var_count;
                 fn->body.var_count += 1;
 
-                Decl *decl = add_declaration(&context->arena, &fn->body.scope);
-                decl->kind = DECL_VAR;
-                decl->name = p->name;
-                decl->pos  = p->pos;
+                Decl *decl = add_declaration(&context->arena, &fn->body.scope, DECL_VAR, p->name, p->pos);
+                assert(decl != null);
                 decl->var  = var;
 
                 fn->body.param_var_mappings[i] = var;
@@ -3697,18 +3706,13 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(scope, type->enumeration.name);
-    if (old_type != null) {
+    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos);
+    if (decl == null) {
         u8 *name = type->structure.name;
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
         return false;
     }
-
-    Decl *decl = add_declaration(&context->arena, scope);
-    decl->kind = DECL_TYPE;
-    decl->name = type->enumeration.name;
-    decl->pos = declaration_pos;
     decl->type = type;
 
     return true;
@@ -3877,13 +3881,6 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(scope, type->enumeration.name);
-    if (old_type != null) {
-        print_file_pos(&declaration_pos);
-        printf("Redefinition of type '%s'\n", type->enumeration.name);
-        return false;
-    }
-
     // Check that values are valid
     {
         Type_Kind primitive = type->enumeration.value_primitive;
@@ -3952,10 +3949,12 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         }
     }
 
-    Decl *decl = add_declaration(&context->arena, scope);
-    decl->kind = DECL_TYPE;
-    decl->name = type->enumeration.name;
-    decl->pos = declaration_pos;
+    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos);
+    if (decl == null) {
+        print_file_pos(&declaration_pos);
+        printf("Redefinition of type '%s'\n", type->enumeration.name);
+        return false;
+    }
     decl->type = type;
 
     return true;
@@ -5145,6 +5144,8 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
         return false;
     }
 
+    *length = t - t_start;
+
     assert(info->var_count >= 0);
     info->vars = (Var*) arena_alloc(&context->arena, info->var_count * sizeof(Var));
     Name_Entry *entry = first;
@@ -5165,16 +5166,18 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
             buf_push(context->global_vars, ((Global_Var) { .var = var, .data_offset = U32_MAX }));
         }
 
-        Decl *decl = add_declaration(&context->arena, scope);
-        decl->kind = DECL_VAR;
-        decl->name = entry->name;
-        decl->pos = decl_pos;
+        Decl *decl = add_declaration(&context->arena, scope, DECL_VAR, entry->name, decl_pos);
+        if (decl == null) {
+            assert(scope->fn == null);
+            print_file_pos(&decl_pos);
+            printf("Redefinition of variable '%s' is not allowed at global scope\n", entry->name);
+            return false;
+        }
         decl->var = var;
     }
 
     arena_stack_pop(&context->stack);
 
-    *length = t - t_start;
     return true;
 }
 
@@ -5505,10 +5508,8 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                     var->local_index = scope->fn->body.var_count;
                     scope->fn->body.var_count += 1;
 
-                    Decl *index_decl = add_declaration(&context->arena, &stmt->for_.scope);
-                    index_decl->kind = DECL_VAR;
-                    index_decl->name = index_var_name;
-                    index_decl->pos = index_var_pos;
+                    Decl *index_decl = add_declaration(&context->arena, &stmt->for_.scope, DECL_VAR, index_var_name, index_var_pos);
+                    assert(index_decl != null);
                     index_decl->var = var;
 
                     stmt->for_.range.var = var;
@@ -5769,17 +5770,6 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     fn->signature_type = signature_type;
     fn->signature = &signature_type->fn_signature;
 
-    Decl *other_decl = find_declaration(scope, fn->name, DECL_FN);;
-    if (other_decl != null) {
-        u8* name = other_decl->fn->name;
-        print_file_pos(&t_start->pos);
-        printf(
-            "A function called '%s' is defined both on line %u and line %u\n",
-            name, (u64) declaration_pos.line, (u64) other_decl->fn->declaration_pos.line
-        );
-        valid = false;
-    }
-
     if (parse_primitive_name(context, fn->name) != null || context->builtin_names[BUILTIN_CAST] == fn->name) {
         print_file_pos(&t_start->pos);
         printf("Can't use '%s' as a function name, as it is reserved for casts\n", fn->name);
@@ -5831,10 +5821,12 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     *length = t - t_start;
     if (!valid) return null;
 
-    Decl *decl = add_declaration(&context->arena, scope);
-    decl->kind = DECL_FN;
-    decl->name = fn->name;
-    decl->pos = declaration_pos;
+    Decl *decl = add_declaration(&context->arena, scope, DECL_FN, fn->name, declaration_pos);
+    if (decl == null) {
+        print_file_pos(&declaration_pos);
+        printf("Redefinition of function '%s'\n", fn->name);
+        return null;
+    }
     decl->fn = fn;
 
     return fn;
@@ -5875,19 +5867,15 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
 
     *length = t - t_start;
 
-    Type *old_type = parse_user_type_name(scope, name);
-    if (old_type != null) {
+    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, name, declaration_pos);
+    if (decl == null) {
         print_file_pos(&declaration_pos);
         printf("Redefinition of type '%s'\n", name);
         return false;
-    } else {
-        Decl *decl = add_declaration(&context->arena, scope);
-        decl->kind = DECL_TYPE;
-        decl->name = name;
-        decl->pos  = declaration_pos;
-        decl->type = type;
-        return true;
     }
+    decl->type = type;
+
+    return true;
 }
 
 bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32 *length) {
@@ -9072,17 +9060,6 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                         .compute_size_of = decl->type,
                     }));
                 }
-            } break;
-
-            case DECL_TYPEDEF: {
-                buf_push(queue->items, ((Typecheck_Item) {
-                    .kind = TYPECHECK_RESOLVE_TYPE,
-                    .scope = scope,
-                    .resolve_type = {
-                        .slot = &decl->def,
-                        .pos = decl->pos,
-                    },
-                }));
             } break;
 
             case DECL_FN: {
