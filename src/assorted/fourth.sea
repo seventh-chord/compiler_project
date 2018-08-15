@@ -52,17 +52,17 @@ fn print_u64(value: u64, base: u64) {
     let buffer: [30]u8;
 
     if value == 0 {
-        buffer[0] = 0x30; // TODO character literals
+        buffer[0] = '0';
     } else {
         let i: u64 = 0;
         for value > 0 {
             let char = u8(value % base);
-            value = value / base; // TODO operator /=
+            value /= base;
 
             if char <= 9 {
-                buffer[i] = 0x30 + char;
+                buffer[i] = '0' + char;
             } else {
-                buffer[i] = 0x61 + (char - 10);
+                buffer[i] = 'a' + (char - 10);
             }
             i += 1;
         }

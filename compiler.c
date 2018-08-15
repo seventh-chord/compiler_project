@@ -1257,9 +1257,6 @@ typedef struct Token {
         TOKEN_LOGICAL_AND,
         TOKEN_LOGICAL_OR,
 
-        TOKEN_ADD_ASSIGN, // "+="
-        TOKEN_SUB_ASSIGN, // "-="
-
         TOKEN_IDENTIFIER,
         TOKEN_LITERAL_INT,
         TOKEN_LITERAL_FLOAT,
@@ -1335,8 +1332,6 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_SHIFT_RIGHT]          = ">>",
     [TOKEN_LOGICAL_AND]          = "&&",
     [TOKEN_LOGICAL_OR]           = "||",
-    [TOKEN_ADD_ASSIGN]           = "+=",
-    [TOKEN_SUB_ASSIGN]           = "-=",
 
     [TOKEN_DOT]                  = "a dot '.'",
     [TOKEN_SEMICOLON]            = "a semicolon ';'",
@@ -1426,7 +1421,7 @@ enum { POINTER_SIZE = 8 };
 #define TYPE_DEFAULT_FLOAT ((Type_Kind) TYPE_F32)
 #define TYPE_POINTER_DIFF  ((Type_Kind) TYPE_I64)
 
-u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
+u8 *PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_VOID] = "void",
     [TYPE_BOOL] = "bool",
 
@@ -1442,15 +1437,15 @@ u8* PRIMITIVE_NAMES[TYPE_KIND_COUNT] = {
     [TYPE_F32] = "f32",
     [TYPE_F64] = "f64",
 
-    [TYPE_INVALID]          = "<invalid>",
-    [TYPE_POINTER]          = "<pointer>",
-    [TYPE_ARRAY]            = "<array>",
+    [TYPE_INVALID]    = "<invalid>",
+    [TYPE_POINTER]    = "<pointer>",
+    [TYPE_ARRAY]      = "<array>",
+    [TYPE_FN_POINTER] = "<fn ptr>",
 
-    [TYPE_UNRESOLVED_NAME]  = "<unresolved>",
-    [TYPE_STRUCT]           = "<struct>",
-    [TYPE_ENUM]             = "<enum>",
+    [TYPE_STRUCT]          = "<struct>",
+    [TYPE_ENUM]            = "<enum>",
+    [TYPE_UNRESOLVED_NAME] = "<unresolved>",
 
-    [TYPE_FN_POINTER]         = "<fn ptr>",
 };
 
 
@@ -1692,7 +1687,20 @@ bool BINARY_OP_COMPARATIVE[BINARY_OP_COUNT] = {
     [BINARY_LTEQ] = true,
 };
 
-u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
+bool BINARY_OP_CAN_BE_USED_FOR_OP_ASSIGNMENT[BINARY_OP_COUNT] = {
+    [BINARY_ADD] = true,
+    [BINARY_SUB] = true,
+    [BINARY_MUL] = true,
+    [BINARY_DIV] = true,
+    [BINARY_MOD] = true,
+    [BINARY_AND] = true,
+    [BINARY_OR]  = true,
+    [BINARY_XOR] = true,
+    [BINARY_SHL] = true,
+    [BINARY_SHR] = true,
+};
+
+u8 *BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [BINARY_ADD] = "+",
     [BINARY_SUB] = "-",
     [BINARY_MUL] = "*",
@@ -1715,6 +1723,80 @@ u8* BINARY_OP_SYMBOL[BINARY_OP_COUNT] = {
     [BINARY_GTEQ] = ">=",
     [BINARY_LT]   = "<",
     [BINARY_LTEQ] = "<=",
+};
+
+Binary_Op TOKEN_TO_BINARY_OP_MAP[TOKEN_KIND_COUNT] = {
+    [TOKEN_ADD] = BINARY_ADD,
+    [TOKEN_SUB] = BINARY_SUB,
+    [TOKEN_MUL] = BINARY_MUL,
+    [TOKEN_DIV] = BINARY_DIV,
+    [TOKEN_MOD] = BINARY_MOD,
+
+    [TOKEN_AND] = BINARY_AND,
+    [TOKEN_OR]  = BINARY_OR,
+    [TOKEN_XOR] = BINARY_XOR,
+
+    [TOKEN_SHIFT_RIGHT] = BINARY_SHR,
+    [TOKEN_SHIFT_LEFT]  = BINARY_SHL,
+
+    [TOKEN_LOGICAL_AND] = BINARY_LOGICAL_AND,
+    [TOKEN_LOGICAL_OR]  = BINARY_LOGICAL_OR,
+
+    [TOKEN_GREATER]          = BINARY_GT,
+    [TOKEN_GREATER_OR_EQUAL] = BINARY_GTEQ,
+    [TOKEN_LESS]             = BINARY_LT,
+    [TOKEN_LESS_OR_EQUAL]    = BINARY_LTEQ,
+    [TOKEN_EQUAL]            = BINARY_EQ,
+    [TOKEN_NOT_EQUAL]        = BINARY_NEQ,
+};
+
+
+
+typedef enum Primitive_Group {
+    PRIMITIVE_GROUP_INVALID = 0,
+    PRIMITIVE_GROUP_INT,
+    PRIMITIVE_GROUP_POINTER,
+    PRIMITIVE_GROUP_FLOAT,
+    PRIMITIVE_GROUP_BOOL,
+    PRIMITIVE_GROUP_COUNT,
+} Primitive_Group;
+
+Primitive_Group TYPE_KIND_TO_PRIMITIVE_GROUP_MAP[TYPE_KIND_COUNT] = {
+    [TYPE_BOOL] = PRIMITIVE_GROUP_BOOL,
+
+    [TYPE_U8]  = PRIMITIVE_GROUP_INT,
+    [TYPE_U16] = PRIMITIVE_GROUP_INT,
+    [TYPE_U32] = PRIMITIVE_GROUP_INT,
+    [TYPE_U64] = PRIMITIVE_GROUP_INT,
+    [TYPE_I8]  = PRIMITIVE_GROUP_INT,
+    [TYPE_I16] = PRIMITIVE_GROUP_INT,
+    [TYPE_I32] = PRIMITIVE_GROUP_INT,
+    [TYPE_I64] = PRIMITIVE_GROUP_INT,
+
+    [TYPE_F32] = PRIMITIVE_GROUP_FLOAT,
+    [TYPE_F64] = PRIMITIVE_GROUP_FLOAT,
+
+    [TYPE_POINTER]    = PRIMITIVE_GROUP_POINTER,
+    //[TYPE_FN_POINTER] = PRIMITIVE_GROUP_POINTER, // NB We only use this map for binary op validity, math on fn pointers makes no sense
+};
+
+bool BINARY_OP_VALIDITY_MAP[BINARY_OP_COUNT][PRIMITIVE_GROUP_COUNT] = {
+                   /* invalid  int      pointer  float    bool */
+    [BINARY_ADD] = { false,    true,    false,   true,    false },
+    [BINARY_SUB] = { false,    true,    true,    true,    false },
+    [BINARY_DIV] = { false,    true,    false,   true,    false },
+    [BINARY_MUL] = { false,    true,    false,   true,    false },
+    [BINARY_MOD] = { false,    true,    false,   false,   false },
+
+    [BINARY_AND] = { false,    true,    true,    false,   true  },
+    [BINARY_OR]  = { false,    true,    true,    false,   true  },
+    [BINARY_XOR] = { false,    true,    true,    false,   true  },
+
+    [BINARY_SHL] = { false,    true,    true,    false,   false  },
+    [BINARY_SHR] = { false,    true,    true,    false,   false  },
+
+    [BINARY_LOGICAL_AND] = { false, false, false, false, true },
+    [BINARY_LOGICAL_OR]  = { false, false, false, false, true },
 };
 
 
@@ -1878,6 +1960,7 @@ struct Stmt {
         STMT_DECL, // TODO remove!
         STMT_EXPR,
         STMT_ASSIGNMENT,
+        STMT_OP_ASSIGNMENT,
 
         STMT_BLOCK,
         STMT_IF,
@@ -1905,6 +1988,12 @@ struct Stmt {
             Expr *left;
             Expr *right;
         } assignment;
+
+        struct {
+            Expr *left;
+            Expr *right;
+            Binary_Op op;
+        } op_assignment;
 
         struct {
             Stmt *stmt;
@@ -3012,6 +3101,13 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
             print_expr(context, stmt->assignment.left);
             printf(" = ");
             print_expr(context, stmt->assignment.right);
+            printf(";");
+        } break;
+
+        case STMT_OP_ASSIGNMENT: {
+            print_expr(context, stmt->op_assignment.left);
+            printf(" %s= ", BINARY_OP_SYMBOL[stmt->op_assignment.op]);
+            print_expr(context, stmt->op_assignment.right);
             printf(";");
         } break;
 
@@ -4467,8 +4563,6 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                 case TOKEN_KEYWORD_LET:
                 case TOKEN_KEYWORD_CONST:
                 case TOKEN_KEYWORD_FN:
-                case TOKEN_ADD_ASSIGN:
-                case TOKEN_SUB_ASSIGN:
                 case TOKEN_RANGE:
                 {
                     reached_end = true;
@@ -4481,36 +4575,16 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                 } break;
 
                 default: {
-                    Binary_Op op = BINARY_OP_INVALID;
-                    switch (t->kind) {
-                        case TOKEN_ADD:                op = BINARY_ADD; break;
-                        case TOKEN_SUB:                op = BINARY_SUB; break;
-                        case TOKEN_MUL:                op = BINARY_MUL; break;
-                        case TOKEN_DIV:                op = BINARY_DIV; break;
-                        case TOKEN_MOD:                op = BINARY_MOD; break;
-
-                        case TOKEN_AND:                op = BINARY_AND; break;
-                        case TOKEN_OR:                 op = BINARY_OR; break;
-                        case TOKEN_XOR:                op = BINARY_XOR; break;
-                        case TOKEN_SHIFT_RIGHT:        op = BINARY_SHR; break;
-                        case TOKEN_SHIFT_LEFT:         op = BINARY_SHL; break;
-
-                        case TOKEN_LOGICAL_AND:        op = BINARY_LOGICAL_AND; break;
-                        case TOKEN_LOGICAL_OR:         op = BINARY_LOGICAL_OR; break;
-
-                        case TOKEN_GREATER:            op = BINARY_GT; break;
-                        case TOKEN_GREATER_OR_EQUAL:   op = BINARY_GTEQ; break;
-                        case TOKEN_LESS:               op = BINARY_LT; break;
-                        case TOKEN_LESS_OR_EQUAL:      op = BINARY_LTEQ; break;
-                        case TOKEN_EQUAL:              op = BINARY_EQ; break;
-                        case TOKEN_NOT_EQUAL:          op = BINARY_NEQ; break;
-                    }
-
+                    Binary_Op op = TOKEN_TO_BINARY_OP_MAP[t->kind];
                     if (op != BINARY_OP_INVALID) {
-                        shunting_yard_push_op(context, yard, op);
-                        could_parse = true;
-                        expect_value = true;
-                        t += 1;
+                        if (t[1].kind == TOKEN_ASSIGN) {
+                            reached_end = true; // Parse as assignment operator instead
+                        } else {
+                            shunting_yard_push_op(context, yard, op);
+                            could_parse = true;
+                            expect_value = true;
+                            t += 1;
+                        }
                     }
                 } break;
             }
@@ -5677,9 +5751,25 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                     return null;
                 }
 
-                switch (t->kind) {
-                    case TOKEN_ASSIGN: {
-                        t += 1;
+                if (t[0].kind == TOKEN_ASSIGN) {
+                    t += 1;
+
+                    u32 right_length = 0;
+                    Expr* right = parse_expr(context, scope, t, &right_length, false);
+                    t += right_length;
+
+                    if (right == null) {
+                        *length = t - t_first_stmt_start;
+                        return null;
+                    }
+
+                    stmt->kind = STMT_ASSIGNMENT;
+                    stmt->assignment.left = left;
+                    stmt->assignment.right = right;
+                } else {
+                    Binary_Op op = TOKEN_TO_BINARY_OP_MAP[t[0].kind];
+                    if (t[1].kind == TOKEN_ASSIGN && BINARY_OP_CAN_BE_USED_FOR_OP_ASSIGNMENT[op]) {
+                        t += 2;
 
                         u32 right_length = 0;
                         Expr* right = parse_expr(context, scope, t, &right_length, false);
@@ -5690,48 +5780,14 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                             return null;
                         }
 
-                        stmt->kind = STMT_ASSIGNMENT;
-                        stmt->assignment.left = left;
-                        stmt->assignment.right = right;
-                    } break;
-
-                    case TOKEN_ADD_ASSIGN:
-                    case TOKEN_SUB_ASSIGN:
-                    {
-                        Binary_Op op;
-                        switch (t->kind) {
-                            case TOKEN_ADD_ASSIGN: op = BINARY_ADD; break;
-                            case TOKEN_SUB_ASSIGN: op = BINARY_SUB; break;
-                            default: assert(false);
-                        }
-
-                        t += 1;
-
-                        u32 right_length = 0;
-                        Expr* right = parse_expr(context, scope, t, &right_length, false);
-                        t += right_length;
-
-                        if (right == null) {
-                            *length = t - t_first_stmt_start;
-                            return null;
-                        }
-
-                        Expr* binary = arena_new(&context->arena, Expr);
-                        binary->kind = EXPR_BINARY;
-                        binary->pos = left->pos;
-                        binary->binary.left = left;
-                        binary->binary.right = right;
-                        binary->binary.op = op;
-
-                        stmt->kind = STMT_ASSIGNMENT;
-                        stmt->assignment.left = left;
-                        stmt->assignment.right = binary;
-                    } break;
-
-                    default: {
+                        stmt->kind = STMT_OP_ASSIGNMENT;
+                        stmt->op_assignment.left = left;
+                        stmt->op_assignment.right = right;
+                        stmt->op_assignment.op = op;
+                    } else {
                         stmt->kind = STMT_EXPR;
                         stmt->expr = left;
-                    } break;
+                    }
                 }
 
                 if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after statement")) {
@@ -6187,21 +6243,13 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 int kind = -1;
                 switch (a) {
                     case '+': {
-                        if (b == '=') {
-                            kind = TOKEN_ADD_ASSIGN;
-                            i += 2;
-                        } else {
-                            kind = TOKEN_ADD;
-                            i += 1;
-                        }
+                        kind = TOKEN_ADD;
+                        i += 1;
                     } break;
 
                     case '-': {
                         if (b == '>') {
                             kind = TOKEN_ARROW;
-                            i += 2;
-                        } else if (b == '=') {
-                            kind = TOKEN_SUB_ASSIGN;
                             i += 2;
                         } else {
                             kind = TOKEN_SUB;
@@ -7377,53 +7425,12 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 if (expr->binary.left->type == expr->binary.right->type) {
                     expr->type = expr->binary.left->type;
                     Type_Kind kind = expr->type->kind;
+
                     Binary_Op op = expr->binary.op;
+                    Primitive_Group group = TYPE_KIND_TO_PRIMITIVE_GROUP_MAP[kind];
+                    valid_types = BINARY_OP_VALIDITY_MAP[op][group];
 
-                    enum {
-                        INT,
-                        POINTER,
-                        FLOAT,
-                        BOOL,
-                        GROUP_COUNT,
-                    } group;
-
-                    switch (kind) {
-                        case TYPE_BOOL:
-                            group = BOOL; break;
-
-                        case TYPE_U8: case TYPE_U16: case TYPE_U32: case TYPE_U64:
-                        case TYPE_I8: case TYPE_I16: case TYPE_I32: case TYPE_I64:
-                            group = INT; break;
-
-                        case TYPE_F32: case TYPE_F64:
-                            group = FLOAT; break;
-
-                        case TYPE_POINTER: case TYPE_FN_POINTER:
-                            group = POINTER; break;
-                    }
-
-                    bool VALIDITY_MAP[BINARY_OP_COUNT][GROUP_COUNT] = {
-                                       /* int   ptr    float  bool */
-                        [BINARY_ADD] = { true,  false, true,  false },
-                        [BINARY_SUB] = { true,  true,  true,  false },
-                        [BINARY_DIV] = { true,  false, true,  false },
-                        [BINARY_MUL] = { true,  false, true,  false },
-                        [BINARY_MOD] = { true,  false, false, false },
-
-                        [BINARY_AND] = { true,  true,  false, true  },
-                        [BINARY_OR]  = { true,  true,  false, true  },
-                        [BINARY_XOR] = { true,  true,  false, true  },
-
-                        [BINARY_SHL] = { true,  true,  false, false  },
-                        [BINARY_SHR] = { true,  true,  false, false  },
-
-                        [BINARY_LOGICAL_AND] = { false, false, false, true },
-                        [BINARY_LOGICAL_OR]  = { false, false, false, true },
-                    };
-
-                    valid_types = VALIDITY_MAP[op][group];
-
-                    if (group == POINTER && op == BINARY_SUB) {
+                    if (group == PRIMITIVE_GROUP_POINTER && op == BINARY_SUB) {
                         expr->type = &context->primitive_types[TYPE_POINTER_DIFF];
                     }
                 // Special-case pointer-pointer arithmetic
@@ -7894,23 +7901,28 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
     return strong? TYPECHECK_EXPR_STRONG : TYPECHECK_EXPR_WEAK;
 }
 
+
 Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
     Type *void_type = &context->primitive_types[TYPE_VOID];
 
     switch (stmt->kind) {
         case STMT_ASSIGNMENT: {
+            Expr *left  = stmt->assignment.left;
+            Expr *right = stmt->assignment.right;
+
             Typecheck_Expr_Result r;
 
-            r = typecheck_expr(context, scope, stmt->assignment.left, void_type);
+            Type *void_type = &context->primitive_types[TYPE_VOID];
+            r = typecheck_expr(context, scope, left, void_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
-            Type* left_type = stmt->assignment.left->type;
+            Type *left_type = left->type;
 
-            r = typecheck_expr(context, scope, stmt->assignment.right, left_type);
+            r = typecheck_expr(context, scope, right, left_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
-            Type* right_type = stmt->assignment.right->type;
+            Type *right_type = right->type;
 
             if (!type_can_assign(right_type, left_type)) {
-                print_file_pos(&stmt->pos);
+                print_file_pos(&left->pos);
                 printf("Types in assignment don't match: ");
                 print_type(context, left_type);
                 printf(" vs ");
@@ -7919,15 +7931,80 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 return TYPECHECK_RESULT_BAD;
             }
 
-            if (!(stmt->assignment.left->flags & EXPR_FLAG_ASSIGNABLE)) {
-                print_file_pos(&stmt->pos);
+            if (!(left->flags & EXPR_FLAG_ASSIGNABLE)) {
+                print_file_pos(&left->pos);
                 printf("Can't assign to left hand side");
-                if (stmt->assignment.left->kind == EXPR_VARIABLE && (stmt->assignment.left->variable.var->flags & VAR_FLAG_CONSTANT)) {
-                    u8 *const_name = stmt->assignment.left->variable.var->name;
+                if (left->kind == EXPR_VARIABLE && (left->variable.var->flags & VAR_FLAG_CONSTANT)) {
+                    u8 *const_name = left->variable.var->name;
                     printf(", %s is const", const_name);
                 } else {
                     printf(" of type ");
-                    print_type(context, stmt->assignment.left->type);
+                    print_type(context, left->type);
+                }
+                printf("\n");
+                return TYPECHECK_RESULT_BAD;
+            }
+        } break;
+
+        case STMT_OP_ASSIGNMENT: {
+            Binary_Op op = stmt->op_assignment.op;
+            Expr *left   = stmt->op_assignment.left;
+            Expr *right  = stmt->op_assignment.right;
+
+            Typecheck_Expr_Result r;
+
+            Type *void_type = &context->primitive_types[TYPE_VOID];
+            r = typecheck_expr(context, scope, left, void_type);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
+            Type *left_type = left->type;
+
+            Type *solidify_right_to;
+            if (left_type->kind == TYPE_POINTER || left_type->kind == TYPE_FN_POINTER) {
+                solidify_right_to = &context->primitive_types[TYPE_POINTER_DIFF];
+            } else {
+                solidify_right_to = left_type;
+            }
+
+            r = typecheck_expr(context, scope, right, solidify_right_to);
+            if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
+            Type *right_type = right->type;
+
+            if (left_type == right_type) {
+                Primitive_Group group = TYPE_KIND_TO_PRIMITIVE_GROUP_MAP[left_type->kind];
+                bool valid_types = BINARY_OP_VALIDITY_MAP[op][group];
+
+                if (!valid_types) {
+                    print_file_pos(&left->pos);
+                    printf("Can't use operator %s on ", BINARY_OP_SYMBOL[op]);
+                    print_type(context, left_type);
+                    printf("\n");
+                    return TYPECHECK_RESULT_BAD;
+                }
+            } else if (
+                (op == BINARY_ADD || op == BINARY_SUB) &&
+                left_type->kind == TYPE_POINTER &&
+                (right_type->kind == TYPE_U64 || right_type->kind == TYPE_I64)
+            ) {
+                // This is valid!
+            } else {
+                print_file_pos(&left->pos);
+                printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[op]);
+                print_type(context, left_type);
+                printf(" vs ");
+                print_type(context, right_type);
+                printf("\n");
+                return TYPECHECK_EXPR_BAD;
+            }
+
+            if (!(left->flags & EXPR_FLAG_ASSIGNABLE)) {
+                print_file_pos(&stmt->pos);
+                printf("Can't assign to left hand side");
+                if (left->kind == EXPR_VARIABLE && (left->variable.var->flags & VAR_FLAG_CONSTANT)) {
+                    u8 *const_name = left->variable.var->name;
+                    printf(", %s is const", const_name);
+                } else {
+                    printf(" of type ");
+                    print_type(context, left->type);
                 }
                 printf("\n");
                 return TYPECHECK_RESULT_BAD;
@@ -8704,6 +8781,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             case STMT_LET:
             case STMT_EXPR:
             case STMT_ASSIGNMENT:
+            case STMT_OP_ASSIGNMENT:
             case STMT_DECL:
             {} break;
 
@@ -12763,6 +12841,28 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 X64_Place left_place = machinecode_for_addressable_expr(context, fn, left, reg_allocator, reserves_for_rhs);
                 machinecode_for_expr(context, fn, right, reg_allocator, left_place);
             }
+        } break;
+
+        case STMT_OP_ASSIGNMENT: {
+            Binary_Op op = stmt->op_assignment.op;
+            Expr *left  = stmt->op_assignment.left;
+            Expr *right = stmt->op_assignment.right;
+            Type *type = left->type; // NB this has to be left->type, bc we can do 'pointer += int', but not 'int += pointer'
+
+            bool needs_temporary =
+                primitive_is_compound(type->kind) &&
+                !(right->kind == EXPR_VARIABLE || right->kind == EXPR_STRING_LITERAL);
+            assert(!needs_temporary);
+
+            Expr binary_expr = {
+                .kind = EXPR_BINARY,
+                .type = type,
+                .binary = { op, left, right },
+            };
+
+            u32 reserves = machinecode_expr_reserves(&binary_expr);
+            X64_Place left_place = machinecode_for_addressable_expr(context, fn, left, reg_allocator, reserves);
+            machinecode_for_expr(context, fn, &binary_expr, reg_allocator, left_place);
         } break;
 
         case STMT_BLOCK: {
