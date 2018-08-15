@@ -47,7 +47,7 @@ struct Vertex {
 struct Draw_Group {
     shader, vbo, vao: u32;
     vertex_count: i64;
-    vertices: *Vertex; // TODO Make this a slice, or something of that nature
+    vertices: *Vertex; // TODO Make this a slice, or something of that nature, so we get ABC
 }
 
 fn draw_group_init() -> Draw_Group {

@@ -7250,11 +7250,11 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     bool any_named = false;
                     bool any_unnamed = false;
 
-                    u8* set_map = arena_alloc(&context->stack, expr->type->structure.member_count);
+                    u8 *set_map = arena_alloc(&context->stack, expr->type->structure.member_count);
                     mem_clear(set_map, expr->type->structure.member_count);
 
                     for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        Expr* child = expr->compound.content[i].expr;
+                        Expr *child = expr->compound.content[i].expr;
 
                         if (expr->compound.content[i].name_mode == EXPR_COMPOUND_UNRESOLVED_NAME) {
                             u8 *unresolved_name = expr->compound.content[i].unresolved_name;
@@ -7280,7 +7280,6 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         }
 
                         if (expr->compound.content[i].name_mode == EXPR_COMPOUND_NO_NAME) {
-                            assert(expr->compound.content[i].member_index == 0);
                             expr->compound.content[i].member_index = i;
                             any_unnamed = true;
                         } else {
@@ -9043,9 +9042,8 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
         assert(result != -1);
         return result;
     } else {
-
         for (u32 i = 0; i < global_let->var_count; i += 1) {
-            Var *var = &global_let->vars[0];
+            Var *var = &global_let->vars[i];
             Global_Var *global = &context->global_vars[var->global_index];
             global->checked = true;
             global->valid = true;
