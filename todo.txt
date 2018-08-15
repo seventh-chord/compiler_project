@@ -1,13 +1,13 @@
 Unimplemented & bugs
     proper error message when 'fn main' is missing
     integer division algorithm
-    machinecode_move bug (documented in code, I think)
+    machinecode_move bug (documented in code, I think. Easy to fix now too...)
     'enum Foo(i64) { A = I64_MIN - 1 }', with the value as a literal, does not generate an error, because we have no way of detecting the underflow happening...
 
 Other
     infer executable name if none is given on command line
     allow passing command line before source name (do we want this? it probably what people expect though)
-    make test failures easier to spot
+    a proper test-suite for the compiler
 
 Language features
     namespaces, for includes, extern-blocks, etc
@@ -15,15 +15,15 @@ Language features
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
     complete type_info_of_{value, type}
     slices
-    a 'any' type (pointer + type info)
+    a 'any' type (void pointer + type info)
     uninitialized (zeroed) global variables in .bss
     unions
-    assignment operators (*= /= &= |= ^= <<= >>=), not sure if I want all of them...
-    taking the address of temporaries (c doesn't support this though, and it messes with potential optimization)
     a defer statement
     maybe a better parser for floats? The current one is pretty accurate for f32 at least though
     casts from/to bool
     flags enums
+    array bounds checking
+    static_assert
 
 Compiler internals
     reorder 'Typecheck_Item's to reduce passes in typechecker

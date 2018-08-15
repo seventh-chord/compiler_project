@@ -4459,6 +4459,13 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                     expect_value = false;
                 } break;
 
+                case TOKEN_ADD: {
+                    // unary +, which we assume to be a no-op
+                    could_parse = true;
+                    expect_value = true;
+                    t += 1;
+                } break;
+
                 default: {
                     Unary_Op op = UNARY_OP_INVALID;
                     switch (t->kind) {
