@@ -11921,7 +11921,7 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                             instruction_mov_reg_reg(context, left_reg, RAX, op_size);
                         }
 
-                        if (op_size > 1 && right_reg != RDX) {
+                        if (op_size > 1 && right_reg != RDX && left_reg != RDX) {
                             register_allocate_specific(context, reg_allocator, RDX); // We will clobber RDX
                         }
 
