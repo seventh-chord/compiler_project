@@ -1875,7 +1875,7 @@ struct Stmt {
         STMT_END = 0, // Sentinel, returned to mark that no more statements can be parsed
 
         STMT_LET,
-        STMT_DECL,
+        STMT_DECL, // TODO remove!
         STMT_EXPR,
         STMT_ASSIGNMENT,
 
@@ -3261,11 +3261,12 @@ Type *parse_user_type_name(Scope *scope, u8 *interned_name) {
     }
 }
 
-Type *parse_fn_signature    (Context *context, Scope *scope, Token *t, u32 *length, Fn *fn);
-Expr *parse_expr            (Context *context, Scope *scope, Token *t, u32 *length, bool stop_on_open_curly);
-Expr  *parse_compound       (Context *context, Scope *scope, Token *t, u32 *length);
-Expr **parse_parameter_list (Context *context, Scope *scope, Token *t, u32 *length, u32 *count);
-Expr  *parse_call           (Context *context, Scope *scope, Token *t, u32 *length);
+Type*parse_fn_signature    (Context *context, Scope *scope, Token *t, u32 *length, Fn *fn);
+Expr *parse_expr           (Context *context, Scope *scope, Token *t, u32 *length, bool stop_on_open_curly);
+Expr *parse_compound       (Context *context, Scope *scope, Token *t, u32 *length);
+Expr **parse_parameter_list(Context *context, Scope *scope, Token *t, u32 *length, u32 *count);
+Expr *parse_call           (Context *context, Scope *scope, Token *t, u32 *length);
+Fn *parse_fn               (Context *context, Scope *scope, Token *t, u32 *length);
 
 Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
     Token* t_start = t;
@@ -5649,7 +5650,21 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
             } break;
 
             case TOKEN_KEYWORD_FN: {
-                unimplemented(); // TODO functions declared inside another functions scope
+                stmt->kind = STMT_DECL;
+
+                u32 decl_length = 0;
+                Fn *fn = parse_fn(context, scope, t, &decl_length);
+                t += decl_length;
+
+                if (fn == null) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                } else if (fn->kind != FN_KIND_NORMAL) {
+                    print_file_pos(&fn->declaration_pos);
+                    printf("Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks\n", fn->name);
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
             } break;
 
             default: {
@@ -6609,16 +6624,15 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
         case TOKEN_KEYWORD_FN: {
             u32 length = 0;
             Fn* fn = parse_fn(context, &context->global_scope, t, &length);
+            t += length;
 
             if (fn == null) {
                 valid = false;
             } else if (fn->kind != FN_KIND_NORMAL) {
-                print_file_pos(&t->pos);
+                print_file_pos(&fn->declaration_pos);
                 printf("Function '%s' doesn't have a body. Functions without bodies can only be inside 'extern' blocks\n", fn->name);
                 valid = false;
             }
-
-            t += length;
         } break;
 
         case TOKEN_KEYWORD_EXTERN: {
