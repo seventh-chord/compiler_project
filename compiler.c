@@ -1198,6 +1198,13 @@ typedef struct File_Pos {
     u32 character;
 } File_Pos;
 
+void print_file_pos(File_Pos* pos) {
+    u8* name = pos->file_name;
+    if (name == null) name = "<unkown file>";
+    printf("%s(%u): ", name, (u64) pos->line);
+}
+
+
 enum { KEYWORD_COUNT = 19 };
 
 typedef struct Token {
@@ -2219,6 +2226,19 @@ Decl *add_declaration(
         for (u32 i = 0; i < scope->decls_length; i += 1) {
             Decl *other_decl = &scope->decls[i];
             if (other_decl->kind == kind && other_decl->name == name) {
+                u8 *kind_name;
+                switch (other_decl->kind) {
+                    case DECL_VAR:  kind_name = "variable"; break;
+                    case DECL_FN:   kind_name = "function"; break;
+                    case DECL_TYPE: kind_name = "type"; break;
+                    default: assert(false);
+                }
+
+                print_file_pos(&pos);
+                printf(
+                    "Redefinition of %s '%s'. First definition on line %u\n",
+                    kind_name, name, (u64) other_decl->pos.line
+                );
                 return null;
             }
         }
@@ -2691,12 +2711,6 @@ u64 add_exe_data(Context *context, bool read_only, u8 *data, u64 length, u64 ali
     }
 
     return aligned_data_offset;
-}
-
-void print_file_pos(File_Pos* pos) {
-    u8* name = pos->file_name;
-    if (name == null) name = "<unkown file>";
-    printf("%s(%u): ", name, (u64) pos->line);
 }
 
 void print_expr(Context *context, Expr *expr);
@@ -3707,12 +3721,7 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
     *length = t - t_start;
 
     Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos);
-    if (decl == null) {
-        u8 *name = type->structure.name;
-        print_file_pos(&declaration_pos);
-        printf("Redefinition of type '%s'\n", name);
-        return false;
-    }
+    if (decl == null) return false;
     decl->type = type;
 
     return true;
@@ -3950,11 +3959,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
     }
 
     Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos);
-    if (decl == null) {
-        print_file_pos(&declaration_pos);
-        printf("Redefinition of type '%s'\n", type->enumeration.name);
-        return false;
-    }
+    if (decl == null) return false;
     decl->type = type;
 
     return true;
@@ -5167,12 +5172,7 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
         }
 
         Decl *decl = add_declaration(&context->arena, scope, DECL_VAR, entry->name, decl_pos);
-        if (decl == null) {
-            assert(scope->fn == null);
-            print_file_pos(&decl_pos);
-            printf("Redefinition of variable '%s' is not allowed at global scope\n", entry->name);
-            return false;
-        }
+        if (decl == null) return false;
         decl->var = var;
     }
 
@@ -5822,11 +5822,7 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     if (!valid) return null;
 
     Decl *decl = add_declaration(&context->arena, scope, DECL_FN, fn->name, declaration_pos);
-    if (decl == null) {
-        print_file_pos(&declaration_pos);
-        printf("Redefinition of function '%s'\n", fn->name);
-        return null;
-    }
+    if (decl == null) return null;
     decl->fn = fn;
 
     return fn;
@@ -5868,11 +5864,7 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
     *length = t - t_start;
 
     Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, name, declaration_pos);
-    if (decl == null) {
-        print_file_pos(&declaration_pos);
-        printf("Redefinition of type '%s'\n", name);
-        return false;
-    }
+    if (decl == null) return false;
     decl->type = type;
 
     return true;
