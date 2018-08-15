@@ -2221,7 +2221,7 @@ Decl *add_declaration(
     Arena *arena, Scope *scope,
     int kind, u8 *name, File_Pos pos
 ) {
-    bool allow_shadowing = (kind&DECL_VAR) && scope->fn != null;
+    bool allow_shadowing = kind == DECL_VAR && scope->fn != null;
     if (!allow_shadowing) {
         for (u32 i = 0; i < scope->decls_length; i += 1) {
             Decl *other_decl = &scope->decls[i];
