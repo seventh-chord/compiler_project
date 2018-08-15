@@ -11310,6 +11310,17 @@ u32 machinecode_expr_reserves(Expr *expr) {
 
 void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *reg_allocator, X64_Place place);
 
+X64_Address machinecode_address_for_var(Context *context, Reg_Allocator *reg_allocator, Var *var) {
+    if (var->flags & VAR_FLAG_GLOBAL) {
+        Global_Var *global = &context->global_vars[var->global_index];
+        u32 data_offset = global->data_offset;
+        Register base = global->in_rdata? RIP_OFFSET_RDATA : RIP_OFFSET_DATA;
+        return (X64_Address) { .base = base, .immediate_offset = data_offset };
+    } else {
+        return reg_allocator->var_mem_infos[var->local_index].address;
+    }
+}
+
 X64_Address machinecode_index_address(Context *context, Fn *fn, Reg_Allocator *reg_allocator, X64_Address address, Expr *index, u64 stride) {
     if (index->kind == EXPR_LITERAL) {
         u64 offset = index->literal.masked_value * stride;
@@ -11367,16 +11378,7 @@ X64_Place machinecode_for_addressable_expr(Context *context, Fn *fn, Expr *expr,
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
             Var *var = expr->variable.var;
 
-            X64_Address address;
-            if (var->flags & VAR_FLAG_GLOBAL) {
-                Global_Var *global = &context->global_vars[var->global_index];
-                assert(global->valid);
-                Register base = global->in_rdata? RIP_OFFSET_RDATA : RIP_OFFSET_DATA;
-                address = (X64_Address) { .base = base, .immediate_offset = global->data_offset };
-            } else {
-                address = reg_allocator->var_mem_infos[var->local_index].address;
-            }
-
+            X64_Address address = machinecode_address_for_var(context, reg_allocator, var);
 
             if (var->flags & VAR_FLAG_REFERENCE) {
                 Register reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, reserves);
@@ -12712,28 +12714,30 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
                 for (u32 i = 0; i < stmt->let.var_count; i += 1) {
                     Var *var = &stmt->let.vars[i];
+                    assert(!(var->flags & VAR_FLAG_REFERENCE));
                     assert(var->type == type);
-                    X64_Address address = reg_allocator->var_mem_infos[var->local_index].address;
+                    X64_Address address = machinecode_address_for_var(context, reg_allocator, var);
                     machinecode_move(context, reg_allocator, x64_place_reg(reg), x64_place_address(address), size);
                 }
             } else if (stmt->let.right == null) {
                 for (u32 i = 0; i < stmt->let.var_count; i += 1) {
                     Var *var = &stmt->let.vars[i];
+                    assert(!(var->flags & VAR_FLAG_REFERENCE));
                     assert(var->type == type);
-                    assert(!(var->flags & VAR_FLAG_GLOBAL));
 
-                    X64_Address address = reg_allocator->var_mem_infos[var->local_index].address;
+                    X64_Address address = machinecode_address_for_var(context, reg_allocator, var);
                     machinecode_zero_out_struct(context, reg_allocator, address, size, align);
                 }
             } else {
                 Var *first_var = &stmt->let.vars[0];
-                X64_Address first_address = reg_allocator->var_mem_infos[first_var->local_index].address;
+                X64_Address first_address = machinecode_address_for_var(context, reg_allocator, first_var);
                 machinecode_for_expr(context, fn, stmt->let.right, reg_allocator, x64_place_address(first_address));
 
                 for (u32 i = 1; i < stmt->let.var_count; i += 1) {
                     Var *next_var = &stmt->let.vars[i];
+                    assert(!(next_var->flags & VAR_FLAG_REFERENCE));
                     assert(next_var->type == type);
-                    X64_Address next_address = reg_allocator->var_mem_infos[next_var->local_index].address;
+                    X64_Address next_address = machinecode_address_for_var(context, reg_allocator, next_var);
                     machinecode_move(context, reg_allocator, x64_place_address(first_address), x64_place_address(next_address), size);
                 }
             }
@@ -13125,34 +13129,12 @@ void build_machinecode(Context *context) {
             if (global_let->compute_at_runtime) {
                 Global_Var *first_global = &context->global_vars[global_let->vars[0].global_index];
 
-                // TODO This is hacky. We should generate STMT_LET here, which would lead to significant
-                // less code.
-
-                Expr *left = arena_new(&context->arena, Expr);
-                left->kind = EXPR_VARIABLE;
-                left->flags = EXPR_FLAG_ASSIGNABLE | EXPR_FLAG_ADDRESSABLE;
-                left->type = first_global->var->type;
-                left->variable.var = first_global->var;
-
                 Stmt *stmt = arena_new(&context->arena, Stmt);
-                stmt->kind = STMT_ASSIGNMENT;
-                stmt->assignment.left = left;
-                stmt->assignment.right = global_let->expr;
+                stmt->kind = STMT_LET;
+                stmt->let.vars = global_let->vars;
+                stmt->let.var_count = global_let->var_count;
+                stmt->let.right = global_let->expr;
                 last_stmt = (first_stmt == null? (first_stmt = stmt) : (last_stmt->next = stmt));
-
-                for (u32 i = 1; i < global_let->var_count; i += 1) {
-                    Expr *other = arena_new(&context->arena, Expr);
-                    other->kind = EXPR_VARIABLE;
-                    other->flags = EXPR_FLAG_ASSIGNABLE | EXPR_FLAG_ADDRESSABLE;
-                    other->type = first_global->var->type;
-                    other->variable.var = &global_let->vars[i];
-
-                    Stmt *stmt = arena_new(&context->arena, Stmt);
-                    stmt->kind = STMT_ASSIGNMENT;
-                    stmt->assignment.left = other;
-                    stmt->assignment.right = left;
-                    last_stmt = (first_stmt == null? (first_stmt = stmt) : (last_stmt->next = stmt));
-                }
             }
         }
 
