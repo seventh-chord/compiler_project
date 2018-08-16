@@ -1381,6 +1381,7 @@ typedef enum Builtin_Fn {
     BUILTIN_CAST,
     BUILTIN_SIZE_OF,
     BUILTIN_ALIGN_OF,
+    BUILTIN_SQRT,
 
     BUILTIN_COUNT,
 } Builtin_Fn;
@@ -1610,6 +1611,7 @@ typedef enum Unary_Op {
     UNARY_NEG,
     UNARY_DEREFERENCE,
     UNARY_ADDRESS_OF,
+    UNARY_SQRT,
 
     UNARY_OP_COUNT,
 } Unary_Op;
@@ -1619,6 +1621,7 @@ u8* UNARY_OP_SYMBOL[UNARY_OP_COUNT] = {
     [UNARY_NEG]         = "-",
     [UNARY_DEREFERENCE] = "*",
     [UNARY_ADDRESS_OF]  = "&",
+    [UNARY_SQRT]        = "<sqrt>",
 };
 
 typedef enum Binary_Op {
@@ -2433,6 +2436,7 @@ void init_builtin_fn_names(Context *context) {
     context->builtin_names[BUILTIN_CAST]               = string_intern(&context->string_table, "cast");
     context->builtin_names[BUILTIN_SIZE_OF]            = string_intern(&context->string_table, "size_of");
     context->builtin_names[BUILTIN_ALIGN_OF]           = string_intern(&context->string_table, "align_of");
+    context->builtin_names[BUILTIN_SQRT]               = string_intern(&context->string_table, "sqrt");
 }
 
 void init_keyword_names(Context *context) {
@@ -4930,7 +4934,9 @@ Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
             return expr;
         } break;
 
-        case BUILTIN_ENUM_MEMBER_NAME: {
+        case BUILTIN_SQRT:
+        case BUILTIN_ENUM_MEMBER_NAME:
+        {
             u32 inner_expr_length = 0;
             Expr* inner = parse_expr(context, scope, t, &inner_expr_length, false);
             t += inner_expr_length;
@@ -4940,7 +4946,7 @@ Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
                 return null;
             }
 
-            if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_CLOSE, "after type in 'enum_member_name'")) {
+            if (!expect_single_token(context, t, TOKEN_BRACKET_ROUND_CLOSE, "after parameters")) {
                 *length = t - t_start;
                 return null;
             }
@@ -4948,9 +4954,22 @@ Expr* parse_call(Context *context, Scope *scope, Token* t, u32* length) {
 
             Expr* expr = arena_new(&context->arena, Expr);
             expr->pos = start_pos;
-            expr->kind = EXPR_ENUM_MEMBER_NAME;
-            expr->enum_member = inner;
-            expr->type = context->string_type;
+
+            switch (builtin_name) {
+                case BUILTIN_ENUM_MEMBER_NAME: {
+                    expr->kind = EXPR_ENUM_MEMBER_NAME;
+                    expr->enum_member = inner;
+                    expr->type = context->string_type;
+                } break;
+
+                case BUILTIN_SQRT: {
+                    expr->kind = EXPR_UNARY;
+                    expr->unary.op = UNARY_SQRT;
+                    expr->unary.inner = inner;
+                } break;
+
+                default: assert(false);
+            }
 
             *length = t - t_start;
             return expr;
@@ -7541,15 +7560,11 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 } break;
 
                 case UNARY_DEREFERENCE: {
-                    expr->type = expr->unary.inner->type->pointer_to;
-                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
-                    expr->flags |= EXPR_FLAG_ADDRESSABLE;
-
                     Type_Kind child_primitive = expr->unary.inner->type->kind;
                     if (child_primitive != TYPE_POINTER) {
                         print_file_pos(&expr->pos);
-                        printf("Can't dereference non-pointer ");
-                        print_expr(context, expr->unary.inner);
+                        printf("Can't dereference non-pointer type ");
+                        print_type(context, expr->unary.inner->type);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -7557,15 +7572,19 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                     Type_Kind pointer_to = expr->unary.inner->type->pointer_to->kind;
                     if (pointer_to == TYPE_VOID) {
                         print_file_pos(&expr->pos);
-                        printf("Can't dereference the void pointer ");
+                        printf("Can't dereference void pointer ");
                         print_expr(context, expr->unary.inner);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
+
+                    expr->type = expr->unary.inner->type->pointer_to;
+                    expr->flags |= EXPR_FLAG_ASSIGNABLE;
+                    expr->flags |= EXPR_FLAG_ADDRESSABLE;
+
                 } break;
 
                 case UNARY_ADDRESS_OF: {
-                    expr->type = get_pointer_type(context, expr->unary.inner->type);
                     if (!(expr->unary.inner->flags & EXPR_FLAG_ADDRESSABLE)) {
                         print_file_pos(&expr->pos);
                         printf("Can't take address of ");
@@ -7573,6 +7592,20 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
+
+                    expr->type = get_pointer_type(context, expr->unary.inner->type);
+                } break;
+                
+                case UNARY_SQRT: {
+                    if (!primitive_is_float(expr->unary.inner->type->kind)) {
+                        print_file_pos(&expr->pos);
+                        printf("Can't take the square root of a ");
+                        print_type(context, expr->type);
+                        printf("\n");
+                        return TYPECHECK_EXPR_BAD;
+                    }
+
+                    expr->type = expr->unary.inner->type;
                 } break;
 
                 default: assert(false);
@@ -8497,35 +8530,38 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
 
             u64 inner_type_size = type_size_of(expr->unary.inner->type);
 
-            if (expr->unary.op == UNARY_DEREFERENCE) {
+            if (expr->unary.op == UNARY_DEREFERENCE || expr->unary.op == UNARY_ADDRESS_OF) {
                 return EVAL_DO_AT_RUNTIME;
-            } else if (expr->unary.op == UNARY_ADDRESS_OF) {
-                return EVAL_DO_AT_RUNTIME;
-            } else {
-                assert(inner_type_size <= 8);
-                assert(inner_type_size == type_size);
+            }
 
-                Eval_Result result = eval_compile_time_expr(context, expr->unary.inner, result_into);
-                if (result != EVAL_OK) return result;
+            assert(inner_type_size <= 8);
+            assert(inner_type_size == type_size);
 
-                switch (expr->unary.op) {
-                    case UNARY_NEG: {
-                        switch (type_size) {
-                            case 1: *((i8*)  result_into) = -(*((i8*)  result_into)); break;
-                            case 2: *((i16*) result_into) = -(*((i16*) result_into)); break;
-                            case 4: *((i32*) result_into) = -(*((i32*) result_into)); break;
-                            case 8: *((i64*) result_into) = -(*((i64*) result_into)); break;
-                            default: assert(false);
-                        }
-                    } break;
+            Eval_Result result = eval_compile_time_expr(context, expr->unary.inner, result_into);
+            if (result != EVAL_OK) return result;
 
-                    case UNARY_NOT: {
-                        assert(inner_type_size == 1);
-                        *result_into = (*result_into == 0)? 1 : 0;
-                    } break;
+            switch (expr->unary.op) {
+                case UNARY_NEG: {
+                    switch (type_size) {
+                        case 1: *((i8*)  result_into) = -(*((i8*)  result_into)); break;
+                        case 2: *((i16*) result_into) = -(*((i16*) result_into)); break;
+                        case 4: *((i32*) result_into) = -(*((i32*) result_into)); break;
+                        case 8: *((i64*) result_into) = -(*((i64*) result_into)); break;
+                        default: assert(false);
+                    }
+                } break;
 
-                    default: assert(false);
-                }
+                case UNARY_NOT: {
+                    assert(inner_type_size == 1);
+                    *result_into = (*result_into == 0)? 1 : 0;
+                } break;
+
+                case UNARY_SQRT: {
+                    // TODO We should be able to do this, but I don't want to figure out msvc intrinsics right now
+                    return EVAL_DO_AT_RUNTIME;
+                } break;
+
+                default: assert(false);
             }
 
             return EVAL_OK;
@@ -10704,6 +10740,7 @@ enum {
     FLOAT_SUB,
     FLOAT_MUL,
     FLOAT_DIV,
+    FLOAT_SQRT,
     FLOAT_MOV,
     FLOAT_MOV_REVERSE,
     
@@ -10729,6 +10766,7 @@ u32 FLOAT_SINGLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_SUB] = 0x5c0ff3,
     [FLOAT_MUL] = 0x590ff3,
     [FLOAT_DIV] = 0x5e0ff3,
+    [FLOAT_SQRT] = 0x510ff3,
     [FLOAT_MOV] = 0x100ff3,
     [FLOAT_MOV_REVERSE] = 0x110ff3,
     [FLOAT_COMI] = 0x2f0f,
@@ -10742,6 +10780,7 @@ u32 FLOAT_DOUBLE_OPCODES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_SUB] = 0x5c0ff2,
     [FLOAT_MUL] = 0x590ff2,
     [FLOAT_DIV] = 0x5e0ff2,
+    [FLOAT_SQRT] = 0x510ff3,
     [FLOAT_MOV] = 0x100ff2,
     [FLOAT_MOV_REVERSE] = 0x110ff2,
     [FLOAT_COMI] = 0x2f0f66,
@@ -10755,6 +10794,7 @@ u8 *FLOAT_SINGLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_SUB] = "subss",
     [FLOAT_MUL] = "mulss",
     [FLOAT_DIV] = "divss",
+    [FLOAT_SQRT] = "sqrtss",
     [FLOAT_MOV] = "movss",
     [FLOAT_MOV_REVERSE] = "movss",
     [FLOAT_COMI] = "comiss",
@@ -10768,6 +10808,7 @@ u8 *FLOAT_DOUBLE_NAMES[FLOAT_INSTRUCTION_COUNT] = {
     [FLOAT_SUB] = "subsd",
     [FLOAT_MUL] = "mulsd",
     [FLOAT_DIV] = "divsd",
+    [FLOAT_DIV] = "sqrtsd",
     [FLOAT_MOV] = "movsd",
     [FLOAT_MOV_REVERSE] = "movsd",
     [FLOAT_COMI] = "comisd",
@@ -10842,14 +10883,6 @@ void instruction_float_movd(Context *context, Move_Mode mode, Register xmm, X64_
     #endif
 }
 
-/*
-CVTSS2SD xmm1, xmm2/mem32  F3 0F 5A /r       f32 to f64
-CVTSD2SS xmm1, xmm2/mem64  F2 0F 5A /r       f64 to f32
-CVTSS2SI reg32, xmm1/mem32 F3 0F 2D /r       f32 to i32/i64      (use REX.W)
-CVTSD2SI reg32, xmm1/mem64 F2 0F 2D /r       f64 to i32/i64      (use REX.W)
-CVTSI2SS xmm1, reg32/mem32 F3 0F 2A /r       i32/i64 to f32      (use REX.W)
-CVTSI2SD xmm1, reg32/mem32 F2 0F 2A /r       i32/i64 to f64      (use REX.W)
-*/
 
 typedef struct Reg_Allocator_Frame Reg_Allocator_Frame;
 struct Reg_Allocator_Frame {
@@ -12059,6 +12092,29 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                     } else {
                         bool unary = expr->unary.op == UNARY_NOT;
                         instruction_negative(context, unary, place, primitive_size_of(primitive));
+                    }
+                } break;
+
+                case UNARY_SQRT: {
+                    Type_Kind primitive = expr->type->kind;
+                    assert(primitive == TYPE_F32 || primitive == TYPE_F64);
+                    bool single = primitive == TYPE_F32;
+
+                    Register reg;
+                    bool return_to_place = false;
+                    if (place.kind == PLACE_REGISTER) {
+                        reg = place.reg;
+                    } else {
+                        reg = register_allocate(reg_allocator, REGISTER_KIND_XMM, 0);
+                        return_to_place = true;
+                    }
+
+                    machinecode_for_expr(context, fn, expr->unary.inner, reg_allocator, x64_place_reg(reg));
+
+                    instruction_float(context, FLOAT_SQRT, reg, x64_place_reg(reg), single);
+
+                    if (return_to_place) {
+                        instruction_float_movd(context, MOVE_TO_MEM, reg, place, single);
                     }
                 } break;
 

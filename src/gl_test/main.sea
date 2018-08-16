@@ -34,7 +34,8 @@ fn main() {
                 draw_group_circle(&draw_group, { f32(window_width) - f32(x)*14.0, f32(y)*14.0 + (x&1==1? 7.0 : 0.0) }, 10.0 - f32(x));
             }
         }
-        //draw_group_circle(&draw_group, { 20.0, 20.0 }, 20.0);
+
+        draw_group_line(&draw_group, { 100.0, 100.0 }, { 400.0, 300.0 }, 5.0);
 
         if window_width > framebuffer.width || window_height > framebuffer.height {
             framebuffer_grow(&framebuffer, window_width, window_height);
@@ -60,6 +61,13 @@ struct v2 { x, y: f32; }
 
 fn add_v2(a, b: v2) -> v2 {
     return { a.x + b.x, a.y + b.y };
+}
+fn sub_v2(a, b: v2) -> v2 {
+    return { a.x - b.x, a.y - b.y };
+}
+fn normalize_v2(a: v2) -> v2 {
+    let length = sqrt(a.x*a.x + a.y*a.y);
+    return { a.x / length, a.y / length };
 }
 fn scale_v2(a: v2, s: f32) -> v2 {
     return { a.x * s, a.y * s };
@@ -152,6 +160,21 @@ fn draw_group_circle(draw_group: *Draw_Group, center: v2, radius: f32) {
     draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[4], radius)), add_v2(center, scale_v2(CIRCLE[5], radius)));
     draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[5], radius)), add_v2(center, scale_v2(CIRCLE[6], radius)));
     draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[6], radius)), add_v2(center, scale_v2(CIRCLE[0], radius)));
+}
+
+fn draw_group_line(draw_group: *Draw_Group, a, b: v2, width: f32) {
+    let v = scale_v2(normalize_v2(sub_v2(b, a)), width);
+    v = { -v.y, v.x };
+
+    let corners = []v2 {
+        add_v2(a, v),
+        sub_v2(a, v),
+        sub_v2(b, v),
+        add_v2(b, v),
+    };
+
+    draw_group_triangle(draw_group, corners[0], corners[1], corners[2]);
+    draw_group_triangle(draw_group, corners[0], corners[2], corners[3]);
 }
 
 fn draw_group_draw(draw_group: *Draw_Group) {
