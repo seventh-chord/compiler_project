@@ -8,12 +8,6 @@ fn main() {
 
     let draw_group = draw_group_init();
 
-
-    let max_samples: i32;
-    let fbo, fbo_color: u32;
-    {
-    }
-
     let framebuffer = framebuffer_init(8, window_width, window_height);
     
     for !close_window_requested {
@@ -90,7 +84,7 @@ struct Draw_Group {
 }
 
 fn draw_group_init() -> Draw_Group {
-    const vertex_shader_source = "
+    let vert_source = "
         #version 330 core
 
         uniform vec2 window_size;
@@ -102,7 +96,7 @@ fn draw_group_init() -> Draw_Group {
         }
     ";
 
-    const fragment_shader_source = "
+    let frag_source = "
         #version 330 core
 
         out vec4 color;
@@ -112,7 +106,7 @@ fn draw_group_init() -> Draw_Group {
         }
     ";
 
-    let shader = load_shader(vertex_shader_source, fragment_shader_source);
+    let shader = load_shader(vert_source, frag_source);
     let shader_window_size_uniform = glGetUniformLocation(shader, "window_size".data);
 
     let vertex_count = 0;

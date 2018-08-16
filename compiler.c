@@ -8471,14 +8471,58 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             if (result != EVAL_OK) return result;
 
             u64 outer;
+
             if ((from == TYPE_POINTER || from == TYPE_FN_POINTER) && (to == TYPE_POINTER || to == TYPE_FN_POINTER)) {
                 outer = inner;
             } else if (primitive_is_float(from) && primitive_is_float(to)) {
-                unimplemented(); // TODO
+                if (from == TYPE_F32 && to == TYPE_F64) {
+                    f64 r = (f64) *((f32*) (&inner));
+                    outer = *((u64*) &r);
+                }
+
+                if (from == TYPE_F64 && to == TYPE_F32) {
+                    f32 r = (f32) *((f64*) (&inner));
+                    outer = *((u32*) &r);
+                }
             } else if (primitive_is_float(from) && primitive_is_integer(to)) {
-                unimplemented(); // TODO
+                f64 f;
+                if (from == TYPE_F32) {
+                    f = (f64) *((f32*) &inner);
+                } else if (from == TYPE_F64) {
+                    f = *((f64*) &inner);
+                } else {
+                    assert(false);
+                }
+
+                if (primitive_is_signed(to)) {
+                    outer = (u64) ((i64) f);
+                } else {
+                    outer = (u64) f;
+                }
             } else if (primitive_is_integer(from) && primitive_is_float(to)) {
-                unimplemented(); // TODO
+                f64 f;
+
+                if (primitive_is_signed(from)) {
+                    i64 i;
+                    switch (inner_type_size) {
+                        case 1: i = (i64) *((i8*)  &inner); break;
+                        case 2: i = (i64) *((i16*) &inner); break;
+                        case 4: i = (i64) *((i32*) &inner); break;
+                        case 8: i = (i64) *((i64*) &inner); break;
+                        default: assert(false);
+                    }
+                    f = (f64) i;
+                } else {
+                    f = (f64) inner;
+                }
+
+                if (to == TYPE_F32) {
+                    *((f32*) &outer) = (f32) f;
+                } else if (to == TYPE_F64) {
+                    *((f64*) &outer) = f;
+                } else {
+                    assert(false);
+                }
             } else {
                 if (primitive_is_signed(from) && primitive_is_signed(to)) {
                     i64 inner_signed;
@@ -8572,17 +8616,27 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
 
             switch (expr->unary.op) {
                 case UNARY_NEG: {
-                    switch (type_size) {
-                        case 1: *((i8*)  result_into) = -(*((i8*)  result_into)); break;
-                        case 2: *((i16*) result_into) = -(*((i16*) result_into)); break;
-                        case 4: *((i32*) result_into) = -(*((i32*) result_into)); break;
-                        case 8: *((i64*) result_into) = -(*((i64*) result_into)); break;
-                        default: assert(false);
+                    if (primitive_is_integer(primitive)) {
+                        switch (type_size) {
+                            case 1: *((i8*)  result_into) = -(*((i8*)  result_into)); break;
+                            case 2: *((i16*) result_into) = -(*((i16*) result_into)); break;
+                            case 4: *((i32*) result_into) = -(*((i32*) result_into)); break;
+                            case 8: *((i64*) result_into) = -(*((i64*) result_into)); break;
+                            default: assert(false);
+                        }
+                    } else if (primitive_is_float(primitive)) {
+                        switch (type_size) {
+                            case 4: *((f32*) result_into) = -(*((f32*) result_into)); break;
+                            case 8: *((f64*) result_into) = -(*((f64*) result_into)); break;
+                            default: assert(false);
+                        }
+                    } else {
+                        assert(false);
                     }
                 } break;
 
                 case UNARY_NOT: {
-                    assert(inner_type_size == 1);
+                    assert(inner_type_size == 1 && primitive == TYPE_BOOL);
                     *result_into = (*result_into == 0)? 1 : 0;
                 } break;
 
@@ -8619,11 +8673,11 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             eval_result = eval_compile_time_expr(context, expr->binary.right, (u8*) &right_result);
             if (eval_result != EVAL_OK) return eval_result;
 
-            bool is_signed = primitive_is_signed(expr->binary.left->type->kind);
+            Type_Kind primitive = expr->binary.left->type->kind;
 
             u64 result = 0;
 
-            if (is_signed) {
+            if (primitive_is_signed(primitive)) {
                 i64 left  = *((i64*) &left_result);
                 i64 right = *((i64*) &right_result);
                 switch (child_size) {
@@ -8659,7 +8713,7 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                     case BINARY_LTEQ: result = left <= right; break;
                     default: assert(false);
                 }
-            } else {
+            } else if (primitive_is_integer(primitive) || primitive == TYPE_BOOL || primitive == TYPE_POINTER || primitive == TYPE_FN_POINTER) {
                 u64 left = left_result;
                 u64 right = right_result;
                 switch (child_size) {
@@ -8671,15 +8725,15 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                 }
 
                 switch (expr->binary.op) {
-                    case BINARY_ADD:  result = left +  right; break;
-                    case BINARY_SUB:  result = left -  right; break;
-                    case BINARY_MUL:  result = left *  right; break;
-                    case BINARY_DIV:  result = left /  right; break;
-                    case BINARY_MOD:  result = left %  right; break;
+                    case BINARY_ADD:  result = left + right; break;
+                    case BINARY_SUB:  result = left - right; break;
+                    case BINARY_MUL:  result = left * right; break;
+                    case BINARY_DIV:  result = left / right; break;
+                    case BINARY_MOD:  result = left % right; break;
 
-                    case BINARY_AND:  result = left &  right; break;
-                    case BINARY_OR:   result = left |  right; break;
-                    case BINARY_XOR:  result = left ^  right; break;
+                    case BINARY_AND:  result = left & right; break;
+                    case BINARY_OR:   result = left | right; break;
+                    case BINARY_XOR:  result = left ^ right; break;
 
                     case BINARY_SHL:  result = left << right; break;
                     case BINARY_SHR:  result = left >> right; break;
@@ -8695,6 +8749,56 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                     case BINARY_LTEQ: result = left <= right; break;
                     default: assert(false);
                 }
+            } else if (primitive == TYPE_F32) {
+                f32 left  = *((f32*) &left_result);
+                f32 right = *((f32*) &right_result);
+                f32 f = 0.0;
+
+                switch (expr->binary.op) {
+                    case BINARY_ADD:  f = left + right; break;
+                    case BINARY_SUB:  f = left - right; break;
+                    case BINARY_MUL:  f = left * right; break;
+                    case BINARY_DIV:  f = left / right; break;
+
+                    case BINARY_EQ:   result = left == right; break;
+                    case BINARY_NEQ:  result = left != right; break;
+                    case BINARY_GT:   result = left >  right; break;
+                    case BINARY_GTEQ: result = left >= right; break;
+                    case BINARY_LT:   result = left <  right; break;
+                    case BINARY_LTEQ: result = left <= right; break;
+
+                    default: assert(false);
+                }
+
+                if (f != 0.0) {
+                    result = *((u32*) &f);
+                }
+            } else if (primitive == TYPE_F64) {
+                f64 left  = *((f64*) &left_result);
+                f64 right = *((f64*) &right_result);
+                f64 f = 0.0;
+
+                switch (expr->binary.op) {
+                    case BINARY_ADD:  f = left + right; break;
+                    case BINARY_SUB:  f = left - right; break;
+                    case BINARY_MUL:  f = left * right; break;
+                    case BINARY_DIV:  f = left / right; break;
+
+                    case BINARY_EQ:   result = left == right; break;
+                    case BINARY_NEQ:  result = left != right; break;
+                    case BINARY_GT:   result = left >  right; break;
+                    case BINARY_GTEQ: result = left >= right; break;
+                    case BINARY_LT:   result = left <  right; break;
+                    case BINARY_LTEQ: result = left <= right; break;
+
+                    default: assert(false);
+                }
+
+                if (f != 0.0) {
+                    result = *((u64*) &f);
+                }
+            } else {
+                assert(false);
             }
 
             mem_copy((u8*) &result, result_into, type_size);
