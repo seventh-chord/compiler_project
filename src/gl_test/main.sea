@@ -7,6 +7,14 @@ fn main() {
     let up = true;
 
     let draw_group = draw_group_init();
+
+
+    let max_samples: i32;
+    let fbo, fbo_color: u32;
+    {
+    }
+
+    let framebuffer = framebuffer_init(8, window_width, window_height);
     
     for !close_window_requested {
         poll_events();
@@ -28,10 +36,18 @@ fn main() {
         }
         //draw_group_circle(&draw_group, { 20.0, 20.0 }, 20.0);
 
+        if window_width > framebuffer.width || window_height > framebuffer.height {
+            framebuffer_grow(&framebuffer, window_width, window_height);
+        }
+        framebuffer_bind(&framebuffer);
+
         glViewport(0, 0, i32(window_width), i32(window_height));
         glClearColor(r, 1.0, 0.2 + (1.0 - r)*0.8, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT);
         draw_group_draw(&draw_group);
+
+        framebuffer_blit(&framebuffer, window_width, window_height);
+
         swap_buffers();
     }
 
@@ -149,6 +165,77 @@ fn draw_group_draw(draw_group: *Draw_Group) {
     glDrawArrays(GL_TRIANGLES, 0, i32(draw_group.vertex_count));
 
     draw_group.vertex_count = 0;
+}
+
+
+struct Framebuffer {
+    fbo: u32;
+    color_texture: u32;
+    samples: i32;
+    width, height: i64;
+}
+
+fn framebuffer_init(samples: i32, width, height: i64) -> Framebuffer {
+    assert(width > 0 && height > 0, "Can't have zero-sized framebuffer");
+
+    let max_samples: i32;
+    glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+    samples = samples < max_samples? samples : max_samples;
+
+    let color_texture, fbo: u32;
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    glGenTextures(1, &color_texture);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_texture);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_RGBA8, i32(width), i32(height), GL_FALSE);
+    glTexParameteri(color_texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(color_texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(color_texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(color_texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, color_texture, 0);
+
+    let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if status != GL_FRAMEBUFFER_COMPLETE {
+        print("Error code: ");
+        print_u64(u64(status));
+        print("\n");
+        assert(false, "Couldn't create framebuffer");
+    }
+
+    return {
+        fbo: fbo,
+        color_texture: color_texture,
+        samples: samples,
+        width: width, height: height,
+    };
+}
+
+fn framebuffer_grow(framebuffer: *Framebuffer, width, height: i64) {
+    assert(width >= framebuffer.width || height >= framebuffer.height, "Unneccesary framebuffer grow!");
+    if width  > framebuffer.width  { framebuffer.width  = width;  }
+    if height > framebuffer.height { framebuffer.height = height; }
+
+    glDeleteTextures(1, &framebuffer.color_texture);
+    glDeleteFramebuffers(1, &framebuffer.fbo);
+
+    *framebuffer = framebuffer_init(framebuffer.samples, width, height);
+}
+
+fn framebuffer_bind(framebuffer: *Framebuffer) {
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.fbo);
+}
+
+fn framebuffer_blit(framebuffer: *Framebuffer, width, height: i64) {
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer.fbo);
+    glBlitFramebuffer(
+        0, 0, i32(width), i32(height),
+        0, 0, i32(width), i32(height),
+        GL_COLOR_BUFFER_BIT,
+        GL_NEAREST,
+    );
 }
 
 
