@@ -17,6 +17,7 @@ fn main() {
     print_direction(Direction::SOUTH);
     print(get_direction_instruction(Direction::EAST));
     print(get_direction_instruction(cast(Direction, 7)));
+    shadowing();
     ExitProcess(0);
 }
 
@@ -47,3 +48,13 @@ fn array_length_test() {
 }
 
 const QUESTIONABLE_OK_THANKS = 3;
+
+fn shadowing() {
+    let x = 1;
+    let x = x + 1;
+    if x == 2 {
+        print("Everything seems to work as intended\n");
+    } else {
+        print("I don't feel so good, mister compiler\n");
+    }
+}

@@ -1470,6 +1470,7 @@ typedef struct Decl {
         DECL_TYPE = 2,
     } kind;
 
+    u32 scope_pos;
     u8 *name;
     File_Pos pos;
 
@@ -1488,6 +1489,8 @@ struct Scope {
 
     Decl *decls;
     u32 decls_length, decls_allocated;
+
+    u32 next_scope_pos; // incremented for each Decl or Stmt
 };
 
 
@@ -1955,26 +1958,32 @@ typedef struct Switch_Case {
     Scope *scope;
 } Switch_Case;
 
+
+typedef enum Stmt_Kind {
+    STMT_END = 0, // Sentinel, returned to mark that no more statements can be parsed
+
+    STMT_LET,
+    STMT_EXPR,
+    STMT_ASSIGNMENT,
+    STMT_OP_ASSIGNMENT,
+
+    STMT_BLOCK,
+    STMT_IF,
+    STMT_FOR,
+    STMT_SWITCH,
+
+    STMT_RETURN,
+    STMT_BREAK,
+    STMT_CONTINUE,
+
+    STMT_DEBUG_BREAK,
+} Stmt_Kind;
+
 struct Stmt {
-    enum {
-        STMT_END = 0, // Sentinel, returned to mark that no more statements can be parsed
-
-        STMT_LET,
-        STMT_EXPR,
-        STMT_ASSIGNMENT,
-        STMT_OP_ASSIGNMENT,
-
-        STMT_BLOCK,
-        STMT_IF,
-        STMT_FOR,
-        STMT_SWITCH,
-
-        STMT_RETURN,
-        STMT_BREAK,
-        STMT_CONTINUE,
-
-        STMT_DEBUG_BREAK,
-    } kind;
+    Stmt_Kind kind;
+    File_Pos pos;
+    Stmt* next;
+    u32 scope_pos; // Monotonically inreacing within a scope. Used to disambiguate between shadowing declarations.
 
     union {
         struct {
@@ -2040,10 +2049,6 @@ struct Stmt {
             bool trailing;
         } return_;
     };
-
-    File_Pos pos;
-
-    Stmt* next;
 };
 
 
@@ -2267,15 +2272,13 @@ Decl *find_declaration(Scope *scope, u8 *interned_name, int kind) {
     return null;
 }
 
-Var *find_var(Scope *scope, u8 *interned_name, File_Pos *pos) {
-    Fn *start_fn = scope->fn;
-    if (start_fn == null) start_fn = (Fn*) U64_MAX;
-
+Var *find_var(Scope *scope, u8 *interned_name, u32 before_position) {
+    Scope *start_scope = scope;
     while (true) {
         for (u32 i = scope->decls_length - 1; i < scope->decls_length; i -= 1) {
             Decl *decl = &scope->decls[i];
 
-            if (scope->fn == start_fn && file_pos_is_greater(&decl->pos, pos)) {
+            if (scope == start_scope && scope->fn != null && decl->scope_pos >= before_position) {
                 continue;
             }
 
@@ -2352,6 +2355,9 @@ Decl *add_declaration(
     result->kind = kind;
     result->name = name;
     result->pos = pos;
+
+    result->scope_pos = scope->next_scope_pos;
+    scope->next_scope_pos += 1;
 
     return result;
 }
@@ -5280,25 +5286,30 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
 }
 
 Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool single_stmt) {
+    assert(scope->fn != null);
+
     Token* t_first_stmt_start = t;
 
-    u32 stmt_count = 0;
+    u32 parsed_stmts = 0;
 
     Stmt *first_stmt = arena_new(&context->arena, Stmt);
     first_stmt->pos = t->pos;
+
+    first_stmt->scope_pos = scope->next_scope_pos;
+    scope->next_scope_pos += 1;
 
     Stmt *stmt = first_stmt;
 
     while (true) {
         // Semicolons are just empty statements, skip them
         while (t->kind == TOKEN_SEMICOLON) {
-            if (single_stmt && stmt_count >= 1) break;
-            stmt_count += 1;
+            if (single_stmt && parsed_stmts >= 1) break;
+            parsed_stmts += 1;
             t += 1;
             continue;
         }
 
-        if (single_stmt && stmt_count >= 1) break;
+        if (single_stmt && parsed_stmts >= 1) break;
 
         Token* t_start = t;
         stmt->pos = t->pos;
@@ -5827,9 +5838,12 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
         if (no_stmt_generated) {
             assert(stmt->kind == STMT_END);
         } else if (stmt->kind != STMT_END) {
-            stmt_count += 1;
+            parsed_stmts += 1;
             stmt->next = arena_new(&context->arena, Stmt);
             stmt = stmt->next;
+
+            stmt->scope_pos = scope->next_scope_pos;
+            scope->next_scope_pos += 1;
         } else {
             break;
         }
@@ -6798,7 +6812,7 @@ typedef enum Typecheck_Expr_Result {
     TYPECHECK_EXPR_WEAK, // Used for e.g. integer literals, which can solidify to any integer type
 } Typecheck_Expr_Result;
 
-Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr *expr, Type *solidify_to);
+Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_pos, Expr *expr, Type *solidify_to);
 
 Typecheck_Result compute_size_of_struct(Type *type) {
     u32 max_align = 0;
@@ -6870,7 +6884,7 @@ Typecheck_Result compute_size_of_struct(Type *type) {
     return TYPECHECK_RESULT_DONE;
 }
 
-Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, File_Pos *pos) {
+Typecheck_Result resolve_type(Context *context, Scope *scope, u32 scope_pos, Type **type_slot, File_Pos *pos) {
     // The reason we have a pretty complex system here is because we want types to be pointer-equal
 
     Type *type = *type_slot;
@@ -6912,7 +6926,7 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
                         return TYPECHECK_RESULT_BAD;
                     } else {
                         Type *type_default_int = &context->primitive_types[TYPE_U64];
-                        Typecheck_Expr_Result check_result = typecheck_expr(context, scope, length_expr, type_default_int);
+                        Typecheck_Expr_Result check_result = typecheck_expr(context, scope, scope_pos, length_expr, type_default_int);
                         if (check_result == TYPECHECK_EXPR_BAD || check_result == TYPECHECK_EXPR_DEPENDENT) {
                             return check_result;
                         }
@@ -7001,11 +7015,11 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
 
                     for (u32 p = 0; p < signature.param_count; p += 1) {
                         Type **param = &signature.params[p].type;
-                        Typecheck_Result r = resolve_type(context, scope, &signature.params[p].type, pos);
+                        Typecheck_Result r = resolve_type(context, scope, scope_pos, &signature.params[p].type, pos);
                         if (r != TYPECHECK_RESULT_DONE) return r;
                     }
 
-                    Typecheck_Result r = resolve_type(context, scope, &signature.return_type, pos);
+                    Typecheck_Result r = resolve_type(context, scope, scope_pos, &signature.return_type, pos);
                     if (r != TYPECHECK_RESULT_DONE) return r;
 
                     type = fn_signature_canonicalize(context, &signature);
@@ -7019,7 +7033,7 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
 
                 if (type->flags & TYPE_FLAG_UNRESOLVED_CHILD) {
                     for (u32 m = 0; m < type->structure.member_count; m += 1) {
-                        Typecheck_Result r = resolve_type(context, scope, &type->structure.members[m].type, pos);
+                        Typecheck_Result r = resolve_type(context, scope, scope_pos, &type->structure.members[m].type, pos);
                         if (r != TYPECHECK_RESULT_DONE) return r;
                     }
 
@@ -7055,13 +7069,13 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, Type **type_slot, 
 }
 
 
-Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr, Type* solidify_to) {
+Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_pos, Expr* expr, Type* solidify_to) {
     bool strong = true;
 
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                Var *var = find_var(scope, expr->variable.unresolved_name, &expr->pos);
+                Var *var = find_var(scope, expr->variable.unresolved_name, scope_pos);
 
                 if (var == null) {
                     u8 *var_name = expr->variable.unresolved_name;
@@ -7218,7 +7232,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 }
             }
 
-            Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);
+            Typecheck_Result r = resolve_type(context, scope, scope_pos, &expr->type, &expr->pos);
             if (r != TYPECHECK_RESULT_DONE) return r;
 
             if (expr->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
@@ -7250,7 +7264,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                             return TYPECHECK_EXPR_BAD;
                         }
 
-                        Typecheck_Expr_Result r = typecheck_expr(context, scope, member->expr, expected_child_type);
+                        Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, member->expr, expected_child_type);
                         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                         if (expected_child_type != member->expr->type) {
@@ -7316,7 +7330,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                         u32 m = expr->compound.content[i].member_index;
                         Type *member_type = expr->type->structure.members[m].type;
                         
-                        Typecheck_Expr_Result r = typecheck_expr(context, scope, child, member_type);
+                        Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, child, member_type);
                         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                         if (!type_can_assign(member_type, child->type)) {
@@ -7370,21 +7384,21 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             Typecheck_Expr_Result condition_result, left_result, right_result;
 
             Type *type_bool = &context->primitive_types[TYPE_BOOL];;
-            condition_result = typecheck_expr(context, scope, expr->ternary.condition, type_bool);
+            condition_result = typecheck_expr(context, scope, scope_pos, expr->ternary.condition, type_bool);
             if (condition_result == TYPECHECK_EXPR_BAD || condition_result == TYPECHECK_EXPR_DEPENDENT) return condition_result;
 
 
-            left_result = typecheck_expr(context, scope, expr->ternary.left, solidify_to);
-            right_result = typecheck_expr(context, scope, expr->ternary.right, solidify_to);
+            left_result = typecheck_expr(context, scope, scope_pos, expr->ternary.left, solidify_to);
+            right_result = typecheck_expr(context, scope, scope_pos, expr->ternary.right, solidify_to);
 
             if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD)  return TYPECHECK_EXPR_BAD;
             if (left_result == TYPECHECK_EXPR_DEPENDENT || right_result == TYPECHECK_EXPR_DEPENDENT) return TYPECHECK_EXPR_DEPENDENT;
 
             if (expr->ternary.left->type != expr->ternary.right->type) {
                 if (right_result == TYPECHECK_EXPR_WEAK ) {
-                    right_result = typecheck_expr(context, scope, expr->ternary.right, expr->ternary.left->type);
+                    right_result = typecheck_expr(context, scope, scope_pos, expr->ternary.right, expr->ternary.left->type);
                 } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
-                    left_result = typecheck_expr(context, scope, expr->ternary.left, expr->ternary.right->type);
+                    left_result = typecheck_expr(context, scope, scope_pos, expr->ternary.left, expr->ternary.right->type);
                 }
             }
 
@@ -7414,17 +7428,17 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
             Typecheck_Expr_Result left_result, right_result;
 
-            left_result  = typecheck_expr(context, scope, expr->binary.left, solidify_to);
-            right_result = typecheck_expr(context, scope, expr->binary.right, solidify_to);
+            left_result  = typecheck_expr(context, scope, scope_pos, expr->binary.left, solidify_to);
+            right_result = typecheck_expr(context, scope, scope_pos, expr->binary.right, solidify_to);
 
             if (left_result == TYPECHECK_EXPR_BAD || right_result == TYPECHECK_EXPR_BAD)  return TYPECHECK_EXPR_BAD;
             if (left_result == TYPECHECK_EXPR_DEPENDENT || right_result == TYPECHECK_EXPR_DEPENDENT) return TYPECHECK_EXPR_DEPENDENT;
 
             if (expr->binary.left->type != expr->binary.right->type) {
                 if (right_result == TYPECHECK_EXPR_WEAK ) {
-                    right_result = typecheck_expr(context, scope, expr->binary.right, expr->binary.left->type);
+                    right_result = typecheck_expr(context, scope, scope_pos, expr->binary.right, expr->binary.left->type);
                 } else if (left_result == TYPECHECK_EXPR_WEAK  && right_result == TYPECHECK_EXPR_STRONG) {
-                    left_result = typecheck_expr(context, scope, expr->binary.left, expr->binary.right->type);
+                    left_result = typecheck_expr(context, scope, scope_pos, expr->binary.left, expr->binary.right->type);
                 }
             }
 
@@ -7501,7 +7515,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 expr->unary.op == UNARY_ADDRESS_OF &&
                 expr->unary.inner->kind == EXPR_VARIABLE &&
                 (expr->unary.inner->flags & EXPR_FLAG_UNRESOLVED) &&
-                (find_var(scope, expr->unary.inner->variable.unresolved_name, &expr->pos) == null)
+                (find_var(scope, expr->unary.inner->variable.unresolved_name, scope_pos) == null)
             ) {
                 // Special case: We are trying to take the address of a undefined variable, which means we might
                 // be trying to actually get a function pointer. We have to slightly modify the ast in this case.
@@ -7531,7 +7545,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
                 } break;
             }
 
-            Typecheck_Expr_Result inner_result = typecheck_expr(context, scope, expr->unary.inner, solidify_to);
+            Typecheck_Expr_Result inner_result = typecheck_expr(context, scope, scope_pos, expr->unary.inner, solidify_to);
             if (inner_result == TYPECHECK_EXPR_BAD || inner_result == TYPECHECK_EXPR_DEPENDENT) return inner_result;
             if (inner_result == TYPECHECK_EXPR_WEAK) strong = false;
 
@@ -7624,7 +7638,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
                     expr->call.callee = fn_decl->fn;
                 } else {
-                    Var *var = find_var(scope, expr->call.unresolved_name, &expr->pos);
+                    Var *var = find_var(scope, expr->call.unresolved_name, scope_pos);
 
                     if (var == null) {
                         print_file_pos(&expr->pos);
@@ -7650,7 +7664,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             u8 *callee_name;
 
             if (expr->call.pointer_call) {
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->call.pointer_expr, &context->primitive_types[TYPE_VOID]);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, expr->call.pointer_expr, &context->primitive_types[TYPE_VOID]);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 Type *t = expr->call.pointer_expr->type;
@@ -7703,7 +7717,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
                 Type *expected_type = callee_signature->params[p].type;
 
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, param_expr, expected_type);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, param_expr, expected_type);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 Type *actual_type = param_expr->type;
@@ -7721,10 +7735,10 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_CAST: {
-            Typecheck_Result r1 = resolve_type(context, scope, &expr->type, &expr->pos);
+            Typecheck_Result r1 = resolve_type(context, scope, scope_pos, &expr->type, &expr->pos);
             if (r1 != TYPECHECK_RESULT_DONE) return r1;
 
-            Typecheck_Expr_Result r2 = typecheck_expr(context, scope, expr->cast_from, expr->type);
+            Typecheck_Expr_Result r2 = typecheck_expr(context, scope, scope_pos, expr->cast_from, expr->type);
             if (r2 == TYPECHECK_EXPR_BAD || r2 == TYPECHECK_EXPR_DEPENDENT) return r2;
 
             Type_Kind from = expr->cast_from->type->kind;
@@ -7758,9 +7772,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         case EXPR_SUBSCRIPT: {
             Typecheck_Expr_Result r;
 
-            r = typecheck_expr(context, scope, expr->subscript.array, &context->primitive_types[TYPE_VOID]);
+            r = typecheck_expr(context, scope, scope_pos, expr->subscript.array, &context->primitive_types[TYPE_VOID]);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
-            r = typecheck_expr(context, scope, expr->subscript.index, &context->primitive_types[TYPE_DEFAULT_INT]);
+            r = typecheck_expr(context, scope, scope_pos, expr->subscript.index, &context->primitive_types[TYPE_DEFAULT_INT]);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             if (expr->subscript.array->flags & EXPR_FLAG_ASSIGNABLE)  expr->flags |= EXPR_FLAG_ASSIGNABLE;
@@ -7795,7 +7809,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
             Expr* parent = expr->member_access.parent;
 
             Typecheck_Expr_Result bad_but_keep_on_going = TYPECHECK_EXPR_STRONG;
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, parent, &context->primitive_types[TYPE_VOID]);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, parent, &context->primitive_types[TYPE_VOID]);
             if (r == TYPECHECK_EXPR_BAD ||  r == TYPECHECK_EXPR_DEPENDENT) {
                 if (parent->type == null) {
                     return r;
@@ -7886,18 +7900,18 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
 
         case EXPR_TYPE_INFO_OF_TYPE: {
-            Typecheck_Result r = resolve_type(context, scope, &expr->type_info_of_type, &expr->pos);
+            Typecheck_Result r = resolve_type(context, scope, scope_pos, &expr->type_info_of_type, &expr->pos);
             if (r != TYPECHECK_RESULT_DONE) return r;
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
             Type *void_type = &context->primitive_types[TYPE_VOID];
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->type_info_of_value, void_type);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, expr->type_info_of_value, void_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
         } break;
 
         case EXPR_QUERY_TYPE_INFO: {
-            Typecheck_Result r = resolve_type(context, scope, &expr->query_type_info.type, &expr->pos);
+            Typecheck_Result r = resolve_type(context, scope, scope_pos, &expr->query_type_info.type, &expr->pos);
             if (r != TYPECHECK_RESULT_DONE) return r;
 
             if (
@@ -7913,7 +7927,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, expr->enum_member, &context->primitive_types[TYPE_INVALID]);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, expr->enum_member, &context->primitive_types[TYPE_INVALID]);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             if (expr->enum_member->type->kind != TYPE_ENUM) {
@@ -7935,7 +7949,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
         default: assert(false);
     }
 
-    Typecheck_Result r = resolve_type(context, scope, &expr->type, &expr->pos);
+    Typecheck_Result r = resolve_type(context, scope, scope_pos, &expr->type, &expr->pos);
     if (r != TYPECHECK_RESULT_DONE) return r;
 
     return strong? TYPECHECK_EXPR_STRONG : TYPECHECK_EXPR_WEAK;
@@ -7944,6 +7958,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, Expr* expr,
 
 Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
     Type *void_type = &context->primitive_types[TYPE_VOID];
+    u32 scope_pos = stmt->scope_pos;
 
     switch (stmt->kind) {
         case STMT_ASSIGNMENT: {
@@ -7953,11 +7968,11 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             Typecheck_Expr_Result r;
 
             Type *void_type = &context->primitive_types[TYPE_VOID];
-            r = typecheck_expr(context, scope, left, void_type);
+            r = typecheck_expr(context, scope, scope_pos, left, void_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
             Type *left_type = left->type;
 
-            r = typecheck_expr(context, scope, right, left_type);
+            r = typecheck_expr(context, scope, scope_pos, right, left_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
             Type *right_type = right->type;
 
@@ -7994,7 +8009,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             Typecheck_Expr_Result r;
 
             Type *void_type = &context->primitive_types[TYPE_VOID];
-            r = typecheck_expr(context, scope, left, void_type);
+            r = typecheck_expr(context, scope, scope_pos, left, void_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
             Type *left_type = left->type;
 
@@ -8005,7 +8020,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 solidify_right_to = left_type;
             }
 
-            r = typecheck_expr(context, scope, right, solidify_right_to);
+            r = typecheck_expr(context, scope, scope_pos, right, solidify_right_to);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
             Type *right_type = right->type;
 
@@ -8052,7 +8067,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         } break;
 
         case STMT_EXPR: {
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->expr, void_type);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, stmt->expr, void_type);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
         } break;
 
@@ -8066,7 +8081,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             for (u32 i = 1; i < var_count; i += 1) assert(vars[i].type == var_type);
 
             if (var_type != null) {
-                Typecheck_Result r = resolve_type(context, scope, &var_type, &stmt->pos);
+                Typecheck_Result r = resolve_type(context, scope, scope_pos, &var_type, &stmt->pos);
                 if (r != TYPECHECK_RESULT_DONE) return r;
             }
 
@@ -8076,7 +8091,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 Type *resolve_to = var_type;
                 if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, right, resolve_to);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, right, resolve_to);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
                     var_type = &context->primitive_types[TYPE_INVALID];
                     return r;
@@ -8124,7 +8139,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
         case STMT_IF: {
             Type *type_bool = &context->primitive_types[TYPE_BOOL];
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->if_.condition, type_bool);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, stmt->if_.condition, type_bool);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             Type_Kind condition_primitive = stmt->if_.condition->type->kind;
@@ -8151,7 +8166,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
         case STMT_SWITCH: {
             Type *type_default_int = &context->primitive_types[TYPE_DEFAULT_INT];
-            Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->switch_.index, type_default_int);
+            Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, stmt->switch_.index, type_default_int);
             if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
             Type *automatch_enum = stmt->switch_.index->type;
@@ -8181,7 +8196,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     }
 
                     if (key->is_identifier) {
-                        Var *key_var = find_var(scope, key->identifier, &c->pos);
+                        Var *key_var = find_var(scope, key->identifier, scope_pos);
 
                         if (key_var != null) {
                             if (key_var->flags & VAR_FLAG_GLOBAL) {
@@ -8213,7 +8228,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
                     assert(!key->is_identifier);
 
-                    Typecheck_Expr_Result r = typecheck_expr(context, scope, key->expr, stmt->switch_.index->type);
+                    Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, key->expr, stmt->switch_.index->type);
                     if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                     if (stmt->switch_.index->type != key->expr->type) {
@@ -8279,7 +8294,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         case STMT_FOR: {
             if (stmt->for_.kind == LOOP_CONDITIONAL) {
                 Type *type_bool = &context->primitive_types[TYPE_BOOL];
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->for_.condition, type_bool);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, stmt->for_.condition, type_bool);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 Type_Kind condition_primitive = stmt->for_.condition->type->kind;
@@ -8296,17 +8311,17 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
 
                 Type *type_default_int = &context->primitive_types[TYPE_DEFAULT_INT];
                 Typecheck_Expr_Result start_result, end_result;
-                start_result = typecheck_expr(context, scope, start, type_default_int);
-                end_result   = typecheck_expr(context, scope, end,   type_default_int);
+                start_result = typecheck_expr(context, scope, scope_pos, start, type_default_int);
+                end_result   = typecheck_expr(context, scope, scope_pos, end,   type_default_int);
 
                 if (start_result == TYPECHECK_EXPR_BAD || end_result == TYPECHECK_EXPR_BAD) return TYPECHECK_RESULT_BAD;
                 if (start_result == TYPECHECK_EXPR_DEPENDENT || end_result == TYPECHECK_EXPR_DEPENDENT) return TYPECHECK_RESULT_DEPENDENT;
 
                 if (start->type != end->type) {
                     if (end_result == TYPECHECK_EXPR_WEAK) {
-                        end_result = typecheck_expr(context, scope, end, start->type);
+                        end_result = typecheck_expr(context, scope, scope_pos, end, start->type);
                     } else if (start_result == TYPECHECK_EXPR_WEAK && end_result == TYPECHECK_EXPR_STRONG) {
-                        start_result = typecheck_expr(context, scope, start, end->type);
+                        start_result = typecheck_expr(context, scope, scope_pos, start, end->type);
                     }
                 }
 
@@ -8365,7 +8380,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     return TYPECHECK_RESULT_BAD;
                 }
 
-                Typecheck_Expr_Result r = typecheck_expr(context, scope, stmt->return_.value, expected_type);
+                Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, stmt->return_.value, expected_type);
                 if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
                 if (!type_can_assign(expected_type, stmt->return_.value->type)) {
@@ -8924,6 +8939,7 @@ typedef struct Typecheck_Item {
     } kind;
 
     Scope *scope;
+    u32 scope_pos;
 
     union {
         struct {
@@ -8955,7 +8971,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
     }
 
     if (var_type != null) {
-        Typecheck_Result r = resolve_type(context, scope, &var_type, &global_let->pos);
+        Typecheck_Result r = resolve_type(context, scope, 0, &var_type, &global_let->pos);
         if (r != TYPECHECK_RESULT_DONE) return r;
     }
 
@@ -8965,7 +8981,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
         Type *resolve_to = var_type;
         if (resolve_to == null) resolve_to = &context->primitive_types[TYPE_VOID];
 
-        Typecheck_Expr_Result r = typecheck_expr(context, scope, global_let->expr, resolve_to);
+        Typecheck_Expr_Result r = typecheck_expr(context, scope, 0, global_let->expr, resolve_to);
         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) {
             return r;
         }
@@ -9095,7 +9111,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
 Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) {
     switch (item->kind) {
         case TYPECHECK_RESOLVE_TYPE: {
-            return resolve_type(context, item->scope, item->resolve_type.slot, &item->resolve_type.pos);
+            return resolve_type(context, item->scope, item->scope_pos, item->resolve_type.slot, &item->resolve_type.pos);
         } break;
 
         case TYPECHECK_COMPUTE_SIZE: {

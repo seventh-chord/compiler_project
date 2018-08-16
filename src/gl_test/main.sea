@@ -253,9 +253,12 @@ fn framebuffer_bind(framebuffer: *Framebuffer) {
 fn framebuffer_blit(framebuffer: *Framebuffer, width, height: i64) {
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer.fbo);
+
+    let width  = i32(width);
+    let height = i32(height);
     glBlitFramebuffer(
-        0, 0, i32(width), i32(height),
-        0, 0, i32(width), i32(height),
+        0, 0, width, height,
+        0, 0, width, height,
         GL_COLOR_BUFFER_BIT,
         GL_NEAREST,
     );
