@@ -1600,9 +1600,12 @@ typedef struct Global_Var {
 
 typedef struct Global_Let {
     File_Pos pos;
+    Scope *scope;
+
     Var *vars;
     u32 var_count;
     Expr *expr;
+
     bool compute_at_runtime;
 } Global_Let;
 
@@ -2277,8 +2280,9 @@ Var *find_var(Scope *scope, u8 *interned_name, u32 before_position) {
     while (true) {
         for (u32 i = scope->decls_length - 1; i < scope->decls_length; i -= 1) {
             Decl *decl = &scope->decls[i];
+            if (decl->kind != DECL_VAR) continue;
 
-            if (scope == start_scope && scope->fn != null && decl->scope_pos >= before_position) {
+            if (scope == start_scope && scope->fn != null && decl->scope_pos >= before_position && !(decl->var->flags & VAR_FLAG_CONSTANT)) {
                 continue;
             }
 
@@ -2313,9 +2317,9 @@ u32 find_enum_member(Type *type, u8 *name) {
 
 Decl *add_declaration(
     Arena *arena, Scope *scope,
-    int kind, u8 *name, File_Pos pos
+    int kind, u8 *name, File_Pos pos,
+    bool allow_shadowing
 ) {
-    bool allow_shadowing = kind == DECL_VAR && scope->fn != null;
     if (!allow_shadowing) {
         for (u32 i = 0; i < scope->decls_length; i += 1) {
             Decl *other_decl = &scope->decls[i];
@@ -3650,7 +3654,7 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
                 var->local_index = fn->body.var_count;
                 fn->body.var_count += 1;
 
-                Decl *decl = add_declaration(&context->arena, &fn->body.scope, DECL_VAR, p->name, p->pos);
+                Decl *decl = add_declaration(&context->arena, &fn->body.scope, DECL_VAR, p->name, p->pos, false);
                 assert(decl != null);
                 decl->var  = var;
 
@@ -3824,7 +3828,7 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
 
     *length = t - t_start;
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos);
+    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos, false);
     if (decl == null) return false;
     decl->type = type;
 
@@ -4062,7 +4066,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         }
     }
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos);
+    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos, false);
     if (decl == null) return false;
     decl->type = type;
 
@@ -5149,6 +5153,7 @@ Stmt *parse_case_body(Context *context, Scope *scope, Token *t, u32 *length) {
 }
 
 typedef struct Var_Decl_Info {
+    bool constant;
     Var *vars;
     u32 var_count;
     Expr *expr;
@@ -5158,7 +5163,7 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
     File_Pos decl_pos = t->pos;
     Token *t_start = t;
 
-    bool constant = t->kind == TOKEN_KEYWORD_CONST;
+    info->constant = t->kind == TOKEN_KEYWORD_CONST;
     t += 1;
 
     arena_stack_push(&context->stack);
@@ -5264,18 +5269,18 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
         var->name = entry->name;
         var->declaration_pos = decl_pos;
         var->type = type;
-        if (constant) var->flags |= VAR_FLAG_CONSTANT;
+        if (info->constant) var->flags |= VAR_FLAG_CONSTANT;
 
-        if (scope->fn != null) {
-            var->local_index = scope->fn->body.var_count;
-            scope->fn->body.var_count += 1;
-        } else {
+        if (scope->fn == null || info->constant) {
             var->flags |= VAR_FLAG_GLOBAL;
             var->global_index = buf_length(context->global_vars);
             buf_push(context->global_vars, ((Global_Var) { .var = var, .data_offset = U32_MAX }));
+        } else {
+            var->local_index = scope->fn->body.var_count;
+            scope->fn->body.var_count += 1;
         }
 
-        Decl *decl = add_declaration(&context->arena, scope, DECL_VAR, entry->name, decl_pos);
+        Decl *decl = add_declaration(&context->arena, scope, DECL_VAR, entry->name, decl_pos, !(scope->fn == null || info->constant));
         if (decl == null) return false;
         decl->var = var;
     }
@@ -5295,9 +5300,6 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
     Stmt *first_stmt = arena_new(&context->arena, Stmt);
     first_stmt->pos = t->pos;
 
-    first_stmt->scope_pos = scope->next_scope_pos;
-    scope->next_scope_pos += 1;
-
     Stmt *stmt = first_stmt;
 
     while (true) {
@@ -5313,6 +5315,9 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
 
         Token* t_start = t;
         stmt->pos = t->pos;
+
+        stmt->scope_pos = scope->next_scope_pos;
+        scope->next_scope_pos += 1;
 
         bool no_stmt_generated = false;
 
@@ -5619,7 +5624,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                     var->local_index = scope->fn->body.var_count;
                     scope->fn->body.var_count += 1;
 
-                    Decl *index_decl = add_declaration(&context->arena, &stmt->for_.scope, DECL_VAR, index_var_name, index_var_pos);
+                    Decl *index_decl = add_declaration(&context->arena, &stmt->for_.scope, DECL_VAR, index_var_name, index_var_pos, true);
                     assert(index_decl != null);
                     index_decl->var = var;
 
@@ -5723,10 +5728,22 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                     return null;
                 }
 
-                stmt->kind = STMT_LET;
-                stmt->let.vars = info.vars;
-                stmt->let.var_count = info.var_count;
-                stmt->let.right = info.expr; 
+                if (info.constant) {
+                    no_stmt_generated = true;
+
+                    buf_push(context->global_lets, ((Global_Let) {
+                        .pos = stmt->pos,
+                        .scope = scope,
+                        .vars = info.vars,
+                        .var_count = info.var_count,
+                        .expr = info.expr,
+                    }));
+                } else {
+                    stmt->kind = STMT_LET;
+                    stmt->let.vars = info.vars;
+                    stmt->let.var_count = info.var_count;
+                    stmt->let.right = info.expr; 
+                }
             } break;
 
             case TOKEN_KEYWORD_ENUM: {
@@ -5841,9 +5858,6 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
             parsed_stmts += 1;
             stmt->next = arena_new(&context->arena, Stmt);
             stmt = stmt->next;
-
-            stmt->scope_pos = scope->next_scope_pos;
-            scope->next_scope_pos += 1;
         } else {
             break;
         }
@@ -5933,7 +5947,7 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     *length = t - t_start;
     if (!valid) return null;
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_FN, fn->name, declaration_pos);
+    Decl *decl = add_declaration(&context->arena, scope, DECL_FN, fn->name, declaration_pos, false);
     if (decl == null) return null;
     decl->fn = fn;
 
@@ -5975,7 +5989,7 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
 
     *length = t - t_start;
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, name, declaration_pos);
+    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, name, declaration_pos, false);
     if (decl == null) return false;
     decl->type = type;
 
@@ -6752,6 +6766,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             } else {
                 buf_push(context->global_lets, ((Global_Let) {
                     .pos = decl_pos,
+                    .scope = &context->global_scope,
                     .vars = info.vars,
                     .var_count = info.var_count,
                     .expr = info.expr,
@@ -8938,11 +8953,10 @@ typedef struct Typecheck_Item {
         TYPECHECK_GLOBAL_LET,
     } kind;
 
-    Scope *scope;
-    u32 scope_pos;
-
     union {
         struct {
+            Scope *scope;
+            u32 scope_pos;
             Type **slot;
             File_Pos pos;
         } resolve_type;
@@ -8951,7 +8965,7 @@ typedef struct Typecheck_Item {
 
         Fn *fn;
 
-        u32 global_let_index;
+        Global_Let *global_let;
     };
 } Typecheck_Item;
 
@@ -8965,10 +8979,6 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
     assert(global_let->var_count > 0);
     Type *var_type = global_let->vars[0].type;
     for (u32 i = 1; i < global_let->var_count; i += 1) assert(global_let->vars[i].type == var_type);
-
-    if (global_let->var_count == 3) {
-        printf("Ding ding ding!\n");
-    }
 
     if (var_type != null) {
         Typecheck_Result r = resolve_type(context, scope, 0, &var_type, &global_let->pos);
@@ -9111,7 +9121,7 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
 Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) {
     switch (item->kind) {
         case TYPECHECK_RESOLVE_TYPE: {
-            return resolve_type(context, item->scope, item->scope_pos, item->resolve_type.slot, &item->resolve_type.pos);
+            return resolve_type(context, item->resolve_type.scope, item->resolve_type.scope_pos, item->resolve_type.slot, &item->resolve_type.pos);
         } break;
 
         case TYPECHECK_COMPUTE_SIZE: {
@@ -9161,8 +9171,8 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
         } break;
 
         case TYPECHECK_GLOBAL_LET: {
-            Global_Let *global_let = &context->global_lets[item->global_let_index];
-            return check_global(context, item->scope, global_let);
+            Global_Let *global_let = item->global_let;
+            return check_global(context, global_let->scope, global_let);
         } break;
     }
 
@@ -9182,10 +9192,11 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                 if (decl->type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_RESOLVE_TYPE,
-                        .scope = scope,
                         .resolve_type = {
                             .slot = &decl->type,
                             .pos = decl->pos,
+                            .scope = scope,
+                            .scope_pos = decl->scope_pos,
                         },
                     }));
                 }
@@ -9193,7 +9204,6 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                 if (decl->type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_COMPUTE_SIZE,
-                        .scope = scope,
                         .compute_size_of = decl->type,
                     }));
                 }
@@ -9204,17 +9214,17 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
 
                 buf_push(queue->items, ((Typecheck_Item) {
                     .kind = TYPECHECK_RESOLVE_TYPE,
-                    .scope = scope,
                     .resolve_type = {
                         .slot = &decl->fn->signature_type,
                         .pos = decl->pos,
+                        .scope = scope,
+                        .scope_pos = decl->scope_pos,
                     },
                 }));
 
                 if (fn->kind == FN_KIND_NORMAL) {
                     buf_push(queue->items, ((Typecheck_Item) {
                         .kind = TYPECHECK_FN_BODY,
-                        .scope = scope,
                         .fn = fn,
                     }));
 
@@ -9276,11 +9286,10 @@ void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stm
 bool typecheck(Context *context) {
     Typecheck_Queue queue = {0};
     typecheck_queue_include_scope(context, &queue, &context->global_scope);
-    for (u32 i = 0; i < buf_length(context->global_lets); i += 1) {
+    buf_foreach (Global_Let, global_let, context->global_lets) {
         buf_push(queue.items, ((Typecheck_Item) {
             .kind = TYPECHECK_GLOBAL_LET,
-            .scope = &context->global_scope,
-            .global_let_index = i,
+            .global_let = global_let,
         }));
     }
 
@@ -9326,7 +9335,7 @@ bool typecheck(Context *context) {
                     } break;
 
                     case TYPECHECK_GLOBAL_LET: {
-                        Global_Let *global_let = &context->global_lets[item->global_let_index];
+                        Global_Let *global_let = item->global_let;
                         if (global_let->var_count == 1) {
                             printf("    The global '%s'\n", global_let->vars[0].name);
                         } else {

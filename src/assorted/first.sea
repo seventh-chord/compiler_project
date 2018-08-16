@@ -50,11 +50,14 @@ fn array_length_test() {
 const QUESTIONABLE_OK_THANKS = 3;
 
 fn shadowing() {
-    let x = 1;
+    let x = N;
     let x = x + 1;
-    if x == 2 {
+    if x == 4 {
         print("Everything seems to work as intended\n");
     } else {
         print("I don't feel so good, mister compiler\n");
     }
+
+    const M = N + 1;
+    const N = 3;
 }
