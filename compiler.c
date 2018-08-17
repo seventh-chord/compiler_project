@@ -10601,9 +10601,9 @@ void instruction_mul_pointer_imm(Context *context, Register reg, i64 mul_by) {
         u64 mul_by_bits = *((u64*) &mul_by);
 
         if (mul_by <= I8_MAX && mul_by >= I8_MIN) {
-            encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0x6b, false, x64_place_reg(reg), reg, sizeof(i8), mul_by_bits);
+            encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0x6b, false, x64_place_reg(reg), reg, mul_by_bits, sizeof(i8));
         } else if (mul_by <= I32_MAX && mul_by >= I32_MIN) {
-            encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0x69, false, x64_place_reg(reg), reg, sizeof(i32), mul_by_bits);
+            encode_instruction_modrm_with_immediate(context, REX_BASE | REX_W, 0x69, false, x64_place_reg(reg), reg, mul_by_bits, sizeof(i32));
         } else {
             assert(false); // NB the immediate operand to the imul instruction can at most be a i32
         }
