@@ -13292,18 +13292,17 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
         case STMT_RETURN: {
             if (stmt->return_.value != null) {
                 register_allocator_enter_frame(context, reg_allocator);
-                register_allocate_specific(context, reg_allocator, RAX);
 
-                X64_Place return_location;
                 if (fn->signature->return_by_reference) {
+                    register_allocate_specific(context, reg_allocator, RAX);
                     instruction_mov_reg_mem(context, MOVE_FROM_MEM, reg_allocator->return_value_address, RAX, POINTER_SIZE);
-                    return_location = x64_place_address((X64_Address) { .base = RAX });
-                } else if (primitive_is_float(fn->signature->return_type->kind)) {
-                    return_location = x64_place_reg(XMM0);
+                    X64_Place return_location = x64_place_address((X64_Address) { .base = RAX });
+                    machinecode_for_expr(context, fn, stmt->return_.value, reg_allocator, return_location);
                 } else {
-                    return_location = x64_place_reg(RAX);
+                    Register return_reg = primitive_is_float(fn->signature->return_type->kind)? XMM0 : RAX;
+                    register_allocate_specific(context, reg_allocator, return_reg);
+                    machinecode_for_expr(context, fn, stmt->return_.value, reg_allocator, x64_place_reg(return_reg));
                 }
-                machinecode_for_expr(context, fn, stmt->return_.value, reg_allocator, return_location);
 
                 register_allocator_leave_frame(context, reg_allocator);
             }
