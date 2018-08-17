@@ -72,6 +72,8 @@ int _fltused; // To make floating point work without the crt
         Handle template_file        // null
     );
 
+    WINAPI_PRE bool WINAPI_POST CloseHandle(Handle handle);
+
     WINAPI_PRE bool WINAPI_POST GetFileSizeEx(
         Handle file,
         i64* file_size // Unix timestamp
@@ -12490,9 +12492,22 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                     // do anything more here.
                     // NB The function also returns the pointer we passed (in RCX) in RAX, which we could
                     // make use of.
+                } else if (place.kind == PLACE_ADDRESS && (place.address.base == RAX || place.address.index == RAX)) {
+                    assert(unflush_return && return_reg == RAX);
+                    register_allocator_enter_frame(context, reg_allocator);
+                    Register temp_reg = register_allocate(reg_allocator, REGISTER_KIND_GPR, RESERVE_RAX);
+
+                    instruction_mov_reg_reg(context, RAX, temp_reg, return_size);
+                    instruction_mov_reg_mem(context, MOVE_FROM_MEM, unflush_return_from, RAX, POINTER_SIZE);
+                    instruction_mov_reg_mem(context, MOVE_TO_MEM, place.address, temp_reg, return_size);
+
+                    register_allocator_leave_frame(context, reg_allocator);
+
+                    unflush_return = false;
                 } else {
                     machinecode_move(context, reg_allocator, x64_place_reg(return_reg), place, return_size);
                 }
+
             }
 
             if (unflush_return) {
