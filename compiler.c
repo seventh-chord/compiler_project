@@ -31,9 +31,11 @@
 #define max(a, b)  ((a) > (b)? (a) : (b))
 #define min(a, b)  ((a) > (b)? (b) : (a))
 
-int _fltused; // To make floating point work without the c runtime
+int _fltused; // To make floating point work without the crt
 
 #include <stdarg.h>
+#include <xmmintrin.h>
+#include <emmintrin.h>
 
 // Our substitute for windows.h
 #if WINDOWS
@@ -283,14 +285,15 @@ u64 unix_time() {
 }
 
 // Memory
+// NB I don't like prefixing these, but msvc polutes my namespaces
 
-void *alloc(u64 size) {
+void *sc_alloc(u64 size) {
     return HeapAlloc(process_heap, 0, size);
 }
-void *realloc(void *mem, u64 size) {
+void *sc_realloc(void *mem, u64 size) {
     return HeapReAlloc(process_heap, 0, mem, size);
 }
-bool free(void *mem) {
+bool sc_free(void *mem) {
     return HeapFree(process_heap, 0, mem);
 }
 
@@ -501,7 +504,7 @@ void hash_insert(Hash_Map *map, u64 key, u64 value) {
 void hash_grow(Hash_Map *map, u64 new_capacity) {
     assert((new_capacity & (new_capacity - 1)) == 0); // ensure capacity is allways a power of two
     Hash_Map new_map = {
-        .slots = (void*) alloc(new_capacity * sizeof(*map->slots)),
+        .slots = (void*) sc_alloc(new_capacity * sizeof(*map->slots)),
         .capacity = new_capacity,
         .length = map->length,
     };
@@ -517,7 +520,7 @@ void hash_grow(Hash_Map *map, u64 new_capacity) {
         }
     }
 
-    free(map->slots);
+    sc_free(map->slots);
     *map = new_map;
 }
 
@@ -539,7 +542,7 @@ typedef struct Buf_Header {
 #define _buf_fit(b, n)     (_buf_fits(b, n)? 0 : ((b) = _buf_grow(b, buf_length(b) + (n), sizeof(*(b)))))
 #define buf_push(b, x)     (_buf_fit(b, 1), (b)[buf_length(b)] = (x), _buf_header(b)->length += 1)
 #define buf_pop(b)         (assert(!buf_empty(b)), _buf_header(b)->length -= 1, *((b) + buf_length(b)))
-#define buf_free(b)        ((b)? (free(_buf_header(b)), (b) = null) : (0))
+#define buf_free(b)        ((b)? (sc_free(_buf_header(b)), (b) = null) : (0))
 #define buf_end(b)         ((b)? ((b) + buf_length(b)) : null)
 #define buf_empty(b)       (buf_length(b) <= 0)
 #define buf_clear(b)       ((b)? (_buf_header(b)->length = 0, null) : null)
@@ -554,7 +557,7 @@ void *_buf_grow(void *buf, u64 new_len, u64 element_size) {
         u64 new_capacity = max(512, new_len);
         u64 new_bytes = new_capacity*element_size + BUF_HEADER_SIZE;
 
-        new_header = (Buf_Header*) alloc(new_bytes);
+        new_header = (Buf_Header*) sc_alloc(new_bytes);
         new_header->length = 0;
         new_header->capacity = new_capacity;
 
@@ -566,7 +569,7 @@ void *_buf_grow(void *buf, u64 new_len, u64 element_size) {
         u64 new_bytes = new_capacity*element_size + BUF_HEADER_SIZE;
 
         Buf_Header *old_header = _buf_header(buf);
-        new_header = (Buf_Header*) realloc(old_header, new_bytes);
+        new_header = (Buf_Header*) sc_realloc(old_header, new_bytes);
         new_header->capacity = new_capacity;
     }
 
@@ -678,7 +681,7 @@ struct Arena_Page {
 
 void arena_make_space(Arena* arena, u64 size) {
     if (arena->current_page == null) {
-        Arena_Page* page = (Arena_Page*) alloc(sizeof(Arena_Page) + ARENA_PAGE_SIZE);
+        Arena_Page* page = (Arena_Page*) sc_alloc(sizeof(Arena_Page) + ARENA_PAGE_SIZE);
         page->used = 0;
         page->previous = null;
         page->next = null;
@@ -696,7 +699,7 @@ void arena_make_space(Arena* arena, u64 size) {
 
     if (size + align_offset > free_space) {
         if (arena->current_page->next == null) {
-            Arena_Page* page = (Arena_Page*) alloc(sizeof(Arena_Page) + ARENA_PAGE_SIZE);
+            Arena_Page* page = (Arena_Page*) sc_alloc(sizeof(Arena_Page) + ARENA_PAGE_SIZE);
             page->used = 0;
             page->next = null;
 
@@ -801,7 +804,7 @@ u8 *string_intern_with_length(String_Table *table, u8 *string, u64 length) {
     u64 entry_length = 16 + length + 1;
 
     if (table->arena == null || table->arena_length + entry_length > STRING_TABLE_ARENA_CAPACITY) {
-        table->arena = (u8*) alloc(STRING_TABLE_ARENA_CAPACITY);
+        table->arena = (u8*) sc_alloc(STRING_TABLE_ARENA_CAPACITY);
         table->arena_length = 0;
     }
 
@@ -1144,12 +1147,12 @@ IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length) {
         }
     }
 
-    *contents = alloc(file_size);
+    *contents = sc_alloc(file_size);
 
     u32 read = 0;
     i32 success = ReadFile(file, *contents, file_size, &read, null);
     if (!success || read != file_size) {
-        free(*contents);
+        sc_free(*contents);
         *contents = null;
 
         u32 error_code = GetLastError();
@@ -6105,7 +6108,7 @@ bool build_ast(Context *context, u8* file_name) {
 
     valid &= lex_and_parse_text(context, file_name, file, file_length);
 
-    free(file);
+    sc_free(file);
 
     if (valid) {
         return true;
@@ -8641,8 +8644,17 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                 } break;
 
                 case UNARY_SQRT: {
-                    // TODO We should be able to do this, but I don't want to figure out msvc intrinsics right now
-                    return EVAL_DO_AT_RUNTIME;
+                    if (primitive == TYPE_F32) {
+                        f32 f = *((f32*) result_into);
+                        f = _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(f)));
+                        *((f32*) result_into) = f;
+                    } else if (primitive == TYPE_F64) {
+                        f64 f = *((f64*) result_into);
+                        f = _mm_cvtsd_f64(_mm_sqrt_sd(_mm_set1_pd(0.0), _mm_set_sd(f)));
+                        *((f64*) result_into) = f;
+                    } else {
+                        assert(false);
+                    }
                 } break;
 
                 default: assert(false);
@@ -14081,12 +14093,12 @@ bool parse_library(Context *context, Library_Import* import) {
         }
     }
 
-    free(file);
+    sc_free(file);
     arena_stack_pop(&context->stack);
     return true;
 
     invalid:
-    free(file);
+    sc_free(file);
     printf("Couldn't load \"%s\": Invalid archive\n", path);
     arena_stack_pop(&context->stack);
     return false;
@@ -14134,7 +14146,7 @@ bool write_pdb(u8 *path, Context *context) {
     *stream_directory_data[2] = *block_map_address_data;
 
     IO_Result result = write_entire_file(path, data, data_size);
-    free(data);
+    sc_free(data);
     if (result != IO_OK) {
         printf("Couldn't write \"%s\": %s\n", path, io_result_message(result));
         return false;
@@ -14361,7 +14373,7 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     }
 
     // Allocate space and fill in the image
-    u8* output_file = alloc(file_image_size);
+    u8* output_file = sc_alloc(file_image_size);
     mem_clear(output_file, file_image_size);
 
     u8 dos_prepend[200] = {
