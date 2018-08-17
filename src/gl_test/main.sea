@@ -3,9 +3,6 @@ fn main() {
     open_window();
     set_vsync(true); // NB setting to false will make the screen flash crazily
 
-    let r = 0.0;
-    let up = true;
-
     let draw_group = draw_group_init();
     let framebuffer = framebuffer_init(8, window_width, window_height);
 
@@ -23,22 +20,23 @@ fn main() {
             view_size = { MIN_VIEW_WIDTH, MIN_VIEW_WIDTH/aspect };
         }
 
-        if up {
-            r += 0.001;
-            if r > 0.7 { up = false; }
-        } else {
-            r -= 0.001;
-            if r < 0.3 { up = true; }
-        }
+        draw_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, {  0.0, -1.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, { +1.0, -1.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, { +1.0,  0.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, { +1.0, +1.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, {  0.0, +1.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::Z, 0);
+        //draw_tile(&draw_group, {  0.0,  0.0, 0.0 }, Dir::Z, 0);
 
-        draw_group_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::Z, 0);
-        draw_group_tile(&draw_group, {  0.0, -1.0, 0.0 }, Dir::Z, 1);
-        draw_group_tile(&draw_group, { +1.0, -1.0, 0.0 }, Dir::Z, 0);
-        draw_group_tile(&draw_group, { +1.0,  0.0, 0.0 }, Dir::Z, 1);
-        draw_group_tile(&draw_group, { +1.0, +1.0, 0.0 }, Dir::Z, 0);
-        draw_group_tile(&draw_group, {  0.0, +1.0, 0.0 }, Dir::Z, 1);
-        draw_group_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::Z, 0);
-        draw_group_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, { -1.0,  1.0, 0.0 }, Dir::Y, 1);
+        draw_tile(&draw_group, {  0.0,  1.0, 0.0 }, Dir::Y, 1);
+        draw_tile(&draw_group, { +1.0,  1.0, 0.0 }, Dir::Y, 1);
+
+        draw_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::X, 1);
+        draw_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::X, 1);
+        draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::X, 1);
 
         if window_width > framebuffer.width || window_height > framebuffer.height {
             framebuffer_grow(&framebuffer, window_width, window_height);
@@ -46,7 +44,7 @@ fn main() {
         framebuffer_bind(&framebuffer);
 
         glViewport(0, 0, i32(window_width), i32(window_height));
-        glClearColor(r, 1.0, 0.2 + (1.0 - r)*0.8, 1.0);
+        glClearColor(0.99, 0.99, 0.87, 1.0);
         glClear(GL_COLOR_BUFFER_BIT);
         draw_group_draw(&draw_group, view_size, view_pos);
 
@@ -67,7 +65,7 @@ const ORTHO = [3]v2 {
     { 0.0, 1.0 },         // z
 };
 
-enum Dir { X, Y, Z }
+enum Dir(u8) { X = 0, Y = 1, Z = 2 }
 
 
 
@@ -109,7 +107,8 @@ const MAX_VERTICES_BYTES = MAX_VERTICES * size_of(Vertex);
 
 struct Vertex {
     pos: v3;
-    kind: i32;
+    kind: i16;
+    dir: u8;
 }
 
 struct Draw_Group {
@@ -128,7 +127,9 @@ fn draw_group_init() -> Draw_Group {
 
         layout(location = 0) in vec3 in_pos;
         layout(location = 1) in int in_kind;
+        layout(location = 2) in int in_dir;
 
+        out vec2 pattern_pos;
         flat out int kind;
 
         const mat3x2 ORTHO = mat3x2(
@@ -142,6 +143,12 @@ fn draw_group_init() -> Draw_Group {
             vec2 screen_pos = ((flat_pos - view_pos) / view_size) * 2.0;
             gl_Position = vec4(screen_pos, 0.0, 1.0);
 
+            switch (in_dir) {
+                case 0: pattern_pos = vec2(in_pos.y, in_pos.z); break;
+                case 1: pattern_pos = vec2(in_pos.x, in_pos.z); break;
+                case 2: pattern_pos = vec2(in_pos.x, in_pos.y); break;
+            }
+
             kind = in_kind;
         }
     ";
@@ -149,15 +156,28 @@ fn draw_group_init() -> Draw_Group {
     let frag_source = "
         #version 330 core
 
+        in vec2 pattern_pos;
         flat in int kind;
 
         out vec4 color;
 
         void main() {
             if (kind == 0) {
-                color = vec4(1.0, 1.0, 0.7, 1.0);
+                const vec2 A = vec2(0.0, 1.0);
+                float a = sin(dot(pattern_pos, A) * 16.0);
+                float n = smoothstep(a, 0.3, 0.50);
+
+                color = vec4(0.64, 0.27, 0.17, 1.0) * (n*0.2 + 0.8);
             } else if (kind == 1) {
-                color = vec4(0.8, 1.0, 0.6, 1.0);
+                const vec2 A = vec2(0.0, 1.0);
+                const vec2 B = vec2(sqrt(0.75), -0.5);
+                const vec2 C = vec2(sqrt(0.75), 0.5);
+                float a = sin(dot(pattern_pos, A) * 17.0);
+                float b = sin(dot(pattern_pos, B) * 17.0);
+                float c = sin(dot(pattern_pos, C) * 17.0);
+                float n = smoothstep(abs(a*b*c), 0.3, 0.4);
+
+                color = vec4(0.8, 1.0, 0.6, 1.0) * (n*0.2 + 0.8);
             } else {
                 color = vec4(1.0, 0.0, 0.0, 1.0);
             }
@@ -182,12 +202,16 @@ fn draw_group_init() -> Draw_Group {
     let offset = 0;
 
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, offset));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, offset));
     offset += size_of(v3);
 
     glEnableVertexAttribArray(1);
-    glVertexAttribIPointer(1, 1, GL_INT, i32(size_of(Vertex)), cast(*void, offset));
-    offset += size_of(i32);
+    glVertexAttribIPointer(1, 1, GL_SHORT, i32(size_of(Vertex)), cast(*void, offset));
+    offset += size_of(i16);
+
+    glEnableVertexAttribArray(2);
+    glVertexAttribIPointer(2, 1, GL_BYTE, i32(size_of(Vertex)), cast(*void, offset));
+    offset += size_of(u8);
 
     return Draw_Group { shader, shader_uniform_view_size, shader_uniform_view_pos, vbo, vao, vertex_count, vertices };
 }
@@ -206,7 +230,7 @@ fn draw_group_draw(draw_group: *Draw_Group, view_size, view_pos: v2) {
     draw_group.vertex_count = 0;
 }
 
-fn draw_group_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: i32) {
+fn draw_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: i16) {
     let i = draw_group.vertex_count;
     draw_group.vertex_count += 6;
     assert(draw_group.vertex_count < MAX_VERTICES, "Out of space in draw group");
@@ -214,35 +238,35 @@ fn draw_group_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: i32) 
     let c: [4]v3;
     switch direction {
         X: c = {
-            add_v3(pos, { -0.5, -0.5, 0.0 }),
-            add_v3(pos, { +0.5, -0.5, 0.0 }),
-            add_v3(pos, { +0.5, +0.5, 0.0 }),
-            add_v3(pos, { -0.5, +0.5, 0.0 }),
+            add_v3(pos, { -0.5, -0.5, -0.5 }),
+            add_v3(pos, { -0.5, +0.5, -0.5 }),
+            add_v3(pos, { -0.5, +0.5, +0.5 }),
+            add_v3(pos, { -0.5, -0.5, +0.5 }),
         };
 
         Y: c = {
-            add_v3(pos, { -0.5, -0.5, 0.0 }),
-            add_v3(pos, { +0.5, -0.5, 0.0 }),
-            add_v3(pos, { +0.5, +0.5, 0.0 }),
-            add_v3(pos, { -0.5, +0.5, 0.0 }),
+            add_v3(pos, { -0.5, +0.5, -0.5 }),
+            add_v3(pos, { -0.5, +0.5, +0.5 }),
+            add_v3(pos, { +0.5, +0.5, +0.5 }),
+            add_v3(pos, { +0.5, +0.5, -0.5 }),
         };
 
         Z: c = {
-            add_v3(pos, { -0.5, -0.5, 0.0 }),
-            add_v3(pos, { +0.5, -0.5, 0.0 }),
-            add_v3(pos, { +0.5, +0.5, 0.0 }),
-            add_v3(pos, { -0.5, +0.5, 0.0 }),
+            add_v3(pos, { -0.5, -0.5, -0.5 }),
+            add_v3(pos, { +0.5, -0.5, -0.5 }),
+            add_v3(pos, { +0.5, +0.5, -0.5 }),
+            add_v3(pos, { -0.5, +0.5, -0.5 }),
         };
 
         _: assert(false, "Invalid direction");
     }
 
-    *(draw_group.vertices + i + 0) = { c[0], kind };
-    *(draw_group.vertices + i + 1) = { c[1], kind };
-    *(draw_group.vertices + i + 2) = { c[2], kind };
-    *(draw_group.vertices + i + 3) = { c[0], kind };
-    *(draw_group.vertices + i + 4) = { c[2], kind };
-    *(draw_group.vertices + i + 5) = { c[3], kind };
+    *(draw_group.vertices + i + 0) = { c[0], kind, u8(direction) };
+    *(draw_group.vertices + i + 1) = { c[1], kind, u8(direction) };
+    *(draw_group.vertices + i + 2) = { c[2], kind, u8(direction) };
+    *(draw_group.vertices + i + 3) = { c[0], kind, u8(direction) };
+    *(draw_group.vertices + i + 4) = { c[2], kind, u8(direction) };
+    *(draw_group.vertices + i + 5) = { c[3], kind, u8(direction) };
 }
 
 
