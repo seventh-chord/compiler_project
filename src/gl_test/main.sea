@@ -7,29 +7,38 @@ fn main() {
     let up = true;
 
     let draw_group = draw_group_init();
-
     let framebuffer = framebuffer_init(8, window_width, window_height);
+
+    const MIN_VIEW_WIDTH = 10.0;
+    let view_pos, view_size: v2;
     
     for !close_window_requested {
         poll_events();
         if key_pressed(Key::ESCAPE) { close_window_requested = true; }
 
-        if up {
-            r += 0.01;
-            if r > 1.0 { up = false; }
+        let aspect = f32(window_width) / f32(window_height);
+        if aspect > 1.0 {
+            view_size = { MIN_VIEW_WIDTH*aspect, MIN_VIEW_WIDTH };
         } else {
-            r -= 0.01;
-            if r < 0.0 { up = true; }
+            view_size = { MIN_VIEW_WIDTH, MIN_VIEW_WIDTH/aspect };
         }
 
-        for x : 0..10 {
-            for y : 0..100 {
-                draw_group_circle(&draw_group, { f32(x)*14.0, f32(y)*14.0 + (x&1==1? 7.0 : 0.0) }, 10.0 - f32(x));
-                draw_group_circle(&draw_group, { f32(window_width) - f32(x)*14.0, f32(y)*14.0 + (x&1==1? 7.0 : 0.0) }, 10.0 - f32(x));
-            }
+        if up {
+            r += 0.001;
+            if r > 0.7 { up = false; }
+        } else {
+            r -= 0.001;
+            if r < 0.3 { up = true; }
         }
 
-        draw_group_line(&draw_group, { 100.0, 100.0 }, { 400.0, 300.0 }, 5.0);
+        draw_group_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::Z, 0);
+        draw_group_tile(&draw_group, {  0.0, -1.0, 0.0 }, Dir::Z, 1);
+        draw_group_tile(&draw_group, { +1.0, -1.0, 0.0 }, Dir::Z, 0);
+        draw_group_tile(&draw_group, { +1.0,  0.0, 0.0 }, Dir::Z, 1);
+        draw_group_tile(&draw_group, { +1.0, +1.0, 0.0 }, Dir::Z, 0);
+        draw_group_tile(&draw_group, {  0.0, +1.0, 0.0 }, Dir::Z, 1);
+        draw_group_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::Z, 0);
+        draw_group_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::Z, 1);
 
         if window_width > framebuffer.width || window_height > framebuffer.height {
             framebuffer_grow(&framebuffer, window_width, window_height);
@@ -39,7 +48,7 @@ fn main() {
         glViewport(0, 0, i32(window_width), i32(window_height));
         glClearColor(r, 1.0, 0.2 + (1.0 - r)*0.8, 1.0);
         glClear(GL_COLOR_BUFFER_BIT);
-        draw_group_draw(&draw_group);
+        draw_group_draw(&draw_group, view_size, view_pos);
 
         framebuffer_blit(&framebuffer, window_width, window_height);
 
@@ -51,7 +60,20 @@ fn main() {
     ExitProcess(0);
 }
 
+// NB these are duplicated in vertex shader source
+const ORTHO = [3]v2 {
+    { sqrt(0.75), -0.5 }, // x
+    { sqrt(0.75), 0.5 },  // y
+    { 0.0, 1.0 },         // z
+};
+
+enum Dir { X, Y, Z }
+
+
+
+
 struct v2 { x, y: f32; }
+struct v3 { x, y, z: f32; }
 
 fn add_v2(a, b: v2) -> v2 {
     return { a.x + b.x, a.y + b.y };
@@ -67,17 +89,32 @@ fn scale_v2(a: v2, s: f32) -> v2 {
     return { a.x * s, a.y * s };
 }
 
+fn add_v3(a, b: v3) -> v3 {
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+fn sub_v3(a, b: v3) -> v3 {
+    return { a.x - b.x, a.y - b.y, a.z - b.z };
+}
+fn normalize_v3(a: v3) -> v3 {
+    let length = sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
+    return { a.x / length, a.y / length, a.z / length };
+}
+fn scale_v3(a: v3, s: f32) -> v3 {
+    return { a.x * s, a.y * s, a.z * s };
+}
 
-const MAX_VERTICES = 32768 * 8;
+
+const MAX_VERTICES = 32768;
 const MAX_VERTICES_BYTES = MAX_VERTICES * size_of(Vertex);
 
 struct Vertex {
-    pos: v2;
+    pos: v3;
+    kind: i32;
 }
 
 struct Draw_Group {
     shader: u32;
-    shader_window_size_uniform: i32;
+    shader_uniform_view_size, shader_uniform_view_pos: i32;
     vbo, vao: u32;
     vertex_count: i64;
     vertices: *Vertex; // TODO Make this a slice, or something of that nature, so we get ABC
@@ -87,27 +124,49 @@ fn draw_group_init() -> Draw_Group {
     let vert_source = "
         #version 330 core
 
-        uniform vec2 window_size;
+        uniform vec2 view_size, view_pos;
 
-        layout(location = 0) in vec2 pos;
+        layout(location = 0) in vec3 in_pos;
+        layout(location = 1) in int in_kind;
+
+        flat out int kind;
+
+        const mat3x2 ORTHO = mat3x2(
+            sqrt(0.75), -0.5,
+            sqrt(0.75), 0.5,
+            0.0, 1.0
+        );
 
         void main() {
-            gl_Position = vec4((pos / window_size)*2.0 - vec2(1.0), 0.0, 1.0);
+            vec2 flat_pos = ORTHO * in_pos;
+            vec2 screen_pos = ((flat_pos - view_pos) / view_size) * 2.0;
+            gl_Position = vec4(screen_pos, 0.0, 1.0);
+
+            kind = in_kind;
         }
     ";
 
     let frag_source = "
         #version 330 core
 
+        flat in int kind;
+
         out vec4 color;
 
         void main() {
-            color = vec4(1.0, 1.0, 0.8, 1.0);
+            if (kind == 0) {
+                color = vec4(1.0, 1.0, 0.7, 1.0);
+            } else if (kind == 1) {
+                color = vec4(0.8, 1.0, 0.6, 1.0);
+            } else {
+                color = vec4(1.0, 0.0, 0.0, 1.0);
+            }
         }
     ";
 
     let shader = load_shader(vert_source, frag_source);
-    let shader_window_size_uniform = glGetUniformLocation(shader, "window_size".data);
+    let shader_uniform_view_size = glGetUniformLocation(shader, "view_size".data);
+    let shader_uniform_view_pos = glGetUniformLocation(shader, "view_pos".data);
 
     let vertex_count = 0;
     let vertices = cast(*Vertex, alloc(MAX_VERTICES_BYTES));
@@ -120,60 +179,23 @@ fn draw_group_init() -> Draw_Group {
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
 
+    let offset = 0;
+
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, 0));
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, offset));
+    offset += size_of(v3);
 
-    return Draw_Group { shader, shader_window_size_uniform, vbo, vao, vertex_count, vertices };
+    glEnableVertexAttribArray(1);
+    glVertexAttribIPointer(1, 1, GL_INT, i32(size_of(Vertex)), cast(*void, offset));
+    offset += size_of(i32);
+
+    return Draw_Group { shader, shader_uniform_view_size, shader_uniform_view_pos, vbo, vao, vertex_count, vertices };
 }
 
-fn draw_group_triangle(draw_group: *Draw_Group, a, b, c: v2) {
-    let i = draw_group.vertex_count;
-    draw_group.vertex_count += 3;
-    assert(draw_group.vertex_count <= MAX_VERTICES, "Out of space in draw group");
-
-    *(draw_group.vertices + i + 0) = { a };
-    *(draw_group.vertices + i + 1) = { b };
-    *(draw_group.vertices + i + 2) = { c };
-}
-
-fn draw_group_circle(draw_group: *Draw_Group, center: v2, radius: f32) {
-    const CIRCLE = []v2 {
-        { +1.00, +0.00 },
-        { +0.62, +0.78 },
-        { -0.22, +0.97 },
-        { -0.90, +0.43 },
-        { -0.90, -0.43 },
-        { -0.22, -0.97 },
-        { +0.62, -0.78 },
-    };
-
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[0], radius)), add_v2(center, scale_v2(CIRCLE[1], radius)));
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[1], radius)), add_v2(center, scale_v2(CIRCLE[2], radius)));
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[2], radius)), add_v2(center, scale_v2(CIRCLE[3], radius)));
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[3], radius)), add_v2(center, scale_v2(CIRCLE[4], radius)));
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[4], radius)), add_v2(center, scale_v2(CIRCLE[5], radius)));
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[5], radius)), add_v2(center, scale_v2(CIRCLE[6], radius)));
-    draw_group_triangle(draw_group, center, add_v2(center, scale_v2(CIRCLE[6], radius)), add_v2(center, scale_v2(CIRCLE[0], radius)));
-}
-
-fn draw_group_line(draw_group: *Draw_Group, a, b: v2, width: f32) {
-    let v = scale_v2(normalize_v2(sub_v2(b, a)), width);
-    v = { -v.y, v.x };
-
-    let corners = []v2 {
-        add_v2(a, v),
-        sub_v2(a, v),
-        sub_v2(b, v),
-        add_v2(b, v),
-    };
-
-    draw_group_triangle(draw_group, corners[0], corners[1], corners[2]);
-    draw_group_triangle(draw_group, corners[0], corners[2], corners[3]);
-}
-
-fn draw_group_draw(draw_group: *Draw_Group) {
+fn draw_group_draw(draw_group: *Draw_Group, view_size, view_pos: v2) {
     glUseProgram(draw_group.shader);
-    glUniform2f(draw_group.shader_window_size_uniform, f32(window_width), f32(window_height));
+    glUniform2f(draw_group.shader_uniform_view_size, view_size.x, view_size.y);
+    glUniform2f(draw_group.shader_uniform_view_pos,  view_pos.x,  view_pos.y);
 
     glBindBuffer(GL_ARRAY_BUFFER, draw_group.vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, draw_group.vertex_count * size_of(Vertex), cast(*void, draw_group.vertices));
@@ -182,6 +204,45 @@ fn draw_group_draw(draw_group: *Draw_Group) {
     glDrawArrays(GL_TRIANGLES, 0, i32(draw_group.vertex_count));
 
     draw_group.vertex_count = 0;
+}
+
+fn draw_group_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: i32) {
+    let i = draw_group.vertex_count;
+    draw_group.vertex_count += 6;
+    assert(draw_group.vertex_count < MAX_VERTICES, "Out of space in draw group");
+
+    let c: [4]v3;
+    switch direction {
+        X: c = {
+            add_v3(pos, { -0.5, -0.5, 0.0 }),
+            add_v3(pos, { +0.5, -0.5, 0.0 }),
+            add_v3(pos, { +0.5, +0.5, 0.0 }),
+            add_v3(pos, { -0.5, +0.5, 0.0 }),
+        };
+
+        Y: c = {
+            add_v3(pos, { -0.5, -0.5, 0.0 }),
+            add_v3(pos, { +0.5, -0.5, 0.0 }),
+            add_v3(pos, { +0.5, +0.5, 0.0 }),
+            add_v3(pos, { -0.5, +0.5, 0.0 }),
+        };
+
+        Z: c = {
+            add_v3(pos, { -0.5, -0.5, 0.0 }),
+            add_v3(pos, { +0.5, -0.5, 0.0 }),
+            add_v3(pos, { +0.5, +0.5, 0.0 }),
+            add_v3(pos, { -0.5, +0.5, 0.0 }),
+        };
+
+        _: assert(false, "Invalid direction");
+    }
+
+    *(draw_group.vertices + i + 0) = { c[0], kind };
+    *(draw_group.vertices + i + 1) = { c[1], kind };
+    *(draw_group.vertices + i + 2) = { c[2], kind };
+    *(draw_group.vertices + i + 3) = { c[0], kind };
+    *(draw_group.vertices + i + 4) = { c[2], kind };
+    *(draw_group.vertices + i + 5) = { c[3], kind };
 }
 
 
@@ -272,6 +333,8 @@ fn load_shader(vertex_source, fragment_source: String) -> u32 {
         glGetShaderiv(vertex, GL_INFO_LOG_LENGTH, &log_length);
         let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
         glGetShaderInfoLog(vertex, log_length, null, log_string.data);
+
+        print("Error in vertex shader source\n");
         print(log_string);
         ExitProcess(0);
     }
@@ -286,6 +349,8 @@ fn load_shader(vertex_source, fragment_source: String) -> u32 {
         glGetShaderiv(fragment, GL_INFO_LOG_LENGTH, &log_length);
         let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
         glGetShaderInfoLog(fragment, log_length, null, log_string.data);
+
+        print("Error in fragment shader source\n");
         print(log_string);
         ExitProcess(0);
     }
@@ -295,12 +360,14 @@ fn load_shader(vertex_source, fragment_source: String) -> u32 {
     glAttachShader(program, fragment);
     glLinkProgram(program);
 
-    glGetProgramiv(fragment, GL_LINK_STATUS, &status);
+    glGetProgramiv(program, GL_LINK_STATUS, &status);
     if status == GL_FALSE {
         let log_length: i32;
-        glGetProgramiv(fragment, GL_INFO_LOG_LENGTH, &log_length);
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_length);
         let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
-        glGetProgramInfoLog(fragment, log_length, null, log_string.data);
+        glGetProgramInfoLog(program, log_length, null, log_string.data);
+
+        print("Error linking shader\n");
         print(log_string);
         ExitProcess(0);
     }
