@@ -2288,7 +2288,13 @@ Decl *find_declaration(Scope *scope, u8 *interned_name, int kind) {
 
 Var *find_var(Scope *scope, u8 *interned_name, u32 before_position) {
     Scope *start_scope = scope;
+
     while (true) {
+        if (scope->fn != null && scope->fn != start_scope->fn) {
+            scope = scope->parent;
+            continue;
+        }
+
         for (u32 i = scope->decls_length - 1; i < scope->decls_length; i -= 1) {
             Decl *decl = &scope->decls[i];
             if (decl->kind != DECL_VAR) continue;
