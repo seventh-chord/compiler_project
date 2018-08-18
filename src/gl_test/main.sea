@@ -5,7 +5,7 @@ fn main() {
     open_window();
     set_vsync(true); // NB setting to false will make the screen flash crazily
 
-    let shader = load_shader(vert_source, frag_source);
+    let shader = load_shader(vert_source, geom_source, frag_source);
     let shader_uniform_view_size = glGetUniformLocation(shader, "view_size".data);
     let shader_uniform_view_pos = glGetUniformLocation(shader, "view_pos".data);
 
@@ -45,23 +45,23 @@ fn main() {
             view_size = { MIN_VIEW_WIDTH, MIN_VIEW_WIDTH/aspect };
         }
 
-        draw_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, {  0.0, -1.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, { +1.0, -1.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, { +1.0,  0.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, { +1.0, +1.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, {  0.0, +1.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::Z, 0);
-        draw_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::Z, 0);
-        //draw_tile(&draw_group, {  0.0,  0.0, 0.0 }, Dir::Z, 0);
+        draw_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, {  0.0, -1.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, { +1.0, -1.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, { +1.0,  0.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, { +1.0, +1.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, {  0.0, +1.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::Z, 1);
+        draw_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::Z, 1);
+        //draw_tile(&draw_group, {  0.0,  0.0, 0.0 }, Dir::Z, 1);
 
-        draw_tile(&draw_group, { -1.0,  1.0, 0.0 }, Dir::Y, 1);
-        draw_tile(&draw_group, {  0.0,  1.0, 0.0 }, Dir::Y, 1);
-        draw_tile(&draw_group, { +1.0,  1.0, 0.0 }, Dir::Y, 1);
+        draw_tile(&draw_group, { -1.0,  1.0, 0.0 }, Dir::Y, 2);
+        draw_tile(&draw_group, {  0.0,  1.0, 0.0 }, Dir::Y, 2);
+        draw_tile(&draw_group, { +1.0,  1.0, 0.0 }, Dir::Y, 2);
 
-        draw_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::X, 1);
-        draw_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::X, 1);
-        draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::X, 1);
+        draw_tile(&draw_group, { -1.0, -1.0, 0.0 }, Dir::X, 2);
+        draw_tile(&draw_group, { -1.0,  0.0, 0.0 }, Dir::X, 2);
+        draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::X, 2);
 
         if window_width > framebuffer.width || window_height > framebuffer.height {
             framebuffer_grow(&framebuffer, window_width, window_height);
@@ -70,16 +70,19 @@ fn main() {
 
         glViewport(0, 0, i32(window_width), i32(window_height));
         glClearColor(0.99, 0.99, 0.87, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glUseProgram(shader);
         glUniform2f(shader_uniform_view_size, view_size.x, view_size.y);
         glUniform2f(shader_uniform_view_pos,  view_pos.x,  view_pos.y);
 
+        draw_group_draw(&draw_group, view_size, view_pos);
+
+        glEnable(GL_DEPTH_TEST);
         mesh_draw(detective_mesh);
         mesh_draw(pipe_mesh);
+        glDisable(GL_DEPTH_TEST);
 
-        draw_group_draw(&draw_group, view_size, view_pos);
 
         framebuffer_blit(&framebuffer, window_width, window_height);
 
@@ -102,64 +105,119 @@ enum Dir(u8) { X = 0, Y = 1, Z = 2 }
 
 let vert_source = "
     #version 330 core
+    #line 106
+
+    layout(location = 0) in vec3 in_a;
+    layout(location = 1) in vec3 in_b;
+    layout(location = 2) in vec3 in_c;
+    layout(location = 3) in vec3 in_color;
+    layout(location = 4) in int in_kind;
+
+    out mat3 vert_pos;
+    out vec3 vert_color;
+    flat out int vert_kind;
+
+    void main() {
+        vert_pos = mat3(in_a, in_b, in_c);
+        vert_kind = in_kind;
+        vert_color = in_color;
+    }
+";
+
+let geom_source = "
+    #version 330 core
+    #line 127
+
+    layout(points) in;
+    layout(triangle_strip, max_vertices = 3) out;
+
+    in mat3 vert_pos[];
+    in vec3 vert_color[];
+    flat in int vert_kind[];
+
+    out vec3 color;
+    out vec2 uv;
+    flat out int kind;
 
     uniform vec2 view_size, view_pos;
-
-    layout(location = 0) in vec3 in_pos;
-    layout(location = 1) in int in_kind;
-    layout(location = 2) in int in_dir;
-
-    out vec2 pattern_pos;
-    flat out int kind;
 
     const mat3x2 ORTHO = mat3x2(
         sqrt(0.75), -0.5,
         sqrt(0.75), 0.5,
         0.0, 1.0
     );
+    const vec3 DEPTH = vec3(-1.0, 1.0, -1.0);
+    const float DEPTH_RANGE = 100.0;
+
+    vec4 world_to_screen(vec3 pos) {
+        vec2 flat_pos = ORTHO * pos;
+        vec2 screen_pos = ((flat_pos - view_pos) / view_size) * 2.0;
+        float depth = dot(DEPTH, pos)/DEPTH_RANGE;
+        return vec4(screen_pos, depth, 1.0);
+    }
 
     void main() {
-        vec2 flat_pos = ORTHO * in_pos;
-        vec2 screen_pos = ((flat_pos - view_pos) / view_size) * 2.0;
-        gl_Position = vec4(screen_pos, 0.0, 1.0);
+        vec3 a = vert_pos[0][0];
+        vec3 b = vert_pos[0][1];
+        vec3 c = vert_pos[0][2];
 
-        switch (in_dir) {
-            case 0: pattern_pos = vec2(in_pos.y, in_pos.z); break;
-            case 1: pattern_pos = vec2(in_pos.x, in_pos.z); break;
-            case 2: pattern_pos = vec2(in_pos.x, in_pos.y); break;
-        }
+        vec3 normal = normalize(cross(b - a, c - a));
+        vec3 x = normalize(b - a);
+        vec3 y = normalize(c - a);
+        vec2 uva = vec2(dot(a, x), dot(a, y));
+        vec2 uvb = vec2(dot(b, x), dot(b, y));
+        vec2 uvc = vec2(dot(c, x), dot(c, y));
 
-        kind = in_kind;
+        uv = uva;
+        kind = vert_kind[0];
+        color = vert_color[0];
+        gl_Position = world_to_screen(a);
+        EmitVertex();
+        uv = uvb;
+        kind = vert_kind[0];
+        color = vert_color[0];
+        gl_Position = world_to_screen(b);
+        EmitVertex();
+        uv = uvc;
+        kind = vert_kind[0];
+        color = vert_color[0];
+        gl_Position = world_to_screen(c);
+        EmitVertex();
+        EndPrimitive();
     }
 ";
 
 let frag_source = "
     #version 330 core
+    #line 187
 
-    in vec2 pattern_pos;
+    in vec3 color;
+    in vec2 uv;
     flat in int kind;
 
-    out vec4 color;
+    out vec4 out_color;
 
     void main() {
         if (kind == 0) {
+            out_color = vec4(color, 1.0);
+        } else if (kind == 1) {
             const vec2 A = vec2(0.0, 1.0);
-            float a = sin(dot(pattern_pos, A) * 16.0);
+            float a = sin(dot(uv, A) * 16.0);
             float n = smoothstep(a, 0.3, 0.50);
 
-            color = vec4(0.64, 0.27, 0.17, 1.0) * (n*0.2 + 0.8);
-        } else if (kind == 1) {
+            out_color = vec4(0.64, 0.27, 0.17, 1.0) * (n*0.2 + 0.8);
+        } else if (kind == 2) {
             const vec2 A = vec2(0.0, 1.0);
             const vec2 B = vec2(sqrt(0.75), -0.5);
             const vec2 C = vec2(sqrt(0.75), 0.5);
-            float a = sin(dot(pattern_pos, A) * 17.0);
-            float b = sin(dot(pattern_pos, B) * 17.0);
-            float c = sin(dot(pattern_pos, C) * 17.0);
+            float a = sin(dot(uv, A) * 17.0);
+            float b = sin(dot(uv, B) * 17.0);
+            float c = sin(dot(uv, C) * 17.0);
             float n = smoothstep(abs(a*b*c), 0.3, 0.4);
 
-            color = vec4(0.8, 1.0, 0.6, 1.0) * (n*0.2 + 0.8);
+            out_color = vec4(0.8, 1.0, 0.6, 1.0) * (n*0.2 + 0.8);
         } else {
-            color = vec4(1.0, 0.0, 0.0, 1.0);
+            out_color = vec4(1.0, 0.0, 0.0, 1.0);
         }
     }
 ";
@@ -168,9 +226,27 @@ const MAX_VERTICES = 32768;
 const MAX_VERTICES_BYTES = MAX_VERTICES * size_of(Vertex);
 
 struct Vertex {
-    pos: v3;
-    kind: i16;
-    dir: u8;
+    a, b, c: v3;
+    r, g, b: u8;
+    kind: u8;
+}
+
+fn init_vao_for_vertex() {
+    let offset = 0;
+
+    for i : u32(0)..3 {
+        glEnableVertexAttribArray(i);
+        glVertexAttribPointer(i, 3, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, offset));
+        offset += size_of(v3);
+    }
+
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_UNSIGNED_BYTE, GL_TRUE, i32(size_of(Vertex)), cast(*void, offset));
+    offset += 3*size_of(u8);
+
+    glEnableVertexAttribArray(4);
+    glVertexAttribIPointer(4, 1, GL_UNSIGNED_BYTE, i32(size_of(Vertex)), cast(*void, offset));
+    offset += size_of(u8);
 }
 
 
@@ -191,20 +267,7 @@ fn draw_group_init() -> Draw_Group {
 
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
-
-    let offset = 0;
-
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), cast(*void, offset));
-    offset += size_of(v3);
-
-    glEnableVertexAttribArray(1);
-    glVertexAttribIPointer(1, 1, GL_SHORT, i32(size_of(Vertex)), cast(*void, offset));
-    offset += size_of(i16);
-
-    glEnableVertexAttribArray(2);
-    glVertexAttribIPointer(2, 1, GL_BYTE, i32(size_of(Vertex)), cast(*void, offset));
-    offset += size_of(u8);
+    init_vao_for_vertex();
 
     return Draw_Group { vbo, vao, vertex_count, vertices };
 }
@@ -214,16 +277,12 @@ fn draw_group_draw(draw_group: *Draw_Group, view_size, view_pos: v2) {
     glBufferSubData(GL_ARRAY_BUFFER, 0, draw_group.vertex_count * size_of(Vertex), cast(*void, draw_group.vertices));
 
     glBindVertexArray(draw_group.vao);
-    glDrawArrays(GL_TRIANGLES, 0, i32(draw_group.vertex_count));
+    glDrawArrays(GL_POINTS, 0, i32(draw_group.vertex_count));
 
     draw_group.vertex_count = 0;
 }
 
-fn draw_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: i16) {
-    let i = draw_group.vertex_count;
-    draw_group.vertex_count += 6;
-    assert(draw_group.vertex_count < MAX_VERTICES, "Out of space in draw group");
-
+fn draw_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: u8) {
     let c: [4]v3;
     switch direction {
         X: c = {
@@ -250,18 +309,20 @@ fn draw_tile(draw_group: *Draw_Group, pos: v3, direction: Dir, kind: i16) {
         _: assert(false, "Invalid direction");
     }
 
-    *(draw_group.vertices + i + 0) = { c[0], kind, u8(direction) };
-    *(draw_group.vertices + i + 1) = { c[1], kind, u8(direction) };
-    *(draw_group.vertices + i + 2) = { c[2], kind, u8(direction) };
-    *(draw_group.vertices + i + 3) = { c[0], kind, u8(direction) };
-    *(draw_group.vertices + i + 4) = { c[2], kind, u8(direction) };
-    *(draw_group.vertices + i + 5) = { c[3], kind, u8(direction) };
+    let r, g, b: u8 = 0;
+
+    let i = draw_group.vertex_count;
+    draw_group.vertex_count += 2;
+    assert(draw_group.vertex_count < MAX_VERTICES, "Out of space in draw group");
+    *(draw_group.vertices + i + 0) = { c[0], c[1], c[2], r, g, b, kind };
+    *(draw_group.vertices + i + 1) = { c[0], c[2], c[3], r, g, b, kind };
 }
 
 
 struct Framebuffer {
     fbo: u32;
     color_texture: u32;
+    depth_buffer: u32;
     samples: i32;
     width, height: i64;
 }
@@ -273,19 +334,24 @@ fn framebuffer_init(samples: i32, width, height: i64) -> Framebuffer {
     glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
     samples = samples < max_samples? samples : max_samples;
 
-    let color_texture, fbo: u32;
+    let color_texture, depth_buffer, fbo: u32;
 
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
     glGenTextures(1, &color_texture);
     glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, color_texture);
-    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_RGBA8, i32(width), i32(height), GL_FALSE);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_RGBA8, i32(width), i32(height), GL_TRUE);
     glTexParameteri(color_texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(color_texture, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(color_texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(color_texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, color_texture, 0);
+
+    glGenRenderbuffers(1, &depth_buffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_buffer);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT, i32(width), i32(height));
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_buffer);
 
     let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if status != GL_FRAMEBUFFER_COMPLETE {
@@ -298,6 +364,7 @@ fn framebuffer_init(samples: i32, width, height: i64) -> Framebuffer {
     return {
         fbo: fbo,
         color_texture: color_texture,
+        depth_buffer: depth_buffer,
         samples: samples,
         width: width, height: height,
     };
@@ -309,6 +376,7 @@ fn framebuffer_grow(framebuffer: *Framebuffer, width, height: i64) {
     if height > framebuffer.height { framebuffer.height = height; }
 
     glDeleteTextures(1, &framebuffer.color_texture);
+    glDeleteRenderbuffers(1, &framebuffer.depth_buffer);
     glDeleteFramebuffers(1, &framebuffer.fbo);
 
     *framebuffer = framebuffer_init(framebuffer.samples, width, height);
@@ -333,46 +401,47 @@ fn framebuffer_blit(framebuffer: *Framebuffer, width, height: i64) {
 }
 
 
-fn load_shader(vertex_source, fragment_source: String) -> u32 {
-    let status: i32;
+fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
+    fn compile_single(source: String, type: u32) -> u32 {
+        let shader = glCreateShader(type);
+        let source_length = i32(source.length);
+        glShaderSource(shader, 1, &source.data, &source_length);
+        glCompileShader(shader);
 
-    let vertex = glCreateShader(GL_VERTEX_SHADER);
-    let vertex_source_length = i32(vertex_source.length);
-    glShaderSource(vertex, 1, &vertex_source.data, &vertex_source_length);
-    glCompileShader(vertex);
-    glGetShaderiv(vertex, GL_COMPILE_STATUS, &status);
-    if status == GL_FALSE {
-        let log_length: i32;
-        glGetShaderiv(vertex, GL_INFO_LOG_LENGTH, &log_length);
-        let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
-        glGetShaderInfoLog(vertex, log_length, null, log_string.data);
+        let status: i32;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+        if status == GL_FALSE {
+            let log_length: i32;
+            glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
+            let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
+            glGetShaderInfoLog(shader, log_length, null, log_string.data);
 
-        print("Error in vertex shader source\n");
-        print(log_string);
-        ExitProcess(0);
+            print("Error in ");
+            switch type {
+                GL_VERTEX_SHADER:   print("vertex");
+                GL_GEOMETRY_SHADER: print("geometry");
+                GL_FRAGMENT_SHADER: print("fragment");
+                _:                  print("<unkown>");
+            }
+            print(" shader source\n");
+            print(log_string);
+            ExitProcess(0);
+        }
+
+        return shader;
     }
 
-    let fragment = glCreateShader(GL_FRAGMENT_SHADER);
-    let fragment_source_length = i32(fragment_source.length);
-    glShaderSource(fragment, 1, &fragment_source.data, &fragment_source_length);
-    glCompileShader(fragment);
-    glGetShaderiv(fragment, GL_COMPILE_STATUS, &status);
-    if status == GL_FALSE {
-        let log_length: i32;
-        glGetShaderiv(fragment, GL_INFO_LOG_LENGTH, &log_length);
-        let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
-        glGetShaderInfoLog(fragment, log_length, null, log_string.data);
-
-        print("Error in fragment shader source\n");
-        print(log_string);
-        ExitProcess(0);
-    }
+    let vertex   = compile_single(vertex_source, GL_VERTEX_SHADER);
+    let geometry = compile_single(geometry_source, GL_GEOMETRY_SHADER);
+    let fragment = compile_single(fragment_source, GL_FRAGMENT_SHADER);
 
     let program = glCreateProgram();
     glAttachShader(program, vertex);
+    glAttachShader(program, geometry);
     glAttachShader(program, fragment);
     glLinkProgram(program);
 
+    let status: i32;
     glGetProgramiv(program, GL_LINK_STATUS, &status);
     if status == GL_FALSE {
         let log_length: i32;
@@ -401,7 +470,7 @@ struct Mesh {
 
 fn mesh_draw(mesh: *Mesh) {
     glBindVertexArray(mesh.vao);
-    glDrawArrays(GL_TRIANGLES, 0, i32(mesh.vertex_count));
+    glDrawArrays(GL_POINTS, 0, i32(mesh.vertex_count));
 }
 
 fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
@@ -436,10 +505,6 @@ fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
         cursor_length -= size_of(u16);
 
 
-        struct Vertex {
-            a: v3;
-        }
-
         let vertex_bytes = size_of(Vertex) * vertex_count;
         assert(cursor_length > vertex_bytes, "Failed to load mesh: Missing vertex data");
         let vertices = cast(*Vertex, cursor);
@@ -459,9 +524,7 @@ fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
 
         glGenVertexArrays(1, &vao);
         glBindVertexArray(vao);
-
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), null);
+        init_vao_for_vertex();
 
         let mesh: *Mesh = arena_new(arena, size_of(Mesh));
         mesh.name = arena_clone_string(arena, name);
