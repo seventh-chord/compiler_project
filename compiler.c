@@ -8437,7 +8437,8 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
         } break;
 
         case STMT_DEFER: {
-            typecheck_stmt(context, scope, stmt->defer);
+            Typecheck_Result r = typecheck_stmt(context, scope, stmt->defer);
+            if (r != TYPECHECK_RESULT_DONE) return r;
         } break;
 
         case STMT_CONTINUE:
