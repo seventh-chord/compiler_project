@@ -13051,6 +13051,16 @@ void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, 
         printf("; (defers)\n");
         #endif
 
+        Register return_reg = REGISTER_NONE;
+        if (fn->signature->has_return) return_reg = primitive_is_float(fn->signature->return_type->kind)? XMM0 : RAX;
+
+        X64_Address return_flushed_to;
+        if (return_reg != REGISTER_NONE) {
+            register_allocator_enter_frame(context, reg_allocator);
+            return_flushed_to = register_allocator_temp_stack_space(reg_allocator, POINTER_SIZE, POINTER_SIZE);
+            instruction_mov_reg_mem(context, MOVE_TO_MEM, return_flushed_to, return_reg, POINTER_SIZE);
+        }
+
         // TODO only generate this block of code if we are not guaranteed to return in block which issued the defer
         u32 fixups_before = buf_length(context->jump_fixups);
         Queued_Defer *defer = first_defer;
@@ -13058,6 +13068,11 @@ void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, 
             machinecode_for_stmt(context, reg_allocator, fn, defer->stmt);
         }
         assert(fixups_before == buf_length(context->jump_fixups)); // We don't allow jumps across defer boundaries
+
+        if (return_reg != REGISTER_NONE) {
+            instruction_mov_reg_mem(context, MOVE_FROM_MEM, return_flushed_to, return_reg, POINTER_SIZE);
+            register_allocator_leave_frame(context, reg_allocator);
+        }
 
         // Intercept any jumps, and make them go through our defer code
         if (buf_length(context->jump_fixups) > jump_fixup_ignore) {
@@ -13079,12 +13094,24 @@ void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, 
 
                 if (jumps_of_this_kind <= 0) continue;
 
+                X64_Address return_flushed_to;
+                if (jump_to_kind == JUMP_TO_END_OF_FUNCTION && return_reg != REGISTER_NONE) {
+                    register_allocator_enter_frame(context, reg_allocator);
+                    return_flushed_to = register_allocator_temp_stack_space(reg_allocator, POINTER_SIZE, POINTER_SIZE);
+                    instruction_mov_reg_mem(context, MOVE_TO_MEM, return_flushed_to, return_reg, POINTER_SIZE);
+                }
+
                 u32 fixups_before = buf_length(context->jump_fixups);
                 Queued_Defer *defer = first_defer;
                 for (Queued_Defer *defer = first_defer; defer != null; defer = defer->next) {
                     machinecode_for_stmt(context, reg_allocator, fn, defer->stmt);
                 }
                 assert(fixups_before == buf_length(context->jump_fixups)); // We don't allow jumps across defer boundaries
+
+                if (jump_to_kind == JUMP_TO_END_OF_FUNCTION && return_reg != REGISTER_NONE) {
+                    instruction_mov_reg_mem(context, MOVE_FROM_MEM, return_flushed_to, return_reg, POINTER_SIZE);
+                    register_allocator_leave_frame(context, reg_allocator);
+                }
 
                 u64 jump_text_location = instruction_jmp(context, sizeof(i32));
                 buf_push(context->jump_fixups, ((Jump_Fixup) {
