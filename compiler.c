@@ -6868,10 +6868,6 @@ Typecheck_Result compute_size_of_struct(Type *type) {
         File_Pos* member_pos = &type->structure.members[m].declaration_pos;
         Type *member_type = type->structure.members[m].type;
 
-        if (member_type->flags & (TYPE_FLAG_UNRESOLVED|TYPE_FLAG_UNRESOLVED_CHILD)) {
-            return TYPECHECK_RESULT_DEPENDENT;
-        }
-
         u32 member_size = 0;
         u32 member_align = 0;
 
@@ -6880,14 +6876,12 @@ Typecheck_Result compute_size_of_struct(Type *type) {
             if (member_type->kind == TYPE_ARRAY) {
                 array_multiplier *= member_type->array.length;
                 member_type = member_type->array.of;
-
             } else {
-                if (member_type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
-                    return TYPECHECK_RESULT_DEPENDENT;
-                }
-
                 u64 base_size;
                 if (member_type->kind == TYPE_STRUCT) {
+                    if (member_type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                        return TYPECHECK_RESULT_DEPENDENT;
+                    }
                     member_size = member_type->structure.size;
                     member_align = member_type->structure.align;
                 } else {

@@ -2,8 +2,8 @@
 
 if not exist build mkdir build
 
-set DEBUG_VAR="NODEBUG"
-if "%1"=="debug" set DEBUG_VAR="DEBUG"
+set DEBUG_VAR="DEBUG"
+if "%1"=="release" set DEBUG_VAR="NODEBUG"
 
 cl /nologo /c /WX^
     /GS- /Gs9999999^
