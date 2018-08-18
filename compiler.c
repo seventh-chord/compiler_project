@@ -848,7 +848,7 @@ u64 eat_word(u8 **str) {
 }
 
 
-u8 *make_null_terminated(Arena *arena, u8 *str, u64 length) {
+u8 *str_null_terminate(Arena *arena, u8 *str, u64 length) {
     u8 *result = arena_alloc(arena, length + 1);
     result[length] = 0;
     mem_copy(str, result, length);
@@ -1210,7 +1210,7 @@ void print_file_pos(File_Pos* pos) {
 }
 
 
-enum { KEYWORD_COUNT = 20 };
+enum { KEYWORD_COUNT = 21 };
 
 typedef struct Token {
     enum {
@@ -1270,6 +1270,7 @@ typedef struct Token {
 
         TOKEN_KEYWORD_FN,
         TOKEN_KEYWORD_EXTERN,
+        TOKEN_KEYWORD_IMPORT,
         TOKEN_KEYWORD_TYPEDEF,
         TOKEN_KEYWORD_LET,
         TOKEN_KEYWORD_CONST,
@@ -1357,6 +1358,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 
     [TOKEN_KEYWORD_FN]           = "fn",
     [TOKEN_KEYWORD_EXTERN]       = "extern",
+    [TOKEN_KEYWORD_IMPORT]       = "import",
     [TOKEN_KEYWORD_TYPEDEF]      = "typedef",
     [TOKEN_KEYWORD_LET]          = "let",
     [TOKEN_KEYWORD_CONST]        = "const",
@@ -2224,6 +2226,8 @@ typedef struct Jump_Fixup {
 typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
 
+    u8 **source_names;
+
     String_Table string_table;
     struct {
         int token;
@@ -2476,6 +2480,7 @@ void init_keyword_names(Context *context) {
 
     add_keyword(TOKEN_KEYWORD_FN,          "fn");
     add_keyword(TOKEN_KEYWORD_EXTERN,      "extern");
+    add_keyword(TOKEN_KEYWORD_IMPORT,      "import");
     add_keyword(TOKEN_KEYWORD_TYPEDEF,     "typedef");
     add_keyword(TOKEN_KEYWORD_LET,         "let");
     add_keyword(TOKEN_KEYWORD_CONST,       "const");
@@ -6118,15 +6123,6 @@ bool build_ast(Context *context, u8* file_name) {
     init_builtin_fn_names(context);
     init_primitive_types(context);
 
-    u8* file;
-    u32 file_length;
-
-    IO_Result read_result = read_entire_file(file_name, &file, &file_length);
-    if (read_result != IO_OK) {
-        printf("Couldn't load \"%s\": %s\n", file_name, io_result_message(read_result));
-        return false;
-    }
-
     bool valid = true;
 
     assert(lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text)));
@@ -6140,9 +6136,28 @@ bool build_ast(Context *context, u8* file_name) {
     assert(context->type_info_type != null && context->type_info_type->kind == TYPE_ENUM);
 
 
-    valid &= lex_and_parse_text(context, file_name, file, file_length);
+    buf_push(context->source_names, file_name);
+    u8 *source_folder = path_get_folder(&context->arena, file_name);
 
-    sc_free(file);
+    for (u32 i = 0; i < buf_length(context->source_names); i += 1) {
+        u8 *file_name = context->source_names[i];
+        if (i > 0) {
+            file_name = path_join(&context->arena, source_folder, file_name);
+        }
+
+        u8* file;
+        u32 file_length;
+
+        IO_Result read_result = read_entire_file(file_name, &file, &file_length);
+        if (read_result != IO_OK) {
+            printf("Couldn't load \"%s\": %s\n", file_name, io_result_message(read_result));
+            return false;
+        }
+
+        valid &= lex_and_parse_text(context, file_name, file, file_length);
+
+        sc_free(file);
+    }
 
     if (valid) {
         return true;
@@ -6779,6 +6794,28 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             u32 length = 0;
             valid &= parse_extern(context, &context->global_scope, file_name, t, &length);
             t += length;
+        } break;
+
+        case TOKEN_KEYWORD_IMPORT: {
+            File_Pos pos = t->pos;
+            t += 1;
+
+            if (t->kind != TOKEN_STRING) {
+                print_file_pos(&pos);
+                printf("Expected file to import, in quotes, but got ");
+                print_token(t);
+                printf("\n");
+                valid = false;
+            }
+            u8 *file_name = str_null_terminate(&context->arena, t->string.bytes, t->string.length);
+            t += 1;
+
+            if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after import")) {
+                valid = false;
+            }
+            t += 1;
+
+            buf_push(context->source_names, file_name);
         } break;
 
         case TOKEN_KEYWORD_TYPEDEF: {
@@ -14070,7 +14107,7 @@ void parse_lib_paths_from_env_variable(Context *context) {
                 length -= 1;
             }
             if (length > 0) {
-                context->lib_paths[substring_index] = make_null_terminated(&context->arena, string, length);
+                context->lib_paths[substring_index] = str_null_terminate(&context->arena, string, length);
                 substring_index += 1;
             }
 
@@ -14716,7 +14753,7 @@ void main() {
 
     u8 *source_name = command_line;
     u64 source_name_length = eat_word(&command_line);
-    source_name = make_null_terminated(&arena, source_name, source_name_length);
+    source_name = str_null_terminate(&arena, source_name, source_name_length);
 
     if (source_name_length == 0) {
         printf("No source name given\n");
@@ -14726,7 +14763,7 @@ void main() {
 
     u8 *exe_name = command_line;
     u64 exe_name_length = eat_word(&command_line);
-    exe_name = make_null_terminated(&arena, exe_name, exe_name_length);
+    exe_name = str_null_terminate(&arena, exe_name, exe_name_length);
 
     if (exe_name_length == 0) {
         printf("No executable name given\n");
