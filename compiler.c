@@ -5794,7 +5794,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                 no_stmt_generated = true;
 
                 u32 decl_length = 0;
-                bool valid = parse_struct_declaration(context, &context->global_scope, t, &decl_length);
+                bool valid = parse_struct_declaration(context, scope, t, &decl_length);
                 t += decl_length;
 
                 if (!valid) {
