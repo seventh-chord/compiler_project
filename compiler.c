@@ -1210,7 +1210,7 @@ void print_file_pos(File_Pos* pos) {
 }
 
 
-enum { KEYWORD_COUNT = 19 };
+enum { KEYWORD_COUNT = 20 };
 
 typedef struct Token {
     enum {
@@ -1278,6 +1278,7 @@ typedef struct Token {
         TOKEN_KEYWORD_ELSE,
         TOKEN_KEYWORD_FOR,
         TOKEN_KEYWORD_RETURN,
+        TOKEN_KEYWORD_DEFER,
         TOKEN_KEYWORD_CONTINUE,
         TOKEN_KEYWORD_BREAK,
         TOKEN_KEYWORD_DEBUG_BREAK,
@@ -1364,6 +1365,7 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
     [TOKEN_KEYWORD_ELSE]         = "else",
     [TOKEN_KEYWORD_FOR]          = "for",
     [TOKEN_KEYWORD_RETURN]       = "return",
+    [TOKEN_KEYWORD_DEFER]        = "defer",
     [TOKEN_KEYWORD_CONTINUE]     = "continue",
     [TOKEN_KEYWORD_BREAK]        = "break",
     [TOKEN_KEYWORD_DEBUG_BREAK]  = "debug_break",
@@ -1980,6 +1982,7 @@ typedef enum Stmt_Kind {
     STMT_FOR,
     STMT_SWITCH,
 
+    STMT_DEFER,
     STMT_RETURN,
     STMT_BREAK,
     STMT_CONTINUE,
@@ -2056,6 +2059,8 @@ struct Stmt {
             Expr *value;
             bool trailing;
         } return_;
+
+        Stmt *defer;
     };
 };
 
@@ -2472,6 +2477,7 @@ void init_keyword_names(Context *context) {
     add_keyword(TOKEN_KEYWORD_ELSE,        "else");
     add_keyword(TOKEN_KEYWORD_FOR,         "for");
     add_keyword(TOKEN_KEYWORD_RETURN,      "return");
+    add_keyword(TOKEN_KEYWORD_DEFER,       "defer");
     add_keyword(TOKEN_KEYWORD_CONTINUE,    "continue");
     add_keyword(TOKEN_KEYWORD_BREAK,       "break");
     add_keyword(TOKEN_KEYWORD_DEBUG_BREAK, "debug_break");
@@ -5686,6 +5692,20 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                 t += 1;
             } break;
 
+            case TOKEN_KEYWORD_DEFER: {
+                stmt->kind = STMT_DEFER;
+                t += 1;
+
+                u32 block_length;
+                stmt->defer = parse_stmts(context, scope, t, &block_length, true);
+                t += block_length;
+
+                if (stmt->defer == null) {
+                    *length = t - t_first_stmt_start;
+                    return null;
+                }
+            } break;
+
             case TOKEN_KEYWORD_BREAK: {
                 stmt->kind = STMT_BREAK;
                 t += 1;
@@ -8416,6 +8436,10 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             }
         } break;
 
+        case STMT_DEFER: {
+            typecheck_stmt(context, scope, stmt->defer);
+        } break;
+
         case STMT_CONTINUE:
         case STMT_BREAK:
         case STMT_DEBUG_BREAK:
@@ -8951,7 +8975,7 @@ typedef enum Control_Flow_Result {
     CONTROL_FLOW_INVALID,
 } Control_Flow_Result;
 
-Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool return_would_be_trailing) {
+Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool return_would_be_trailing, bool inside_defer) {
     bool has_returned = false;
     bool has_skipped_out = false; // continue or break
 
@@ -8972,7 +8996,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             {} break;
 
             case STMT_BLOCK: {
-                Control_Flow_Result result = check_control_flow(stmt->block.stmt, parent_loop, return_would_be_trailing && is_last_stmt);
+                Control_Flow_Result result = check_control_flow(stmt->block.stmt, parent_loop, return_would_be_trailing && is_last_stmt, inside_defer);
                 switch (result) {
                     case CONTROL_FLOW_WILL_RETURN: has_returned = true; break;
                     case CONTROL_FLOW_MIGHT_RETURN: break;
@@ -8985,12 +9009,12 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
                 bool else_return_would_be_trailing = return_would_be_trailing && is_last_stmt;
                 bool then_return_would_be_trailing = else_return_would_be_trailing && (stmt->if_.else_then == null);
 
-                Control_Flow_Result then_result = check_control_flow(stmt->if_.then, parent_loop, then_return_would_be_trailing);
+                Control_Flow_Result then_result = check_control_flow(stmt->if_.then, parent_loop, then_return_would_be_trailing, inside_defer);
                 if (then_result == CONTROL_FLOW_INVALID) return then_result;
 
                 Control_Flow_Result else_result = CONTROL_FLOW_MIGHT_RETURN;
                 if (stmt->if_.else_then != null) {
-                    else_result = check_control_flow(stmt->if_.else_then, parent_loop, else_return_would_be_trailing);
+                    else_result = check_control_flow(stmt->if_.else_then, parent_loop, else_return_would_be_trailing, inside_defer);
                     if (else_result == CONTROL_FLOW_INVALID) return else_result;
                 }
 
@@ -9007,7 +9031,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
                 if (stmt->switch_.default_case != null) {
                     Switch_Case *c = stmt->switch_.default_case;
 
-                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false);
+                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false, inside_defer);
                     switch (case_result) {
                         case CONTROL_FLOW_WILL_RETURN: break;
                         case CONTROL_FLOW_MIGHT_RETURN: has_returned = false; break;
@@ -9018,7 +9042,7 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
                 for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
                     Switch_Case *c = &stmt->switch_.cases[i];
 
-                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false);
+                    Control_Flow_Result case_result = check_control_flow(c->body, parent_loop, false, inside_defer);
                     switch (case_result) {
                         case CONTROL_FLOW_WILL_RETURN: break;
                         case CONTROL_FLOW_MIGHT_RETURN: has_returned = false; break;
@@ -9028,13 +9052,29 @@ Control_Flow_Result check_control_flow(Stmt* stmt, Stmt* parent_loop, bool retur
             } break;
 
             case STMT_FOR: {
-                Control_Flow_Result result = check_control_flow(stmt->for_.body, stmt, false);
+                Control_Flow_Result result = check_control_flow(stmt->for_.body, stmt, false, inside_defer);
                 if (result == CONTROL_FLOW_INVALID) return CONTROL_FLOW_INVALID;
             } break;
 
             case STMT_RETURN: {
+                if (inside_defer) {
+                    print_file_pos(&stmt->pos);
+                    printf("Can't return from inside defer\n");
+                    return CONTROL_FLOW_INVALID;
+                }
+
                 has_returned = true;
                 stmt->return_.trailing = return_would_be_trailing && is_last_stmt;
+            } break;
+
+            case STMT_DEFER: {
+                if (inside_defer) {
+                    print_file_pos(&stmt->pos);
+                    printf("Can't nest defers\n");
+                    return CONTROL_FLOW_INVALID;
+                }
+
+                check_control_flow(stmt->defer, null, false, true);
             } break;
 
             case STMT_BREAK:
@@ -9273,7 +9313,7 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
                 }
 
                 // Control flow
-                Control_Flow_Result result = check_control_flow(fn->body.first_stmt, null, true);
+                Control_Flow_Result result = check_control_flow(fn->body.first_stmt, null, true, false);
                 if (result == CONTROL_FLOW_INVALID) {
                     return TYPECHECK_RESULT_BAD;
                 } else if (fn->signature->has_return && result != CONTROL_FLOW_WILL_RETURN) {
@@ -12963,7 +13003,40 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Fn *fn, Expr *e
     return info;
 }
 
-void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *reg_allocator) {
+
+void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn, Stmt *stmt);
+
+void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, Fn *fn, Stmt *first) {
+    typedef struct Queued_Defer Queued_Defer;
+    struct Queued_Defer {
+        Stmt *stmt;
+        Queued_Defer *next;
+    };
+    Queued_Defer *first_defer = null, *last_defer = null;
+
+    for (Stmt* stmt = first; stmt->kind != STMT_END; stmt = stmt->next) {
+        if (stmt->kind == STMT_DEFER) {
+            if (first_defer == null) arena_stack_pop(&context->stack);
+            Queued_Defer *defer = arena_new(&context->stack, Queued_Defer);
+            defer->stmt = stmt->defer;
+            last_defer = first_defer == null? (first_defer = defer) : (last_defer->next = defer);
+            continue;
+        }
+
+        machinecode_for_stmt(context, reg_allocator, fn, stmt);
+    }
+
+    if (first_defer != null) {
+        Queued_Defer *defer = first_defer;
+        for (Queued_Defer *defer = first_defer; defer != null; defer = defer->next) {
+            machinecode_for_stmt(context, reg_allocator, fn, defer->stmt);
+        }
+
+        arena_stack_pop(&context->stack);
+    }
+}
+
+void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn, Stmt *stmt) {
     register_allocator_enter_frame(context, reg_allocator);
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
@@ -13076,17 +13149,13 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
         } break;
 
         case STMT_BLOCK: {
-            for (Stmt *inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
-                machinecode_for_stmt(context, fn, inner, reg_allocator);
-            }
+            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->block.stmt);
         } break;
 
         case STMT_IF: {
             Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->if_.condition, reg_allocator);
 
-            for (Stmt *inner = stmt->if_.then; inner->kind != STMT_END; inner = inner->next) {
-                machinecode_for_stmt(context, fn, inner, reg_allocator);
-            }
+            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->if_.then);
 
             u64 second_jump_text_location_index, second_jump_from;
             if (stmt->if_.else_then != null) {
@@ -13113,9 +13182,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             }
 
             if (stmt->if_.else_then != null) {
-                for (Stmt *inner = stmt->if_.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    machinecode_for_stmt(context, fn, inner, reg_allocator);
-                }
+                machinecode_for_stmt_block(context, reg_allocator, fn, stmt->if_.else_then);
 
                 i64 second_jump_by = ((i64) buf_length(context->seg_text)) - ((i64) second_jump_from);
                 assert(second_jump_by <= I32_MAX && second_jump_by >= I32_MIN);
@@ -13173,9 +13240,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                     }
                 }
 
-                for (Stmt *inner = c->body; inner->kind != STMT_END; inner = inner->next) {
-                    machinecode_for_stmt(context, fn, inner, reg_allocator);
-                }
+                machinecode_for_stmt_block(context, reg_allocator, fn, c->body);
 
                 if (!(i + 1 == stmt->switch_.case_count && stmt->switch_.default_case == null)) {
                     jmp_indices[jmp_index_count] = instruction_jmp(context, sizeof(i32)); // jmp to end
@@ -13189,9 +13254,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
 
             if (stmt->switch_.default_case != null) {
                 Switch_Case *c = stmt->switch_.default_case;
-                for (Stmt *inner = c->body; inner->kind != STMT_END; inner = inner->next) {
-                    machinecode_for_stmt(context, fn, inner, reg_allocator);
-                }
+                machinecode_for_stmt_block(context, reg_allocator, fn, c->body);
             }
 
             u64 jmp_to = buf_length(context->seg_text);
@@ -13247,9 +13310,7 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
                 assert(false);
             }
 
-            for (Stmt *inner = stmt->for_.body; inner->kind != STMT_END; inner = inner->next) {
-                machinecode_for_stmt(context, fn, inner, reg_allocator);
-            }
+            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->for_.body);
 
             if (stmt->for_.kind == LOOP_RANGE) {
                 Var *var = stmt->for_.range.var;
@@ -13331,6 +13392,10 @@ void machinecode_for_stmt(Context *context, Fn *fn, Stmt *stmt, Reg_Allocator *r
             fixup.jump_from = buf_length(context->seg_text);
             fixup.jump_to = JUMP_TO_START_OF_LOOP;
             buf_push(context->jump_fixups, fixup);
+        } break;
+
+        case STMT_DEFER: {
+            assert(false); // NB Defers are filtered out and handled separately
         } break;
 
         case STMT_DEBUG_BREAK: {
@@ -13568,9 +13633,7 @@ void build_machinecode(Context *context) {
             instruction_call(context, global_init_fn);
         }
 
-        for (Stmt* stmt = fn->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {
-            machinecode_for_stmt(context, fn, stmt, &reg_allocator);
-        }
+        machinecode_for_stmt_block(context, &reg_allocator, fn, fn->body.first_stmt);
 
         buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
             assert(fixup->jump_to == JUMP_TO_END_OF_FUNCTION);

@@ -49,6 +49,7 @@ fn main() {
     who_are_you(3);
 
     fake_recursion();
+    procrastinate();
 
     assert(true, "This should NOT assert");
     assert(false, "This should assert");
@@ -414,4 +415,9 @@ fn fake_recursion() {
     fn fake_recursion() {
         print("Haha gottem\n");
     }
+}
+
+fn procrastinate() {
+    defer print("world!\n");
+    print("Hello, ");
 }
