@@ -49,7 +49,8 @@ fn main() {
     who_are_you(3);
 
     fake_recursion();
-    procrastinate();
+    procrastinate(true);
+    procrastinate(false);
 
     assert(true, "This should NOT assert");
     assert(false, "This should assert");
@@ -417,7 +418,24 @@ fn fake_recursion() {
     }
 }
 
-fn procrastinate() {
-    defer print("world!\n");
-    print("Hello, ");
+fn procrastinate(switch_it_up: bool) {
+    defer print(", world!\n");
+    print("Hello");
+
+    if switch_it_up {
+        defer print(" there");
+        defer for k : 0..3 { print("."); }
+        return;
+    }
+
+    print("pe");
+
+    print(" (");
+    for k : 0..6 {
+        defer print("/");
+        if k == 1 { continue; }
+        if k == 3 { break; }
+        print(":^");
+    }
+    print(")");
 }

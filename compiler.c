@@ -2216,6 +2216,7 @@ typedef struct Jump_Fixup {
         JUMP_TO_END_OF_LOOP,
         JUMP_TO_START_OF_LOOP,
         JUMP_TO_END_OF_FUNCTION,
+        JUMP_TO_KIND_COUNT,
     } jump_to;
 } Jump_Fixup;
 
@@ -3278,6 +3279,11 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                 printf("return;");
             }
         } break;
+
+        case STMT_DEFER: {
+            printf("defer ");
+            print_stmt(context, stmt->defer, indent_level);
+        };
 
         case STMT_CONTINUE: printf("continue;"); break;
         case STMT_BREAK:    printf("break;"); break;
@@ -9416,6 +9422,8 @@ void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stm
         if (stmt->kind == STMT_BLOCK) {
             typecheck_queue_include_stmts(context, queue, stmt->block.stmt);
             typecheck_queue_include_scope(context, queue, &stmt->block.scope);
+        } else if (stmt->kind == STMT_DEFER) {
+            typecheck_queue_include_stmts(context, queue, stmt->defer);
         } else if (stmt->kind == STMT_IF) {
             typecheck_queue_include_stmts(context, queue, stmt->if_.then);
             typecheck_queue_include_scope(context, queue, &stmt->if_.then_scope);
@@ -13004,9 +13012,19 @@ Negated_Jump_Info machinecode_for_negated_jump(Context *context, Fn *fn, Expr *e
 }
 
 
+void jump_fixup_go_to(Context *context, Jump_Fixup *fixup, u64 target) {
+    i64 jump_by = ((i64) target) - ((i64) fixup->jump_from);
+    assert(jump_by <= ((i64) I32_MAX) && jump_by >= ((i64) I32_MIN));
+    i32 *jump_text_location = (i32*) (&context->seg_text[fixup->text_location]);
+    *jump_text_location = jump_by;
+}
+
+
 void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn, Stmt *stmt);
 
-void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, Fn *fn, Stmt *first) {
+void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, Fn *fn, Stmt *first, Stmt *extra_defer) {
+    u32 jump_fixup_ignore = buf_length(context->jump_fixups);
+
     typedef struct Queued_Defer Queued_Defer;
     struct Queued_Defer {
         Stmt *stmt;
@@ -13016,7 +13034,7 @@ void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, 
 
     for (Stmt* stmt = first; stmt->kind != STMT_END; stmt = stmt->next) {
         if (stmt->kind == STMT_DEFER) {
-            if (first_defer == null) arena_stack_pop(&context->stack);
+            if (first_defer == null) arena_stack_push(&context->stack);
             Queued_Defer *defer = arena_new(&context->stack, Queued_Defer);
             defer->stmt = stmt->defer;
             last_defer = first_defer == null? (first_defer = defer) : (last_defer->next = defer);
@@ -13026,10 +13044,62 @@ void machinecode_for_stmt_block(Context *context, Reg_Allocator *reg_allocator, 
         machinecode_for_stmt(context, reg_allocator, fn, stmt);
     }
 
+    if (extra_defer != null) {
+        if (first_defer == null) arena_stack_push(&context->stack);
+        Queued_Defer *defer = arena_new(&context->stack, Queued_Defer);
+        defer->stmt = extra_defer;
+        last_defer = first_defer == null? (first_defer = defer) : (last_defer->next = defer);
+    }
+
     if (first_defer != null) {
+        #ifdef PRINT_GENERATED_INSTRUCTIONS
+        printf("; (defers)\n");
+        #endif
+
+        // TODO only generate this block of code if we are not guaranteed to return in block which issued the defer
+        u32 fixups_before = buf_length(context->jump_fixups);
         Queued_Defer *defer = first_defer;
         for (Queued_Defer *defer = first_defer; defer != null; defer = defer->next) {
             machinecode_for_stmt(context, reg_allocator, fn, defer->stmt);
+        }
+        assert(fixups_before == buf_length(context->jump_fixups)); // We don't allow jumps across defer boundaries
+
+        // Intercept any jumps, and make them go through our defer code
+        if (buf_length(context->jump_fixups) > jump_fixup_ignore) {
+            u64 skip_jmp_index = instruction_jmp(context, sizeof(i32));
+
+            for (int jump_to_kind = 0; jump_to_kind < JUMP_TO_KIND_COUNT; jump_to_kind += 1) {
+                u32 jumps_of_this_kind = 0;
+
+                u32 fixup_index = 0;
+                buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
+                    fixup_index += 1;
+                    if (fixup_index <= jump_fixup_ignore || fixup->jump_to != jump_to_kind) continue;
+
+                    jump_fixup_go_to(context, fixup, buf_length(context->seg_text));
+                    buf_foreach_remove(context->jump_fixups, fixup);
+
+                    jumps_of_this_kind += 1;
+                }
+
+                if (jumps_of_this_kind <= 0) continue;
+
+                u32 fixups_before = buf_length(context->jump_fixups);
+                Queued_Defer *defer = first_defer;
+                for (Queued_Defer *defer = first_defer; defer != null; defer = defer->next) {
+                    machinecode_for_stmt(context, reg_allocator, fn, defer->stmt);
+                }
+                assert(fixups_before == buf_length(context->jump_fixups)); // We don't allow jumps across defer boundaries
+
+                u64 jump_text_location = instruction_jmp(context, sizeof(i32));
+                buf_push(context->jump_fixups, ((Jump_Fixup) {
+                    .text_location = jump_text_location,
+                    .jump_from = buf_length(context->seg_text),
+                    .jump_to = jump_to_kind
+                }));
+            }
+
+            *((i32*) &context->seg_text[skip_jmp_index]) = (i32) (buf_length(context->seg_text) - (skip_jmp_index + sizeof(i32)));
         }
 
         arena_stack_pop(&context->stack);
@@ -13149,13 +13219,13 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
         } break;
 
         case STMT_BLOCK: {
-            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->block.stmt);
+            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->block.stmt, null);
         } break;
 
         case STMT_IF: {
             Negated_Jump_Info jump_info = machinecode_for_negated_jump(context, fn, stmt->if_.condition, reg_allocator);
 
-            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->if_.then);
+            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->if_.then, null);
 
             u64 second_jump_text_location_index, second_jump_from;
             if (stmt->if_.else_then != null) {
@@ -13182,7 +13252,7 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
             }
 
             if (stmt->if_.else_then != null) {
-                machinecode_for_stmt_block(context, reg_allocator, fn, stmt->if_.else_then);
+                machinecode_for_stmt_block(context, reg_allocator, fn, stmt->if_.else_then, null);
 
                 i64 second_jump_by = ((i64) buf_length(context->seg_text)) - ((i64) second_jump_from);
                 assert(second_jump_by <= I32_MAX && second_jump_by >= I32_MIN);
@@ -13240,7 +13310,7 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
                     }
                 }
 
-                machinecode_for_stmt_block(context, reg_allocator, fn, c->body);
+                machinecode_for_stmt_block(context, reg_allocator, fn, c->body, null);
 
                 if (!(i + 1 == stmt->switch_.case_count && stmt->switch_.default_case == null)) {
                     jmp_indices[jmp_index_count] = instruction_jmp(context, sizeof(i32)); // jmp to end
@@ -13254,7 +13324,7 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
 
             if (stmt->switch_.default_case != null) {
                 Switch_Case *c = stmt->switch_.default_case;
-                machinecode_for_stmt_block(context, reg_allocator, fn, c->body);
+                machinecode_for_stmt_block(context, reg_allocator, fn, c->body, null);
             }
 
             u64 jmp_to = buf_length(context->seg_text);
@@ -13269,6 +13339,7 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
         case STMT_FOR: {
             u32 jump_fixup_ignore = buf_length(context->jump_fixups);
 
+            Stmt *post_action = null;
             u64 loop_start;
             if (stmt->for_.kind == LOOP_CONDITIONAL) {
                 loop_start = buf_length(context->seg_text);
@@ -13304,19 +13375,43 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
                     .jump_to = JUMP_TO_END_OF_LOOP
                 }));
 
+                arena_stack_push(&context->stack);
+                {
+                    Expr *expr_var = arena_new(&context->stack, Expr);
+                    *expr_var = (Expr) {
+                        .kind = EXPR_VARIABLE,
+                        .flags = EXPR_FLAG_ASSIGNABLE | EXPR_FLAG_ADDRESSABLE,
+                        .type = var->type,
+                        .variable.var = var,
+                    };
+
+                    Expr *expr_one = arena_new(&context->stack, Expr);
+                    *expr_one = (Expr) {
+                        .kind = EXPR_LITERAL,
+                        .type = var->type,
+                        .literal = {
+                            .raw_value = 1, .masked_value = 1,
+                            .kind = EXPR_LITERAL_INTEGER,
+                        },
+                    };
+
+                    post_action = arena_new(&context->stack, Stmt);
+                    *post_action = (Stmt) {
+                        .kind = STMT_OP_ASSIGNMENT,
+                        .op_assignment = {
+                            .op = BINARY_ADD,
+                            .left = expr_var,
+                            .right = expr_one,
+                        },
+                    };
+                }
             } else if (stmt->for_.kind == LOOP_INFINITE) {
                 loop_start = buf_length(context->seg_text);
             } else {
                 assert(false);
             }
 
-            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->for_.body);
-
-            if (stmt->for_.kind == LOOP_RANGE) {
-                Var *var = stmt->for_.range.var;
-                X64_Address index_address = reg_allocator->var_mem_infos[var->local_index].address;
-                instruction_inc_or_dec(context, true, x64_place_address(index_address), type_size_of(var->type));
-            }
+            machinecode_for_stmt_block(context, reg_allocator, fn, stmt->for_.body, post_action);
 
             u64 backward_jump_index = instruction_jmp(context, sizeof(i32));
             u64 loop_end = buf_length(context->seg_text);
@@ -13340,13 +13435,12 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
                     continue;
                 }
 
-                i64 jump_by = ((i64) jump_to) - ((i64) fixup->jump_from);
-                assert(jump_by <= I32_MAX && jump_by >= I32_MIN);
-
-                i32 *jump_text_location = (i32*) (&context->seg_text[fixup->text_location]);
-                *jump_text_location = jump_by;
-
+                jump_fixup_go_to(context, fixup, jump_to);
                 buf_foreach_remove(context->jump_fixups, fixup);
+            }
+
+            if (post_action != null) {
+                arena_stack_pop(&context->stack);
             }
         } break;
 
@@ -13386,7 +13480,6 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
         } break;
 
         case STMT_CONTINUE: {
-            assert(false); // TODO untested code
             Jump_Fixup fixup = {0};
             fixup.text_location = instruction_jmp(context, sizeof(i32));
             fixup.jump_from = buf_length(context->seg_text);
@@ -13633,16 +13726,11 @@ void build_machinecode(Context *context) {
             instruction_call(context, global_init_fn);
         }
 
-        machinecode_for_stmt_block(context, &reg_allocator, fn, fn->body.first_stmt);
+        machinecode_for_stmt_block(context, &reg_allocator, fn, fn->body.first_stmt, null);
 
         buf_foreach (Jump_Fixup, fixup, context->jump_fixups) {
             assert(fixup->jump_to == JUMP_TO_END_OF_FUNCTION);
-
-            i64 jump_by = ((i64) buf_length(context->seg_text)) - ((i64) fixup->jump_from);
-            assert(jump_by <= I32_MAX && jump_by >= I32_MIN);
-
-            i32 *jump_text_location = (i32*) (&context->seg_text[fixup->text_location]);
-            *jump_text_location = jump_by;
+            jump_fixup_go_to(context, fixup, buf_length(context->seg_text));
         }
         buf_clear(context->jump_fixups);
 
