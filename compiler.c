@@ -8945,8 +8945,19 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                         }
                     } break;
 
-                    case QUERY_TYPE_INFO_SIZE:  result = type_size_of(type);  break;
-                    case QUERY_TYPE_INFO_ALIGN: result = type_align_of(type); break;
+                    case QUERY_TYPE_INFO_SIZE:
+                    case QUERY_TYPE_INFO_ALIGN:
+                    {
+                        if (type->flags & TYPE_FLAG_SIZE_NOT_COMPUTED) {
+                            return EVAL_DEPENDENT;
+                        }
+
+                        if (expr->query_type_info.query == QUERY_TYPE_INFO_SIZE) {
+                            result = type_align_of(type);
+                        } else {
+                            result = type_size_of(type);
+                        }
+                    } break;
 
                     default: assert(false);
                 }
