@@ -1,10 +1,35 @@
 
 fn main() {
+    let arena: Arena;
+
     open_window();
     set_vsync(true); // NB setting to false will make the screen flash crazily
 
+    let shader = load_shader(vert_source, frag_source);
+    let shader_uniform_view_size = glGetUniformLocation(shader, "view_size".data);
+    let shader_uniform_view_pos = glGetUniformLocation(shader, "view_pos".data);
+
     let draw_group = draw_group_init();
     let framebuffer = framebuffer_init(8, window_width, window_height);
+
+    let detective_mesh, pipe_mesh: *Mesh;
+    {
+        let mesh = mesh_import(&arena, "src/gl_test/detective.mesh".data);
+        for mesh != null {
+            defer mesh = mesh.next_mesh;
+
+            if string_cmp(mesh.name, "detective") {
+                detective_mesh = mesh;
+            } else if string_cmp(mesh.name, "pipe") {
+                pipe_mesh = mesh;
+            } else {
+                print("Unused mesh: ");
+                print(mesh.name);
+                print("\n");
+            }
+        }
+    }
+    assert(!(detective_mesh == null || pipe_mesh == null), "Missing meshes");
 
     const MIN_VIEW_WIDTH = 10.0;
     let view_pos, view_size: v2;
@@ -46,6 +71,14 @@ fn main() {
         glViewport(0, 0, i32(window_width), i32(window_height));
         glClearColor(0.99, 0.99, 0.87, 1.0);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(shader);
+        glUniform2f(shader_uniform_view_size, view_size.x, view_size.y);
+        glUniform2f(shader_uniform_view_pos,  view_pos.x,  view_pos.y);
+
+        mesh_draw(detective_mesh);
+        mesh_draw(pipe_mesh);
+
         draw_group_draw(&draw_group, view_size, view_pos);
 
         framebuffer_blit(&framebuffer, window_width, window_height);
@@ -67,40 +100,69 @@ const ORTHO = [3]v2 {
 
 enum Dir(u8) { X = 0, Y = 1, Z = 2 }
 
+let vert_source = "
+    #version 330 core
 
+    uniform vec2 view_size, view_pos;
 
+    layout(location = 0) in vec3 in_pos;
+    layout(location = 1) in int in_kind;
+    layout(location = 2) in int in_dir;
 
-struct v2 { x, y: f32; }
-struct v3 { x, y, z: f32; }
+    out vec2 pattern_pos;
+    flat out int kind;
 
-fn add_v2(a, b: v2) -> v2 {
-    return { a.x + b.x, a.y + b.y };
-}
-fn sub_v2(a, b: v2) -> v2 {
-    return { a.x - b.x, a.y - b.y };
-}
-fn normalize_v2(a: v2) -> v2 {
-    let length = sqrt(a.x*a.x + a.y*a.y);
-    return { a.x / length, a.y / length };
-}
-fn scale_v2(a: v2, s: f32) -> v2 {
-    return { a.x * s, a.y * s };
-}
+    const mat3x2 ORTHO = mat3x2(
+        sqrt(0.75), -0.5,
+        sqrt(0.75), 0.5,
+        0.0, 1.0
+    );
 
-fn add_v3(a, b: v3) -> v3 {
-    return { a.x + b.x, a.y + b.y, a.z + b.z };
-}
-fn sub_v3(a, b: v3) -> v3 {
-    return { a.x - b.x, a.y - b.y, a.z - b.z };
-}
-fn normalize_v3(a: v3) -> v3 {
-    let length = sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
-    return { a.x / length, a.y / length, a.z / length };
-}
-fn scale_v3(a: v3, s: f32) -> v3 {
-    return { a.x * s, a.y * s, a.z * s };
-}
+    void main() {
+        vec2 flat_pos = ORTHO * in_pos;
+        vec2 screen_pos = ((flat_pos - view_pos) / view_size) * 2.0;
+        gl_Position = vec4(screen_pos, 0.0, 1.0);
 
+        switch (in_dir) {
+            case 0: pattern_pos = vec2(in_pos.y, in_pos.z); break;
+            case 1: pattern_pos = vec2(in_pos.x, in_pos.z); break;
+            case 2: pattern_pos = vec2(in_pos.x, in_pos.y); break;
+        }
+
+        kind = in_kind;
+    }
+";
+
+let frag_source = "
+    #version 330 core
+
+    in vec2 pattern_pos;
+    flat in int kind;
+
+    out vec4 color;
+
+    void main() {
+        if (kind == 0) {
+            const vec2 A = vec2(0.0, 1.0);
+            float a = sin(dot(pattern_pos, A) * 16.0);
+            float n = smoothstep(a, 0.3, 0.50);
+
+            color = vec4(0.64, 0.27, 0.17, 1.0) * (n*0.2 + 0.8);
+        } else if (kind == 1) {
+            const vec2 A = vec2(0.0, 1.0);
+            const vec2 B = vec2(sqrt(0.75), -0.5);
+            const vec2 C = vec2(sqrt(0.75), 0.5);
+            float a = sin(dot(pattern_pos, A) * 17.0);
+            float b = sin(dot(pattern_pos, B) * 17.0);
+            float c = sin(dot(pattern_pos, C) * 17.0);
+            float n = smoothstep(abs(a*b*c), 0.3, 0.4);
+
+            color = vec4(0.8, 1.0, 0.6, 1.0) * (n*0.2 + 0.8);
+        } else {
+            color = vec4(1.0, 0.0, 0.0, 1.0);
+        }
+    }
+";
 
 const MAX_VERTICES = 32768;
 const MAX_VERTICES_BYTES = MAX_VERTICES * size_of(Vertex);
@@ -111,83 +173,14 @@ struct Vertex {
     dir: u8;
 }
 
+
 struct Draw_Group {
-    shader: u32;
-    shader_uniform_view_size, shader_uniform_view_pos: i32;
     vbo, vao: u32;
     vertex_count: i64;
     vertices: *Vertex; // TODO Make this a slice, or something of that nature, so we get ABC
 }
 
 fn draw_group_init() -> Draw_Group {
-    let vert_source = "
-        #version 330 core
-
-        uniform vec2 view_size, view_pos;
-
-        layout(location = 0) in vec3 in_pos;
-        layout(location = 1) in int in_kind;
-        layout(location = 2) in int in_dir;
-
-        out vec2 pattern_pos;
-        flat out int kind;
-
-        const mat3x2 ORTHO = mat3x2(
-            sqrt(0.75), -0.5,
-            sqrt(0.75), 0.5,
-            0.0, 1.0
-        );
-
-        void main() {
-            vec2 flat_pos = ORTHO * in_pos;
-            vec2 screen_pos = ((flat_pos - view_pos) / view_size) * 2.0;
-            gl_Position = vec4(screen_pos, 0.0, 1.0);
-
-            switch (in_dir) {
-                case 0: pattern_pos = vec2(in_pos.y, in_pos.z); break;
-                case 1: pattern_pos = vec2(in_pos.x, in_pos.z); break;
-                case 2: pattern_pos = vec2(in_pos.x, in_pos.y); break;
-            }
-
-            kind = in_kind;
-        }
-    ";
-
-    let frag_source = "
-        #version 330 core
-
-        in vec2 pattern_pos;
-        flat in int kind;
-
-        out vec4 color;
-
-        void main() {
-            if (kind == 0) {
-                const vec2 A = vec2(0.0, 1.0);
-                float a = sin(dot(pattern_pos, A) * 16.0);
-                float n = smoothstep(a, 0.3, 0.50);
-
-                color = vec4(0.64, 0.27, 0.17, 1.0) * (n*0.2 + 0.8);
-            } else if (kind == 1) {
-                const vec2 A = vec2(0.0, 1.0);
-                const vec2 B = vec2(sqrt(0.75), -0.5);
-                const vec2 C = vec2(sqrt(0.75), 0.5);
-                float a = sin(dot(pattern_pos, A) * 17.0);
-                float b = sin(dot(pattern_pos, B) * 17.0);
-                float c = sin(dot(pattern_pos, C) * 17.0);
-                float n = smoothstep(abs(a*b*c), 0.3, 0.4);
-
-                color = vec4(0.8, 1.0, 0.6, 1.0) * (n*0.2 + 0.8);
-            } else {
-                color = vec4(1.0, 0.0, 0.0, 1.0);
-            }
-        }
-    ";
-
-    let shader = load_shader(vert_source, frag_source);
-    let shader_uniform_view_size = glGetUniformLocation(shader, "view_size".data);
-    let shader_uniform_view_pos = glGetUniformLocation(shader, "view_pos".data);
-
     let vertex_count = 0;
     let vertices = cast(*Vertex, alloc(MAX_VERTICES_BYTES));
 
@@ -213,14 +206,10 @@ fn draw_group_init() -> Draw_Group {
     glVertexAttribIPointer(2, 1, GL_BYTE, i32(size_of(Vertex)), cast(*void, offset));
     offset += size_of(u8);
 
-    return Draw_Group { shader, shader_uniform_view_size, shader_uniform_view_pos, vbo, vao, vertex_count, vertices };
+    return Draw_Group { vbo, vao, vertex_count, vertices };
 }
 
 fn draw_group_draw(draw_group: *Draw_Group, view_size, view_pos: v2) {
-    glUseProgram(draw_group.shader);
-    glUniform2f(draw_group.shader_uniform_view_size, view_size.x, view_size.y);
-    glUniform2f(draw_group.shader_uniform_view_pos,  view_pos.x,  view_pos.y);
-
     glBindBuffer(GL_ARRAY_BUFFER, draw_group.vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, draw_group.vertex_count * size_of(Vertex), cast(*void, draw_group.vertices));
 
@@ -399,6 +388,92 @@ fn load_shader(vertex_source, fragment_source: String) -> u32 {
     glDeleteShader(vertex);
     glDeleteShader(fragment);
     return program;
+}
+
+
+struct Mesh {
+    name: String;
+    vao, vbo: u32;
+    vertex_count: i32;
+
+    next_mesh: *Mesh;
+}
+
+fn mesh_draw(mesh: *Mesh) {
+    glBindVertexArray(mesh.vao);
+    glDrawArrays(GL_TRIANGLES, 0, i32(mesh.vertex_count));
+}
+
+fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
+    let file = read_entire_file(filepath);
+    assert(file.error_code == 0, "Failed to load mesh: Couldn't open file");
+    defer free(file.data);
+
+    let MAGIC = "sea\nmesh";
+    assert(file.length >= MAGIC.length, "Failed to load mesh: File is too small");
+    let actual_magic = String { file.data, MAGIC.length };
+    assert(string_cmp(MAGIC, actual_magic), "Failed to load mesh: Invalid magic value");
+
+    let cursor = file.data + MAGIC.length;
+    let cursor_length = file.length - MAGIC.length;
+
+    let first_mesh: *Mesh;
+
+    for cursor_length > 0 {
+        assert(cursor_length > size_of(u16), "Failed to load mesh: Missing name count");
+        let name_length = i64(*cast(*u16, cursor));
+        cursor += size_of(u16);
+        cursor_length -= size_of(u16);
+
+        assert(cursor_length > name_length, "Failed to load mesh: Missing name data");
+        let name = String { data: cursor, length: name_length };
+        cursor += name_length;
+        cursor_length -= name_length;
+
+        assert(cursor_length > size_of(u16), "Failed to load mesh: Missing vertex count");
+        let vertex_count = i64(*cast(*u16, cursor));
+        cursor += size_of(u16);
+        cursor_length -= size_of(u16);
+
+
+        struct Vertex {
+            a: v3;
+        }
+
+        let vertex_bytes = size_of(Vertex) * vertex_count;
+        assert(cursor_length > vertex_bytes, "Failed to load mesh: Missing vertex data");
+        let vertices = cast(*Vertex, cursor);
+        cursor += vertex_bytes;
+        cursor_length -= vertex_bytes;
+
+        let MAGIC = "mesh_end";
+        assert(cursor_length >= MAGIC.length, "Failed to load mesh: Missing end of mesh");
+        assert(string_cmp(MAGIC, String { cursor, MAGIC.length }), "Failed to load mesh: Invalid end of mesh");
+        cursor += MAGIC.length;
+        cursor_length -= MAGIC.length;
+
+        let vbo, vao: u32;
+        glGenBuffers(1, &vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, vertex_bytes, vertices, GL_STATIC_DRAW);
+
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, i32(size_of(Vertex)), null);
+
+        let mesh: *Mesh = arena_new(arena, size_of(Mesh));
+        mesh.name = arena_clone_string(arena, name);
+        mesh.vbo = vbo;
+        mesh.vao = vao;
+        mesh.vertex_count = i32(vertex_count);
+
+        mesh.next_mesh = first_mesh;
+        first_mesh = mesh;
+    }
+
+    return first_mesh;
 }
 
 
@@ -717,10 +792,23 @@ struct Window_Message_Point { x, y: i32; }
 
 extern "kernel32.lib" {
     fn ExitProcess(exit_code: u32);
+    fn CloseHandle(handle: Handle) -> i32;
+    fn GetLastError() -> u32;
     fn GetStdHandle(key: u32) -> u64;
+    fn CreateFileA(
+        file_name: *u8,
+        access, share_mode: u32,
+        security_attributes: *void,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: Handle,
+    ) -> Handle;
+    fn GetFileSizeEx(file: Handle, size: *i64) -> i32;
+    fn ReadFile(file: Handle, buffer: *void, to_read: u32, read: *u32, overlapped: *void) -> i32;
     fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
     fn GetProcessHeap() -> u64;
     fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> *void;
+    fn HeapFree(heap: u64, flags: u32, data: *void) -> i32;
     fn GetModuleHandleA(name: *u8) -> Handle;
     fn LoadLibraryA(name: *u8) -> Handle;
     fn GetProcAddress(library: Handle, name: *u8) -> *fn();
@@ -767,6 +855,24 @@ extern "opengl32.lib" {
 typedef wglGetExtensionsStringARB_Type  = *fn(device_context: Handle) -> *u8;
 typedef wglCreateContextAttribsARB_Type = *fn(device_context: Handle, gl_context: Handle, attributes: *i32) -> Handle;
 typedef wglSwapIntervalEXT_Type         = *fn(interval: i32) -> i32;
+
+const GENERIC_READ    = 0x80000000;
+const GENERIC_WRITE   = 0x40000000;
+const GENERIC_EXECUTE = 0x20000000;
+const GENERIC_ALL     = 0x10000000;
+
+const FILE_SHARE_READ   = 0x1;
+const FILE_SHARE_WRITE  = 0x2;
+const FILE_SHARE_DELETE = 0x4;
+
+const CREATE_NEW        = 1;
+const CREATE_ALWAYS     = 2;
+const OPEN_EXISTING     = 3;
+const OPEN_ALWAYS       = 4;
+const TRUNCATE_EXISTING = 5;
+
+const INVALID_HANDLE_VALUE  = cast(Handle, -1);
+const FILE_ATTRIBUTE_NORMAL = 0x80;
 
 const WS_OVERLAPPED   = 0x00000000;
 const WS_CAPTION      = 0x00C00000;
@@ -1068,6 +1174,112 @@ let process_heap = GetProcessHeap();
 fn alloc(bytes: i64) -> *u8 {
     return HeapAlloc(process_heap, 0, u64(bytes));
 }
+
+fn free(mem: *u8) {
+    assert(HeapFree(process_heap, 0, mem) != 0, "Attempt to free invalid memory");
+}
+
+
+struct File {
+    error_code: u32;
+    data: *u8;
+    length: i64;
+}
+
+fn read_entire_file(file_name: *u8) -> File {
+    let file = CreateFileA(file_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+    if file == INVALID_HANDLE_VALUE {
+        return { error_code: GetLastError() };
+    }
+
+    let file_size: i64;
+    if GetFileSizeEx(file, &file_size) == 0 {
+        return { error_code: GetLastError() };
+    }
+
+    let data = alloc(file_size);
+
+    let read: u32;
+    let success = ReadFile(file, data, u32(file_size), &read, null);
+    if (success == 0 || i64(read) != file_size) {
+        CloseHandle(file);
+        free(data);
+        return { error_code: GetLastError() };
+    }
+
+    CloseHandle(file);
+
+    return {
+        error_code: 0,
+        data: data,
+        length: file_size,
+    };
+}
+
+
+const ARENA_BLOCK_SIZE = 8*1024;
+
+struct Arena {
+    data: *u8;
+    length, capacity: i64;
+}
+
+fn arena_new(arena: *Arena, size: i64) -> *void {
+    if arena.data == null {
+        arena.data = alloc(ARENA_BLOCK_SIZE);
+        arena.capacity = ARENA_BLOCK_SIZE;
+        arena.length = 0;
+    }
+    assert(arena.length + size <= arena.capacity, "Out of memory in memory arena");
+
+    let result = arena.data + arena.length;
+    arena.length += size;
+    return result;
+}
+
+fn arena_clone_string(arena: *Arena, source: String) -> String {
+    let length = source.length;
+    let new_data = arena_new(arena, length);
+    let result = String { new_data, length };
+    for i : 0..length {
+        result[i] = source[i];
+    }
+    return result;
+}
+
+
+struct v2 { x, y: f32; }
+struct v3 { x, y, z: f32; }
+
+fn add_v2(a, b: v2) -> v2 {
+    return { a.x + b.x, a.y + b.y };
+}
+fn sub_v2(a, b: v2) -> v2 {
+    return { a.x - b.x, a.y - b.y };
+}
+fn normalize_v2(a: v2) -> v2 {
+    let length = sqrt(a.x*a.x + a.y*a.y);
+    return { a.x / length, a.y / length };
+}
+fn scale_v2(a: v2, s: f32) -> v2 {
+    return { a.x * s, a.y * s };
+}
+
+fn add_v3(a, b: v3) -> v3 {
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+fn sub_v3(a, b: v3) -> v3 {
+    return { a.x - b.x, a.y - b.y, a.z - b.z };
+}
+fn normalize_v3(a: v3) -> v3 {
+    let length = sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
+    return { a.x / length, a.y / length, a.z / length };
+}
+fn scale_v3(a: v3, s: f32) -> v3 {
+    return { a.x * s, a.y * s, a.z * s };
+}
+
+
 
 fn load_gl(gl32_lib: Handle) {
     // 0.0
