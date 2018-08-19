@@ -1,0 +1,146 @@
+
+import "winapi.sea";
+
+fn string_cmp(a, b: String) -> bool {
+    if a.length != b.length { return false; }
+
+    for i : 0..a.length {
+        if a[i] != b[i] {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+let stdout_handle = GetStdHandle(u32(-11));
+
+fn print(string: String) {
+    let written: u32;
+    WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
+}
+
+fn print_u64(value: u64) {
+    let buffer: [30]u8;
+    let length = 0;
+
+    if value == 0 {
+        buffer[0] = '0';
+        length = 1;
+    } else {
+        let i: u64 = 0;
+        for value > 0 {
+            let char = u8(value % 10);
+            value = value / 10;
+
+            buffer[i] = '0' + char;
+            i += 1;
+            length += 1;
+        }
+        i -= 1;
+
+        let j: u64 = 0;
+        for j < i {
+            let temp = buffer[j];
+            buffer[j] = buffer[i];
+            buffer[i] = temp;
+
+            i -= 1;
+            j += 1;
+        }
+    }
+
+    let string = String { data: &buffer, length: length };
+    print(string);
+}
+
+fn assert(condition: bool, message: String) {
+    if (!condition) {
+        print("Assertion failed: ");
+        print(message);
+        print("\n");
+        ExitProcess(-1);
+    }
+}
+
+let process_heap = GetProcessHeap();
+
+fn alloc(bytes: i64) -> *u8 {
+    return HeapAlloc(process_heap, 0, u64(bytes));
+}
+
+fn free(mem: *u8) {
+    assert(HeapFree(process_heap, 0, mem) != 0, "Attempt to free invalid memory");
+}
+
+
+struct File {
+    error_code: u32;
+    data: *u8;
+    length: i64;
+}
+
+fn read_entire_file(file_name: *u8) -> File {
+    let file = CreateFileA(file_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+    if file == INVALID_HANDLE_VALUE {
+        return { error_code: GetLastError() };
+    }
+
+    let file_size: i64;
+    if GetFileSizeEx(file, &file_size) == 0 {
+        return { error_code: GetLastError() };
+    }
+
+    let data = alloc(file_size);
+
+    let read: u32;
+    let success = ReadFile(file, data, u32(file_size), &read, null);
+    if (success == 0 || i64(read) != file_size) {
+        CloseHandle(file);
+        free(data);
+        return { error_code: GetLastError() };
+    }
+
+    CloseHandle(file);
+
+    return {
+        error_code: 0,
+        data: data,
+        length: file_size,
+    };
+}
+
+
+const ARENA_BLOCK_SIZE = 8*1024;
+
+struct Arena {
+    data: *u8;
+    length, capacity: i64;
+}
+
+fn arena_new(arena: *Arena, size: i64) -> *void {
+    if arena.data == null {
+        arena.data = alloc(ARENA_BLOCK_SIZE);
+        arena.capacity = ARENA_BLOCK_SIZE;
+        arena.length = 0;
+    }
+    assert(arena.length + size <= arena.capacity, "Out of memory in memory arena");
+
+    let result = arena.data + arena.length;
+    arena.length += size;
+    return result;
+}
+
+fn arena_clone_string(arena: *Arena, source: String) -> String {
+    let length = source.length;
+    let new_data = arena_new(arena, length);
+    let result = String { new_data, length };
+    for i : 0..length {
+        result[i] = source[i];
+    }
+    return result;
+}
+
+fn exit() {
+    ExitProcess(0);
+}

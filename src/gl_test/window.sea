@@ -1,0 +1,273 @@
+
+import "gl.sea";
+import "core.sea";
+import "winapi.sea";
+
+let wgl_swap_function: wglSwapIntervalEXT_Type;
+let window_handle: Handle;
+let gl_context: Handle;
+let device_context: Handle;
+let close_requested = false;
+let key_states: [enum_length(Key)]Key_State;
+let width, height: i64;
+
+fn open() {
+    print("Creating window and initializing OpenGL\n");
+
+    let class_name  = "help im trapped in a window class factory";
+    let window_name = "Sea window test";
+
+    let instance = GetModuleHandleA(null);
+
+    let window_class_description = Window_Class {
+        style: 32, // CS_OWNDC
+        window_procedure: &event_callback,
+        instance: instance,
+        class_name: class_name.data,
+    };
+    let window_class = RegisterClassA(&window_class_description);
+    assert(window_class != 0, "Failed to register window class");
+
+    window_handle = CreateWindowExA(
+        0, class_name.data, window_name.data,
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        null, null, instance, null
+    );
+    assert(window_handle != null, "Couldn't open window");
+
+    device_context = GetDC(window_handle);
+    let pixel_format_description = Pixel_Format_Descriptor {
+        size: u16(size_of(Pixel_Format_Descriptor)),
+        version: 1,
+        flags: PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+        pixel_type: PFD_TYPE_RGBA,
+        color_bits: 24,
+        alpha_bits: 8,
+        layer_type: PFD_MAIN_PLANE,
+    };
+    let i = ChoosePixelFormat(device_context, &pixel_format_description);
+    assert(SetPixelFormat(device_context, i, &pixel_format_description) != 0, "Couldn't set pixel format");
+
+    assert(gl32_lib != null, "Couldn't load opengl32.dll");
+
+    let legacy_gl_context = wglCreateContext(device_context);
+    wglMakeCurrent(device_context, legacy_gl_context);
+
+    // NB this is only the subset of extensions I care about
+    enum WGL_Extensions {
+        WGL_ARB_create_context,
+        WGL_ARB_create_context_profile,
+        WGL_EXT_swap_control
+    }
+    let has_extensions: [enum_length(WGL_Extensions)]bool;
+
+    {
+        let wglGetExtensionsStringARB = cast(wglGetExtensionsStringARB_Type, get_gl_proc_address("wglGetExtensionsStringARB".data));
+        assert(wglGetExtensionsStringARB != null, "WGL_ARB_extensions_string is not supported");
+        let extensions = wglGetExtensionsStringARB(device_context);
+
+        let substring = extensions;
+        let length = 0;
+        for (*extensions != 0) {
+            if (*extensions == ' ') {
+                let string = String { substring, length };
+
+                for e : 0..enum_length(WGL_Extensions) {
+                    let extension_name = enum_member_name(cast(WGL_Extensions, e));
+                    if string_cmp(extension_name, string) {
+                        has_extensions[e] = true;
+                    }
+                }
+
+                for (*extensions == ' ') { extensions += 1; }
+
+                substring = extensions;
+                length = 0;
+            } else {
+                extensions += 1;
+                length += 1;
+            }
+        }
+
+        print("Detected GL extensions: ");
+        for e : 0..enum_length(WGL_Extensions) {
+            if (has_extensions[e]) {
+                if e > 0 { print(", "); }
+                print(enum_member_name(cast(WGL_Extensions, e)));
+            }
+        }
+
+        print("\n");
+    }
+
+    assert(
+        has_extensions[WGL_Extensions::WGL_ARB_create_context] && has_extensions[WGL_Extensions::WGL_ARB_create_context_profile],
+        "Missing extensions WGL_ARB_create_context or WGL_ARB_create_context_profile",
+    );
+    let wglCreateContextAttribsARB = cast(wglCreateContextAttribsARB_Type, get_gl_proc_address("wglCreateContextAttribsARB".data));
+
+    let context_attributes = []i32 {
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+        WGL_CONTEXT_FLAGS_ARB, 0,
+        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+        0,
+    };
+    gl_context = wglCreateContextAttribsARB(device_context, null, &context_attributes);
+    assert(gl_context != null, "Could not create modern GL context.");
+
+    wglDeleteContext(legacy_gl_context);
+    wglMakeCurrent(device_context, gl_context);
+
+    wgl_swap_function = null;
+    if has_extensions[WGL_Extensions::WGL_EXT_swap_control] {
+        wgl_swap_function = cast(wglSwapIntervalEXT_Type, get_gl_proc_address("wglSwapIntervalEXT".data));
+        assert(wgl_swap_function != null, "No wglSwapIntervalEXT, even though WGL_EXT_swap_control is supported");
+    }
+
+    load_gl(&get_gl_proc_address);
+
+    print("Showing window!\n");
+    ShowWindow(window_handle, SW_SHOW);
+
+    close_requested = false;
+}
+
+fn close() {
+    wglDeleteContext(gl_context);
+    DestroyWindow(window_handle);
+}
+
+fn swap_buffers() {
+    SwapBuffers(device_context);
+}
+
+fn set_vsync(vsync: bool) {
+    if wgl_swap_function != null {
+        wgl_swap_function(vsync? 1 : 0);
+    }
+}
+
+
+fn poll_events() {
+    let message: Window_Message;
+
+    for key : 0..enum_length(Key) {
+        if key_states[key] == Key_State::Pressed  { key_states[key] = Key_State::Down; }
+        if key_states[key] == Key_State::Released { key_states[key] = Key_State::Up; }
+    }
+
+    for {
+        let result = PeekMessageA(&message, window_handle, 0, 0, PM_REMOVE);
+
+        if result > 0 {
+            TranslateMessage(&message);
+            DispatchMessageA(&message);
+        } else {
+            break;
+        }
+    }
+}
+
+fn key_down(key: Key) -> bool {
+    return key_states[key] == Key_State::Down || key_states[key] == Key_State::Pressed;
+}
+
+fn key_pressed(key: Key) -> bool {
+    return key_states[key] == Key_State::Pressed;
+}
+
+// This is 'WNDPROC'
+fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
+    switch message {
+        WM_SIZE: {
+            let new_width  = l & 0xffff;
+            let new_height = (l >> 16) & 0xffff;
+
+            if new_width > 0 && new_height > 0 {
+                width  = new_width;
+                height = new_height;
+            }
+        }
+
+        WM_CLOSE: close_requested = true;
+
+        WM_KEYDOWN, WM_KEYUP:
+        {
+            let scancode = (l >> 16) & 0x1ff;
+            let down = message == WM_KEYDOWN;
+            assert(scancode < enum_length(Key), "Invalid scancode\n");
+
+            key_states[scancode] = down? Key_State::Pressed : Key_State::Released;
+        }
+
+        WM_CHAR: {}
+        WM_INPUT: {} // For raw input
+        WM_MOUSEWHEEL: {}
+        WM_MOUSEMOVE:  {}
+
+        WM_LBUTTONDOWN: {}
+        WM_LBUTTONUP:   {}
+        WM_MBUTTONDOWN: {}
+        WM_MBUTTONUP:   {}
+        WM_RBUTTONDOWN: {}
+        WM_RBUTTONUP:   {}
+        
+        _: return DefWindowProcA(window, message, w, l);
+    }
+
+    return 0;
+}
+
+
+enum Key_State(u8) { Up, Released, Down, Pressed }
+
+// NB These are scancodes on a scandinavian layout!
+enum Key(u16) {
+    KEY_1 = 0x2, KEY_2 = 0x3, KEY_3 = 0x4, KEY_4 = 0x5, KEY_5 = 0x6,
+    KEY_6 = 0x7, KEY_7 = 0x8, KEY_8 = 0x9, KEY_9 = 0xa, KEY_0 = 0xb,
+
+    Q = 0x10, W = 0x11, E = 0x12, R = 0x13, T = 0x14, Y = 0x15, U = 0x16, I = 0x17, O = 0x18, P = 0x19,
+    A = 0x1e, S = 0x1f, D = 0x20, F = 0x21, G = 0x22, H = 0x23, J = 0x24, K = 0x25, L = 0x26, 
+    Z = 0x2c, X = 0x2d, C = 0x2e, V = 0x2f, B = 0x30, N = 0x31, M = 0x32,
+    AE = 0x28, OE = 0x27, AA = 0x1a,
+
+    COMMA = 0x33, DOT = 0x34, HYPHEN = 0x35,
+    STAR = 0x2b, CARET = 0x1b, BAR = 0x29,
+
+    SPACE = 0x39,
+    ESCAPE = 0x1, 
+    TAB = 0xf,
+    RETURN = 0x1c,
+    BACK = 0xe,
+
+    L_SHIFT = 0x2a,
+    L_CTRL  = 0x1d,
+    L_ALT   = 0x38,
+    R_SHIFT = 0x36,
+    R_CTRL  = 0x11d,
+    R_ALT   = 0x138,
+
+    INSERT = 0x152,  HOME = 0x147, PAGEUP = 0x149,
+    DELETE = 0x153,  END = 0x14f,  PAGEDOWN = 0x151,
+    RIGHT = 0x14d, LEFT = 0x14b, DOWN = 0x150, UP = 0x148,
+
+    F1 = 0x3b, F2 = 0x3c, F3 = 0x3d, F4 = 0x3e,  F5 = 0x3f,  F6 = 0x40,
+    F7 = 0x41, F8 = 0x42, F9 = 0x43, F10 = 0x44, F11 = 0x57, F12 = 0x58,
+
+    MAX_KEY = 0x1ff, // NB this is the largest scancode windows can pass us
+}
+
+let gl32_lib = LoadLibraryA("opengl32.dll".data);
+fn get_gl_proc_address(name: *u8) -> *void {
+    let address = wglGetProcAddress(name);
+
+    let error_code = i64(address);
+    if (error_code >= -1 && error_code <= 3) {
+        address = GetProcAddress(gl32_lib, name);
+    }
+
+    return address;
+}
+

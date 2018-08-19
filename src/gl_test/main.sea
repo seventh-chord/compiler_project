@@ -1,11 +1,13 @@
 
 import "gl.sea";
+import "core.sea";
+import window "window.sea";
 
 fn main() {
     let arena: Arena;
 
-    open_window();
-    set_vsync(true); // NB setting to false will make the screen flash crazily
+    window::open();
+    window::set_vsync(true); // NB setting to false will make the screen flash crazily
 
     let shader = load_shader(vert_source, geom_source, frag_source);
     let shader_uniform_view_size = glGetUniformLocation(shader, "view_size".data);
@@ -13,7 +15,7 @@ fn main() {
     let shader_uniform_offset    = glGetUniformLocation(shader, "offset".data);
 
     let draw_group = draw_group_init();
-    let framebuffer = framebuffer_init(8, window_width, window_height);
+    let framebuffer = framebuffer_init(8, window::width, window::height);
 
     let detective_mesh, pipe_mesh: *Mesh;
     {
@@ -39,13 +41,13 @@ fn main() {
     const MIN_VIEW_WIDTH = 10.0;
     let view_pos, view_size: v2;
     
-    for !close_window_requested {
+    for !window::close_requested {
         let dt = 1.0 / 60.0;
 
-        poll_events();
-        if key_pressed(Key::ESCAPE) { close_window_requested = true; }
+        window::poll_events();
+        if window::key_pressed(window::Key::ESCAPE) { window::close_requested = true; }
 
-        let aspect = f32(window_width) / f32(window_height);
+        let aspect = f32(window::width) / f32(window::height);
         if aspect > 1.0 {
             view_size = { MIN_VIEW_WIDTH*aspect, MIN_VIEW_WIDTH };
         } else {
@@ -55,10 +57,10 @@ fn main() {
 
         {
             let d: v2;
-            if key_down(Key::W) { d.x -= 1.0; d.y += 1.0; }
-            if key_down(Key::S) { d.x += 1.0; d.y -= 1.0; }
-            if key_down(Key::A) { d.x -= 1.0; d.y -= 1.0; }
-            if key_down(Key::D) { d.x += 1.0; d.y += 1.0; }
+            if window::key_down(window::Key::W) { d.x -= 1.0; d.y += 1.0; }
+            if window::key_down(window::Key::S) { d.x += 1.0; d.y -= 1.0; }
+            if window::key_down(window::Key::A) { d.x -= 1.0; d.y -= 1.0; }
+            if window::key_down(window::Key::D) { d.x += 1.0; d.y += 1.0; }
             if d.x != 0.0 || d.y != 0.0 {
                 d = scale_v2(normalize_v2(d), dt * 3.0);
                 detective_pos.x += d.x;
@@ -85,12 +87,12 @@ fn main() {
         draw_tile(&draw_group, { -1.0, +1.0, 0.0 }, Dir::X, 2);
 
 
-        if window_width > framebuffer.width || window_height > framebuffer.height {
-            framebuffer_grow(&framebuffer, window_width, window_height);
+        if window::width > framebuffer.width || window::height > framebuffer.height {
+            framebuffer_grow(&framebuffer, window::width, window::height);
         }
         framebuffer_bind(&framebuffer);
 
-        glViewport(0, 0, i32(window_width), i32(window_height));
+        glViewport(0, 0, i32(window::width), i32(window::height));
         glClearColor(0.99, 0.99, 0.87, 1.0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -107,13 +109,13 @@ fn main() {
         mesh_draw(pipe_mesh);
 
 
-        framebuffer_blit(&framebuffer, window_width, window_height);
-        swap_buffers();
+        framebuffer_blit(&framebuffer, window::width, window::height);
+        window::swap_buffers();
     }
 
     print("Exiting!\n");
-    close_window();
-    ExitProcess(0);
+    window::close();
+    exit();
 }
 
 // NB these are duplicated in vertex shader source
@@ -449,7 +451,7 @@ fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
             }
             print(" shader source\n");
             print(log_string);
-            ExitProcess(0);
+            exit();
         }
 
         return shader;
@@ -475,7 +477,7 @@ fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
 
         print("Error linking shader\n");
         print(log_string);
-        ExitProcess(0);
+        exit();
     }
 
     glDeleteShader(vertex);
@@ -561,777 +563,6 @@ fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
     }
 
     return first_mesh;
-}
-
-
-let wgl_swap_function: wglSwapIntervalEXT_Type;
-let window_handle: Handle;
-let gl_context: Handle;
-let device_context: Handle;
-let close_window_requested = false;
-let key_states: [enum_length(Key)]Key_State;
-let window_width, window_height: i64;
-
-fn open_window() {
-    print("Creating window and initializing OpenGL\n");
-
-    let class_name  = "help im trapped in a window class factory";
-    let window_name = "Sea window test";
-
-    let instance = GetModuleHandleA(null);
-
-    let window_class_description = Window_Class {
-        style: 32, // CS_OWNDC
-        window_procedure: &event_callback,
-        instance: instance,
-        class_name: class_name.data,
-    };
-    let window_class = RegisterClassA(&window_class_description);
-    assert(window_class != 0, "Failed to register window class");
-
-    window_handle = CreateWindowExA(
-        0, class_name.data, window_name.data,
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-        null, null, instance, null
-    );
-    assert(window_handle != null, "Couldn't open window");
-
-    device_context = GetDC(window_handle);
-    let pixel_format_description = Pixel_Format_Descriptor {
-        size: u16(size_of(Pixel_Format_Descriptor)),
-        version: 1,
-        flags: PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
-        pixel_type: PFD_TYPE_RGBA,
-        color_bits: 24,
-        alpha_bits: 8,
-        layer_type: PFD_MAIN_PLANE,
-    };
-    let i = ChoosePixelFormat(device_context, &pixel_format_description);
-    assert(SetPixelFormat(device_context, i, &pixel_format_description) != 0, "Couldn't set pixel format");
-
-    assert(gl32_lib != null, "Couldn't load opengl32.dll");
-
-    let legacy_gl_context = wglCreateContext(device_context);
-    wglMakeCurrent(device_context, legacy_gl_context);
-
-    // NB this is only the subset of extensions I care about
-    enum WGL_Extensions {
-        WGL_ARB_create_context,
-        WGL_ARB_create_context_profile,
-        WGL_EXT_swap_control
-    }
-    let has_extensions: [enum_length(WGL_Extensions)]bool;
-
-    {
-        let wglGetExtensionsStringARB = cast(wglGetExtensionsStringARB_Type, get_gl_proc_address("wglGetExtensionsStringARB".data));
-        assert(wglGetExtensionsStringARB != null, "WGL_ARB_extensions_string is not supported");
-        let extensions = wglGetExtensionsStringARB(device_context);
-
-        let substring = extensions;
-        let length = 0;
-        for (*extensions != 0) {
-            if (*extensions == ' ') {
-                let string = String { substring, length };
-
-                for e : 0..enum_length(WGL_Extensions) {
-                    let extension_name = enum_member_name(cast(WGL_Extensions, e));
-                    if string_cmp(extension_name, string) {
-                        has_extensions[e] = true;
-                    }
-                }
-
-                for (*extensions == ' ') { extensions += 1; }
-
-                substring = extensions;
-                length = 0;
-            } else {
-                extensions += 1;
-                length += 1;
-            }
-        }
-
-        print("Detected GL extensions: ");
-        for e : 0..enum_length(WGL_Extensions) {
-            if (has_extensions[e]) {
-                if e > 0 { print(", "); }
-                print(enum_member_name(cast(WGL_Extensions, e)));
-            }
-        }
-
-        print("\n");
-    }
-
-    assert(
-        has_extensions[WGL_Extensions::WGL_ARB_create_context] && has_extensions[WGL_Extensions::WGL_ARB_create_context_profile],
-        "Missing extensions WGL_ARB_create_context or WGL_ARB_create_context_profile",
-    );
-    let wglCreateContextAttribsARB = cast(wglCreateContextAttribsARB_Type, get_gl_proc_address("wglCreateContextAttribsARB".data));
-
-    let context_attributes = []i32 {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
-        WGL_CONTEXT_FLAGS_ARB, 0,
-        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-        0,
-    };
-    gl_context = wglCreateContextAttribsARB(device_context, null, &context_attributes);
-    assert(gl_context != null, "Could not create modern GL context.");
-
-    wglDeleteContext(legacy_gl_context);
-    wglMakeCurrent(device_context, gl_context);
-
-    wgl_swap_function = null;
-    if has_extensions[WGL_Extensions::WGL_EXT_swap_control] {
-        wgl_swap_function = cast(wglSwapIntervalEXT_Type, get_gl_proc_address("wglSwapIntervalEXT".data));
-        assert(wgl_swap_function != null, "No wglSwapIntervalEXT, even though WGL_EXT_swap_control is supported");
-    }
-
-    load_gl(&get_gl_proc_address);
-
-    print("Showing window!\n");
-    ShowWindow(window_handle, SW_SHOW);
-
-    close_window_requested = false;
-}
-
-fn swap_buffers() {
-    SwapBuffers(device_context);
-}
-
-fn close_window() {
-    wglDeleteContext(gl_context);
-    DestroyWindow(window_handle);
-}
-
-fn poll_events() {
-    let message: Window_Message;
-
-    for key : 0..enum_length(Key) {
-        if key_states[key] == Key_State::Pressed  { key_states[key] = Key_State::Down; }
-        if key_states[key] == Key_State::Released { key_states[key] = Key_State::Up; }
-    }
-
-    for {
-        let result = PeekMessageA(&message, window_handle, 0, 0, PM_REMOVE);
-
-        if result > 0 {
-            TranslateMessage(&message);
-            DispatchMessageA(&message);
-        } else {
-            break;
-        }
-    }
-}
-
-fn key_down(key: Key) -> bool {
-    return key_states[key] == Key_State::Down || key_states[key] == Key_State::Pressed;
-}
-
-fn key_pressed(key: Key) -> bool {
-    return key_states[key] == Key_State::Pressed;
-}
-
-// This is 'WNDPROC'
-fn event_callback(window: Handle, message: u32, w: u64, l: i64) -> i64 {
-    switch message {
-        WM_SIZE: {
-            let new_width  = l & 0xffff;
-            let new_height = (l >> 16) & 0xffff;
-
-            if new_width > 0 && new_height > 0 {
-                window_width = new_width;
-                window_height = new_height;
-            }
-        }
-
-        WM_CLOSE: close_window_requested = true;
-
-        WM_KEYDOWN, WM_KEYUP:
-        {
-            let scancode = (l >> 16) & 0x1ff;
-            let down = message == WM_KEYDOWN;
-            assert(scancode < enum_length(Key), "Invalid scancode\n");
-
-            key_states[scancode] = down? Key_State::Pressed : Key_State::Released;
-        }
-
-        WM_CHAR: {}
-        WM_INPUT: {} // For raw input
-        WM_MOUSEWHEEL: {}
-        WM_MOUSEMOVE:  {}
-
-        WM_LBUTTONDOWN: {}
-        WM_LBUTTONUP:   {}
-        WM_MBUTTONDOWN: {}
-        WM_MBUTTONUP:   {}
-        WM_RBUTTONDOWN: {}
-        WM_RBUTTONUP:   {}
-        
-        _: return DefWindowProcA(window, message, w, l);
-    }
-
-    return 0;
-}
-
-
-fn set_vsync(vsync: bool) {
-    if wgl_swap_function != null {
-        wgl_swap_function(vsync? 1 : 0);
-    }
-}
-
-enum Key_State(u8) { Up, Released, Down, Pressed }
-
-// NB These are scancodes on a scandinavian layout!
-enum Key(u16) {
-    KEY_1 = 0x2, KEY_2 = 0x3, KEY_3 = 0x4, KEY_4 = 0x5, KEY_5 = 0x6,
-    KEY_6 = 0x7, KEY_7 = 0x8, KEY_8 = 0x9, KEY_9 = 0xa, KEY_0 = 0xb,
-
-    Q = 0x10, W = 0x11, E = 0x12, R = 0x13, T = 0x14, Y = 0x15, U = 0x16, I = 0x17, O = 0x18, P = 0x19,
-    A = 0x1e, S = 0x1f, D = 0x20, F = 0x21, G = 0x22, H = 0x23, J = 0x24, K = 0x25, L = 0x26, 
-    Z = 0x2c, X = 0x2d, C = 0x2e, V = 0x2f, B = 0x30, N = 0x31, M = 0x32,
-    AE = 0x28, OE = 0x27, AA = 0x1a,
-
-    COMMA = 0x33, DOT = 0x34, HYPHEN = 0x35,
-    STAR = 0x2b, CARET = 0x1b, BAR = 0x29,
-
-    SPACE = 0x39,
-    ESCAPE = 0x1, 
-    TAB = 0xf,
-    RETURN = 0x1c,
-    BACK = 0xe,
-
-    L_SHIFT = 0x2a,
-    L_CTRL  = 0x1d,
-    L_ALT   = 0x38,
-    R_SHIFT = 0x36,
-    R_CTRL  = 0x11d,
-    R_ALT   = 0x138,
-
-    INSERT = 0x152,  HOME = 0x147, PAGEUP = 0x149,
-    DELETE = 0x153,  END = 0x14f,  PAGEDOWN = 0x151,
-    RIGHT = 0x14d, LEFT = 0x14b, DOWN = 0x150, UP = 0x148,
-
-    F1 = 0x3b, F2 = 0x3c, F3 = 0x3d, F4 = 0x3e,  F5 = 0x3f,  F6 = 0x40,
-    F7 = 0x41, F8 = 0x42, F9 = 0x43, F10 = 0x44, F11 = 0x57, F12 = 0x58,
-
-    MAX_KEY = 0x1ff, // NB this is the largest scancode windows can pass us
-}
-
-typedef Handle = *void;
-typedef Atom = u16;
-typedef Window_Procedure = *fn(window: Handle, a: u32, b: u64, c: i64) -> i64;
-
-struct Window_Class {
-    style: u32;
-    window_procedure: Window_Procedure;
-    cbClsExtra: i32;
-    cbWndExtra: i32;
-    instance: Handle;
-    icon: Handle;
-    cursor: Handle;
-    background: Handle;
-    menu_name: *u8;
-    class_name: *u8;
-}
-
-struct Pixel_Format_Descriptor {
-    size: u16;
-    version: u16;
-    flags: u32;
-    pixel_type: u8;
-    color_bits: u8;
-
-    red_bits,   red_shift: u8;
-    green_bits, green_shift: u8;
-    blue_bits,  blue_shift: u8;
-    alpha_bits, alpha_shift: u8;
-
-    accum_bits: u8;
-    accum_red_bits: u8;
-    accum_green_bits: u8;
-    accum_blue_bits: u8;
-    accum_alpha_bits: u8;
-
-    depth_bits: u8;
-    stencil_bits: u8;
-
-    aux_buffers: u8;
-    layer_type: u8;
-    reserved: u8;
-    layer_mask: u32;
-    visible_mask: u32;
-    damage_mask: u32;
-}
-
-struct Window_Message {
-    window: Handle;
-    message: u32;
-    w: u64;
-    l: i64;
-    time: u32;
-    pt: Window_Message_Point;
-}
-
-struct Window_Message_Point { x, y: i32; }
-
-extern "kernel32.lib" {
-    fn ExitProcess(exit_code: u32);
-    fn CloseHandle(handle: Handle) -> i32;
-    fn GetLastError() -> u32;
-    fn GetStdHandle(key: u32) -> u64;
-    fn CreateFileA(
-        file_name: *u8,
-        access, share_mode: u32,
-        security_attributes: *void,
-        creation_disposition: u32,
-        flags_and_attributes: u32,
-        template_file: Handle,
-    ) -> Handle;
-    fn GetFileSizeEx(file: Handle, size: *i64) -> i32;
-    fn ReadFile(file: Handle, buffer: *void, to_read: u32, read: *u32, overlapped: *void) -> i32;
-    fn WriteFile(file: u64, buffer: *u8, length: u32, written: *u32, overlapped: *void);
-    fn GetProcessHeap() -> u64;
-    fn HeapAlloc(heap: u64, flags: u32, bytes: u64) -> *void;
-    fn HeapFree(heap: u64, flags: u32, data: *void) -> i32;
-    fn GetModuleHandleA(name: *u8) -> Handle;
-    fn LoadLibraryA(name: *u8) -> Handle;
-    fn GetProcAddress(library: Handle, name: *u8) -> *fn();
-    fn Sleep(millis: u32);
-}
-
-extern "user32.lib" {
-    fn RegisterClassA(class: *Window_Class) -> Atom;
-    fn CreateWindowExA(
-        ex_style: u32,
-        class_name, window_name: *u8,
-        style: u32,
-        x, y, width, height: i32,
-        parent, menu, instance: Handle,
-        param: *void,
-    ) -> Handle;
-    fn GetDC(window: Handle) -> Handle;
-    fn DefWindowProcA(window: Handle, msg: u32, w: u64, l: i64) -> i64;
-    fn ShowWindow(window: Handle, cmd: i32) -> i32;
-    fn DestroyWindow(window: Handle) -> i32;
-    fn PeekMessageA(
-        message: *Window_Message,
-        window: Handle,
-        filter_min, filter_max: u32,
-        remove_message: u32,
-    ) -> i32;
-    fn TranslateMessage(message: *Window_Message) -> i32;
-    fn DispatchMessageA(message: *Window_Message) -> i64;
-}
-
-extern "gdi32.lib" {
-    fn ChoosePixelFormat(device_context: Handle, pfd: *Pixel_Format_Descriptor) -> i32;
-    fn SetPixelFormat(device_context: Handle, index: i32, pfd: *Pixel_Format_Descriptor) -> i32;
-    fn SwapBuffers(device_context: Handle) -> i32;
-}
-
-extern "opengl32.lib" {
-    fn wglCreateContext(device_context: Handle) -> Handle;
-    fn wglDeleteContext(gl_context: Handle) -> i32;
-    fn wglMakeCurrent(device_context: Handle, gl_context: Handle) -> i32;
-    fn wglGetProcAddress(name: *u8) -> *fn();
-}
-
-typedef wglGetExtensionsStringARB_Type  = *fn(device_context: Handle) -> *u8;
-typedef wglCreateContextAttribsARB_Type = *fn(device_context: Handle, gl_context: Handle, attributes: *i32) -> Handle;
-typedef wglSwapIntervalEXT_Type         = *fn(interval: i32) -> i32;
-
-const GENERIC_READ    = 0x80000000;
-const GENERIC_WRITE   = 0x40000000;
-const GENERIC_EXECUTE = 0x20000000;
-const GENERIC_ALL     = 0x10000000;
-
-const FILE_SHARE_READ   = 0x1;
-const FILE_SHARE_WRITE  = 0x2;
-const FILE_SHARE_DELETE = 0x4;
-
-const CREATE_NEW        = 1;
-const CREATE_ALWAYS     = 2;
-const OPEN_EXISTING     = 3;
-const OPEN_ALWAYS       = 4;
-const TRUNCATE_EXISTING = 5;
-
-const INVALID_HANDLE_VALUE  = cast(Handle, -1);
-const FILE_ATTRIBUTE_NORMAL = 0x80;
-
-const WS_OVERLAPPED   = 0x00000000;
-const WS_CAPTION      = 0x00C00000;
-const WS_SYSMENU      = 0x00080000;
-const WS_THICKFRAME   = 0x00040000;
-const WS_MINIMIZEBOX  = 0x00020000;
-const WS_MAXIMIZEBOX  = 0x00010000;
-const WS_POPUP        = 0x80000000;
-const WS_CHILD        = 0x40000000;
-const WS_MINIMIZE     = 0x20000000;
-const WS_VISIBLE      = 0x10000000;
-const WS_DISABLED     = 0x08000000;
-const WS_CLIPSIBLINGS = 0x04000000;
-const WS_CLIPCHILDREN = 0x02000000;
-const WS_MAXIMIZE     = 0x01000000;
-const WS_BORDER       = 0x00800000;
-const WS_DLGFRAME     = 0x00400000;
-const WS_VSCROLL      = 0x00200000;
-const WS_HSCROLL      = 0x00100000;
-const WS_GROUP        = 0x00020000;
-const WS_TABSTOP      = 0x00010000;
-
-const WS_OVERLAPPEDWINDOW =
-    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
-    WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-
-const CW_USEDEFAULT   = 0x80000000;
-
-const PFD_DRAW_TO_WINDOW = 0x00000004;
-const PFD_SUPPORT_OPENGL = 0x00000020;
-const PFD_DOUBLEBUFFER   = 0x00000001;
-const PFD_TYPE_RGBA      = 0;
-const PFD_MAIN_PLANE     = 0;
-
-const WGL_CONTEXT_MAJOR_VERSION_ARB    = 0x2091;
-const WGL_CONTEXT_MINOR_VERSION_ARB    = 0x2092;
-const WGL_CONTEXT_FLAGS_ARB            = 0x2094;
-const WGL_CONTEXT_PROFILE_MASK_ARB     = 0x9126;
-const WGL_CONTEXT_CORE_PROFILE_BIT_ARB = 0x00000001;
-
-const SW_HIDE            = 0;
-const SW_SHOWNORMAL      = 1;
-const SW_NORMAL          = 1;
-const SW_SHOWMINIMIZED   = 2;
-const SW_SHOWMAXIMIZED   = 3;
-const SW_MAXIMIZE        = 3;
-const SW_SHOWNOACTIVATE  = 4;
-const SW_SHOW            = 5;
-const SW_MINIMIZE        = 6;
-const SW_SHOWMINNOACTIVE = 7;
-const SW_SHOWNA          = 8;
-const SW_RESTORE         = 9;
-const SW_SHOWDEFAULT     = 10;
-const SW_FORCEMINIMIZE   = 11;
-
-const WM_NULL               = 0x0000;
-const WM_CREATE             = 0x0001;
-const WM_DESTROY            = 0x0002;
-const WM_MOVE               = 0x0003;
-const WM_SIZE               = 0x0005;
-const WM_ACTIVATE           = 0x0006;
-const WA_INACTIVE           = 0;
-const WA_ACTIVE             = 1;
-const WA_CLICKACTIVE        = 2;
-const WM_SETFOCUS           = 0x0007;
-const WM_KILLFOCUS          = 0x0008;
-const WM_ENABLE             = 0x000a;
-const WM_SETREDRAW          = 0x000b;
-const WM_SETTEXT            = 0x000c;
-const WM_GETTEXT            = 0x000d;
-const WM_GETTEXTLENGTH      = 0x000e;
-const WM_PAINT              = 0x000f;
-const WM_CLOSE              = 0x0010;
-const WM_QUERYENDSESSION    = 0x0011;
-const WM_QUERYOPEN          = 0x0013;
-const WM_ENDSESSION         = 0x0016;
-const WM_QUIT               = 0x0012;
-const WM_ERASEBKGND         = 0x0014;
-const WM_SYSCOLORCHANGE     = 0x0015;
-const WM_SHOWWINDOW         = 0x0018;
-const WM_WININICHANGE       = 0x001a;
-const WM_SETTINGCHANGE      = WM_WININICHANGE;
-const WM_DEVMODECHANGE      = 0x001b;
-const WM_ACTIVATEAPP        = 0x001c;
-const WM_FONTCHANGE         = 0x001d;
-const WM_TIMECHANGE         = 0x001e;
-const WM_CANCELMODE         = 0x001f;
-const WM_SETCURSOR          = 0x0020;
-const WM_MOUSEACTIVATE      = 0x0021;
-const WM_CHILDACTIVATE      = 0x0022;
-const WM_QUEUESYNC          = 0x0023;
-const WM_PAINTICON          = 0x0026;
-const WM_ICONERASEBKGND     = 0x0027;
-const WM_NEXTDLGCTL         = 0x0028;
-const WM_SPOOLERSTATUS      = 0x002a;
-const WM_DRAWITEM           = 0x002b;
-const WM_MEASUREITEM        = 0x002c;
-const WM_DELETEITEM         = 0x002d;
-const WM_VKEYTOITEM         = 0x002e;
-const WM_CHARTOITEM         = 0x002f;
-const WM_SETFONT            = 0x0030;
-const WM_GETFONT            = 0x0031;
-const WM_SETHOTKEY          = 0x0032;
-const WM_GETHOTKEY          = 0x0033;
-const WM_QUERYDRAGICON      = 0x0037;
-const WM_COMPAREITEM        = 0x0039;
-const WM_GETOBJECT          = 0x003d;
-const WM_COMPACTING         = 0x0041;
-const WM_COMMNOTIFY         = 0x0044;
-const WM_WINDOWPOSCHANGING  = 0x0046;
-const WM_WINDOWPOSCHANGED   = 0x0047;
-const WM_POWER              = 0x0048;
-const WM_NOTIFY             = 0x004E;
-const WM_INPUTLANGCHANGEREQUEST = 0x0050;
-const WM_INPUTLANGCHANGE    = 0x0051;
-const WM_TCARD              = 0x0052;
-const WM_HELP               = 0x0053;
-const WM_USERCHANGED        = 0x0054;
-const WM_NOTIFYFORMAT       = 0x0055;
-const NFR_ANSIULT           = 1;
-const NFR_UNICODEULT        = 2;
-const NF_QUERYAM            = 3;
-const NF_REQUERYAM          = 4;
-const WM_CONTEXTMENU        = 0x007B;
-const WM_STYLECHANGING      = 0x007C;
-const WM_STYLECHANGED       = 0x007D;
-const WM_DISPLAYCHANGE      = 0x007E;
-const WM_GETICON            = 0x007F;
-const WM_SETICON            = 0x0080;
-const WM_NCCREATE           = 0x0081;
-const WM_NCDESTROY          = 0x0082;
-const WM_NCCALCSIZE         = 0x0083;
-const WM_NCHITTEST          = 0x0084;
-const WM_NCPAINT            = 0x0085;
-const WM_NCACTIVATE         = 0x0086;
-const WM_GETDLGCODE         = 0x0087;
-const WM_SYNCPAINT          = 0x0088;
-const WM_NCMOUSEMOVE        = 0x00A0;
-const WM_NCLBUTTONDOWN      = 0x00A1;
-const WM_NCLBUTTONUP        = 0x00A2;
-const WM_NCLBUTTONDBLCLK    = 0x00A3;
-const WM_NCRBUTTONDOWN      = 0x00A4;
-const WM_NCRBUTTONUP        = 0x00A5;
-const WM_NCRBUTTONDBLCLK    = 0x00A6;
-const WM_NCMBUTTONDOWN      = 0x00A7;
-const WM_NCMBUTTONUP        = 0x00A8;
-const WM_NCMBUTTONDBLCLK    = 0x00A9;
-const WM_NCXBUTTONDOWN      = 0x00AB;
-const WM_NCXBUTTONUP        = 0x00AC;
-const WM_NCXBUTTONDBLCLK    = 0x00AD;
-const WM_INPUT_DEVICE_CHANGE = 0x00FE;
-const WM_INPUT              = 0x00FF;
-const WM_KEYFIRST           = 0x0100;
-const WM_KEYDOWN            = 0x0100;
-const WM_KEYUP              = 0x0101;
-const WM_CHAR               = 0x0102;
-const WM_DEADCHAR           = 0x0103;
-const WM_SYSKEYDOWN         = 0x0104;
-const WM_SYSKEYUP           = 0x0105;
-const WM_SYSCHAR            = 0x0106;
-const WM_SYSDEADCHAR        = 0x0107;
-const WM_UNICHAR            = 0x0109;
-const WM_KEYLAST            = 0x0109;
-const UNICODE_NOCHARAM      = 0xFFFF;
-const WM_IME_STARTCOMPOSITION = 0x010D;
-const WM_IME_ENDCOMPOSITION = 0x010E;
-const WM_IME_COMPOSITION    = 0x010F;
-const WM_IME_KEYLAST        = 0x010F;
-const WM_INITDIALOG         = 0x0110;
-const WM_COMMAND            = 0x0111;
-const WM_SYSCOMMAND         = 0x0112;
-const WM_TIMER              = 0x0113;
-const WM_HSCROLL            = 0x0114;
-const WM_VSCROLL            = 0x0115;
-const WM_INITMENU           = 0x0116;
-const WM_INITMENUPOPUP      = 0x0117;
-const WM_GESTURE            = 0x0119;
-const WM_GESTURENOTIFY      = 0x011A;
-const WM_MENUSELECT         = 0x011F;
-const WM_MENUCHAR           = 0x0120;
-const WM_ENTERIDLE          = 0x0121;
-const WM_MENURBUTTONUP      = 0x0122;
-const WM_MENUDRAG           = 0x0123;
-const WM_MENUGETOBJECT      = 0x0124;
-const WM_UNINITMENUPOPUP    = 0x0125;
-const WM_MENUCOMMAND        = 0x0126;
-const WM_CHANGEUISTATE      = 0x0127;
-const WM_UPDATEUISTATE      = 0x0128;
-const WM_QUERYUISTATE       = 0x0129;
-const UIS_SET               = 1;
-const UIS_CLEAR             = 2;
-const UIS_INITIALIZE        = 3;
-const UISF_HIDEFOCUS        = 0x1;
-const UISF_HIDEACCEL        = 0x2;
-const UISF_ACTIVE           = 0x4;
-const WM_CTLCOLORMSGBOX     = 0x0132;
-const WM_CTLCOLOREDIT       = 0x0133;
-const WM_CTLCOLORLISTBOX    = 0x0134;
-const WM_CTLCOLORBTN        = 0x0135;
-const WM_CTLCOLORDLG        = 0x0136;
-const WM_CTLCOLORSCROLLBAR  = 0x0137;
-const WM_CTLCOLORSTATIC     = 0x0138;
-const MN_GETHMENU           = 0x01E1;
-const WM_MOUSEFIRST         = 0x0200;
-const WM_MOUSEMOVE          = 0x0200;
-const WM_LBUTTONDOWN        = 0x0201;
-const WM_LBUTTONUP          = 0x0202;
-const WM_LBUTTONDBLCLK      = 0x0203;
-const WM_RBUTTONDOWN        = 0x0204;
-const WM_RBUTTONUP          = 0x0205;
-const WM_RBUTTONDBLCLK      = 0x0206;
-const WM_MBUTTONDOWN        = 0x0207;
-const WM_MBUTTONUP          = 0x0208;
-const WM_MBUTTONDBLCLK      = 0x0209;
-const WM_MOUSEWHEEL         = 0x020A;
-const WM_XBUTTONDOWN        = 0x020B;
-const WM_XBUTTONUP          = 0x020C;
-const WM_XBUTTONDBLCLK      = 0x020D;
-const WM_MOUSEHWHEEL        = 0x020E;
-const WM_MOUSELAST          = 0x020E;
-
-const PM_REMOVE             = 1;
-
-let gl32_lib = LoadLibraryA("opengl32.dll".data);
-fn get_gl_proc_address(name: *u8) -> *void {
-    let address = wglGetProcAddress(name);
-
-    let error_code = i64(address);
-    if (error_code >= -1 && error_code <= 3) {
-        address = GetProcAddress(gl32_lib, name);
-    }
-
-    return address;
-}
-
-fn string_cmp(a, b: String) -> bool {
-    if a.length != b.length { return false; }
-
-    for i : 0..a.length {
-        if a[i] != b[i] {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-let stdout_handle = GetStdHandle(u32(-11));
-
-fn print(string: String) {
-    let written: u32;
-    WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
-}
-
-fn print_u64(value: u64) {
-    let buffer: [30]u8;
-    let length = 0;
-
-    if value == 0 {
-        buffer[0] = '0';
-        length = 1;
-    } else {
-        let i: u64 = 0;
-        for value > 0 {
-            let char = u8(value % 10);
-            value = value / 10;
-
-            buffer[i] = '0' + char;
-            i += 1;
-            length += 1;
-        }
-        i -= 1;
-
-        let j: u64 = 0;
-        for j < i {
-            let temp = buffer[j];
-            buffer[j] = buffer[i];
-            buffer[i] = temp;
-
-            i -= 1;
-            j += 1;
-        }
-    }
-
-    let string = String { data: &buffer, length: length };
-    print(string);
-}
-
-fn assert(condition: bool, message: String) {
-    if (!condition) {
-        print("Assertion failed: ");
-        print(message);
-        print("\n");
-        ExitProcess(-1);
-    }
-}
-
-let process_heap = GetProcessHeap();
-
-fn alloc(bytes: i64) -> *u8 {
-    return HeapAlloc(process_heap, 0, u64(bytes));
-}
-
-fn free(mem: *u8) {
-    assert(HeapFree(process_heap, 0, mem) != 0, "Attempt to free invalid memory");
-}
-
-
-struct File {
-    error_code: u32;
-    data: *u8;
-    length: i64;
-}
-
-fn read_entire_file(file_name: *u8) -> File {
-    let file = CreateFileA(file_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
-    if file == INVALID_HANDLE_VALUE {
-        return { error_code: GetLastError() };
-    }
-
-    let file_size: i64;
-    if GetFileSizeEx(file, &file_size) == 0 {
-        return { error_code: GetLastError() };
-    }
-
-    let data = alloc(file_size);
-
-    let read: u32;
-    let success = ReadFile(file, data, u32(file_size), &read, null);
-    if (success == 0 || i64(read) != file_size) {
-        CloseHandle(file);
-        free(data);
-        return { error_code: GetLastError() };
-    }
-
-    CloseHandle(file);
-
-    return {
-        error_code: 0,
-        data: data,
-        length: file_size,
-    };
-}
-
-
-const ARENA_BLOCK_SIZE = 8*1024;
-
-struct Arena {
-    data: *u8;
-    length, capacity: i64;
-}
-
-fn arena_new(arena: *Arena, size: i64) -> *void {
-    if arena.data == null {
-        arena.data = alloc(ARENA_BLOCK_SIZE);
-        arena.capacity = ARENA_BLOCK_SIZE;
-        arena.length = 0;
-    }
-    assert(arena.length + size <= arena.capacity, "Out of memory in memory arena");
-
-    let result = arena.data + arena.length;
-    arena.length += size;
-    return result;
-}
-
-fn arena_clone_string(arena: *Arena, source: String) -> String {
-    let length = source.length;
-    let new_data = arena_new(arena, length);
-    let result = String { new_data, length };
-    for i : 0..length {
-        result[i] = source[i];
-    }
-    return result;
 }
 
 

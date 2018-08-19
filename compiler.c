@@ -1471,12 +1471,14 @@ typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 typedef struct Fn Fn;
 typedef struct Var Var;
+typedef struct Scope Scope;
 
 typedef struct Decl {
     enum {
         DECL_VAR = 0,
         DECL_FN = 1,
         DECL_TYPE = 2,
+        DECL_IMPORT = 3,
     } kind;
 
     u32 scope_pos;
@@ -1488,10 +1490,10 @@ typedef struct Decl {
         Fn *fn;
         Type *type;
         Type *def;
+        Scope *import_scope;
     };
 } Decl;
 
-typedef struct Scope Scope;
 struct Scope {
     Fn *fn;
     Scope *parent;
@@ -1500,6 +1502,7 @@ struct Scope {
     u32 decls_length, decls_allocated;
 
     u32 next_scope_pos; // incremented for each Decl or Stmt
+    bool typecheck_queued;
 };
 
 
@@ -1833,6 +1836,12 @@ typedef struct Compound_Member {
     };
 } Compound_Member;
 
+typedef struct Static_Access_Link Static_Access_Link;
+struct Static_Access_Link {
+    u8 *name;
+    Static_Access_Link *next;
+};
+
 #define EXPR_FLAG_UNRESOLVED  0x01
 #define EXPR_FLAG_ASSIGNABLE  0x02
 #define EXPR_FLAG_ADDRESSABLE 0x04
@@ -1849,7 +1858,8 @@ typedef enum Expr_Kind {
     EXPR_CAST,
     EXPR_SUBSCRIPT,
     EXPR_MEMBER_ACCESS, // a.b
-    EXPR_STATIC_MEMBER_ACCESS, // a::b
+    EXPR_ENUM_MEMBER_ACCESS,
+    EXPR_STATIC_ACCESS, // a::b::c::d, can be used for enums or imports
 
     EXPR_ADDRESS_OF_FUNCTION,
     EXPR_TYPE_INFO_OF_TYPE,
@@ -1945,10 +1955,11 @@ struct Expr { // 'typedef'd earlier!
         } member_access;
 
         struct {
-            // Both unions discriminated by EXPR_FLAG_UNRESOLVED
-            union { u8 *parent_name; Type *parent_type; };
-            union { u8 *member_name; u32 member_index; };
-        } static_member_access;
+            Type *type;
+            u32 member_index;
+        } enum_member_access;
+
+        Static_Access_Link static_access;
     };
 };
 
@@ -2222,11 +2233,15 @@ typedef struct Jump_Fixup {
     } jump_to;
 } Jump_Fixup;
 
+typedef struct Source_Import {
+    u8 *given_name, *inferred_path;
+    Scope *scope;
+} Source_Import;
 
 typedef struct Context {
     Arena arena, stack; // arena is for permanent storage, stack for temporary
 
-    u8 **source_names;
+    Source_Import *sources; // stretchy buffer
 
     String_Table string_table;
     struct {
@@ -2236,7 +2251,7 @@ typedef struct Context {
     u8 *builtin_names[BUILTIN_COUNT];
 
     // AST & intermediate representation
-    Scope global_scope;
+    Scope global_scope, preload_scope;
     Fn **all_fns; // generated in 'typecheck', stretchy buffer
     Global_Var *global_vars; // stretchy buffer
     Global_Let *global_lets; // stretchy buffer
@@ -2250,7 +2265,7 @@ typedef struct Context {
     u8 **lib_paths;
     u32 lib_path_count;
 
-    // Low level representation
+    // Low level representation, all stretchy buffers
     u8 *seg_text;
     u8 *seg_data;
     u8 *seg_rdata;
@@ -2270,17 +2285,31 @@ bool file_pos_is_greater(File_Pos *a, File_Pos *b) {
 }
 
 
-Decl *find_declaration(Scope *scope, u8 *interned_name, int kind) {
+#define DECL_ANY_KIND -1
+Decl *find_declaration(Context *context, Scope *scope, u8 *interned_name, int kind, bool check_nested) {
     while (true) {
         for (u32 i = 0; i < scope->decls_length; i += 1) {
             Decl *decl = &scope->decls[i];
-            if (decl->name == interned_name && decl->kind == kind) {
+            if (decl->name == interned_name && (decl->kind == kind || kind == DECL_ANY_KIND)) {
                 return decl;
+            }
+        }
+
+        if (check_nested) {
+            for (u32 i = 0; i < scope->decls_length; i += 1) {
+                Decl *decl = &scope->decls[i];
+                if (decl->kind == DECL_IMPORT && decl->name == null) {
+                    Decl *from_import = find_declaration(context, decl->import_scope, interned_name, kind, false);
+                    if (from_import != null) return from_import;
+                }
             }
         }
 
         if (scope->parent != null) {
             scope = scope->parent;
+            continue;
+        } else if (scope != &context->preload_scope) {
+            scope = &context->preload_scope;
             continue;
         } else {
             break;
@@ -2290,7 +2319,7 @@ Decl *find_declaration(Scope *scope, u8 *interned_name, int kind) {
     return null;
 }
 
-Var *find_var(Scope *scope, u8 *interned_name, u32 before_position) {
+Var *find_var(Context *context, Scope *scope, u8 *interned_name, u32 before_position, bool check_nested) {
     Scope *start_scope = scope;
 
     while (true) {
@@ -2312,9 +2341,21 @@ Var *find_var(Scope *scope, u8 *interned_name, u32 before_position) {
             }
         }
 
+        if (check_nested) {
+            for (u32 i = 0; i < scope->decls_length; i += 1) {
+                Decl *decl = &scope->decls[i];
+                if (decl->kind == DECL_IMPORT && decl->name == null) {
+                    Var *from_import = find_var(context, decl->import_scope, interned_name, before_position, false);
+                    if (from_import != null) return from_import;
+                }
+            }
+        }
+
         if (scope->parent != null) {
             scope = scope->parent;
             continue;
+        } else if (scope != &context->preload_scope) {
+            scope = &context->preload_scope;
         } else {
             break;
         }
@@ -2337,29 +2378,28 @@ u32 find_enum_member(Type *type, u8 *name) {
 }
 
 Decl *add_declaration(
-    Arena *arena, Scope *scope,
+    Context *context, Scope *scope,
     int kind, u8 *name, File_Pos pos,
     bool allow_shadowing
 ) {
     if (!allow_shadowing) {
-        for (u32 i = 0; i < scope->decls_length; i += 1) {
-            Decl *other_decl = &scope->decls[i];
-            if (other_decl->kind == kind && other_decl->name == name) {
-                u8 *kind_name;
-                switch (other_decl->kind) {
-                    case DECL_VAR:  kind_name = "variable"; break;
-                    case DECL_FN:   kind_name = "function"; break;
-                    case DECL_TYPE: kind_name = "type"; break;
-                    default: assert(false);
-                }
-
-                print_file_pos(&pos);
-                printf(
-                    "Redefinition of %s '%s'. First definition on line %u\n",
-                    kind_name, name, (u64) other_decl->pos.line
-                );
-                return null;
+        Decl *other_decl = find_declaration(context, scope, name, kind, true);
+        if (other_decl != null) {
+            u8 *kind_name;
+            switch (other_decl->kind) {
+                case DECL_VAR:    kind_name = "variable"; break;
+                case DECL_FN:     kind_name = "function"; break;
+                case DECL_TYPE:   kind_name = "type";     break;
+                case DECL_IMPORT: kind_name = "import";   break;
+                default: assert(false);
             }
+
+            print_file_pos(&pos);
+            printf(
+                "Redefinition of %s '%s'. First definition on line %u\n",
+                kind_name, name, (u64) other_decl->pos.line
+            );
+            return null;
         }
     }
 
@@ -2367,7 +2407,7 @@ Decl *add_declaration(
         u32 new_allocated = scope->decls_allocated * 2;
         if (new_allocated == 0) { new_allocated = 16; }
 
-        Decl *new_decls = (void*) arena_alloc(arena, new_allocated * sizeof(Decl));
+        Decl *new_decls = (void*) arena_alloc(&context->arena, new_allocated * sizeof(Decl));
         mem_copy((u8*) scope->decls, (u8*) new_decls, scope->decls_length * sizeof(Decl));
         scope->decls_allocated = new_allocated;
         scope->decls = new_decls;
@@ -3070,22 +3110,22 @@ void print_expr(Context *context, Expr *expr) {
             }
         } break;
 
-        case EXPR_STATIC_MEMBER_ACCESS: {
-            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                u8* parent_name = expr->static_member_access.parent_name;
-                u8* member_name = expr->static_member_access.member_name;
-                printf("<unresolved %s::%s>", parent_name, member_name);
-            } else {
-                Type* parent = expr->static_member_access.parent_type;
-                assert(parent->kind == TYPE_ENUM);
-
-                u8* parent_name = parent->enumeration.name;
-
-                u32 m = expr->static_member_access.member_index;
-                u8 *member_name = parent->enumeration.members[m].name;
-                printf("%s::%s", parent_name, member_name);
+        case EXPR_STATIC_ACCESS: {
+            printf("<unresolved ");
+            for (Static_Access_Link *link = &expr->static_access; link != null; link = link->next) {
+                printf(link->name);
+                if (link->next != null) printf("::");
             }
+            printf(">");
+        } break;
 
+        case EXPR_ENUM_MEMBER_ACCESS: {
+            Type *parent = expr->enum_member_access.type;
+            assert(parent->kind == TYPE_ENUM);
+
+            u32 m = expr->enum_member_access.member_index;
+            u8 *member_name = parent->enumeration.members[m].name;
+            printf("%s::%s", parent->enumeration.name, member_name);
         } break;
 
         case EXPR_TYPE_INFO_OF_TYPE: {
@@ -3365,6 +3405,57 @@ f64 parse_f64(u8* string, u64 length) {
     return value;
 }
 
+Fn *resolve_static_access_to_fn(Context *context, Scope *scope, Static_Access_Link *link, File_Pos *pos) {
+    u8 *scope_name = "the current scope";
+
+    for (; link != null; link = link->next) {
+        Decl *decl = find_declaration(context, scope, link->name, DECL_ANY_KIND, true);
+        if (decl == null) {
+            return null;
+        } else if (decl->kind == DECL_FN) {
+            return decl->fn;
+        } else if (decl->kind == DECL_IMPORT) {
+            scope = decl->import_scope;
+        } else {
+            return null;
+        }
+    }
+
+    return null;
+}
+
+bool parse_static_access(Context *context, Static_Access_Link *last, Token *t, u32 *length) {
+    Token *t_start = t;
+
+    while (true) {
+        Static_Access_Link *link = arena_new(&context->arena, Static_Access_Link);
+
+        if (t->kind != TOKEN_IDENTIFIER) {
+            print_file_pos(&t->pos);
+            printf("Expected identifier, but got ");
+            print_token(t);
+            printf("\n");
+            *length = t - t_start;
+            return false;
+        }
+        link->name = t->identifier;
+        t += 1;
+
+        last->next = link;
+        last = link;
+
+        if (t->kind == TOKEN_STATIC_ACCESS) {
+            t += 1;
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    *length = t - t_start;
+    return true;
+}
+
 Type *parse_primitive_name(Context *context, u8 *interned_name) {
     for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
         Type *type = &context->primitive_types[i];
@@ -3386,8 +3477,8 @@ Builtin_Fn parse_builtin_fn_name(Context *context, u8 *name) {
     return BUILTIN_INVALID;
 }
 
-Type *parse_user_type_name(Scope *scope, u8 *interned_name) {
-    Decl *decl = find_declaration(scope, interned_name, DECL_TYPE);
+Type *parse_user_type_name(Context *context, Scope *scope, u8 *interned_name) {
+    Decl *decl = find_declaration(context, scope, interned_name, DECL_TYPE, true);
     if (decl == null) {
         return null;
     } else {
@@ -3427,7 +3518,7 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
                 base_type = parse_primitive_name(context, t->identifier);
 
                 if (base_type == null) {
-                    base_type = parse_user_type_name(scope, t->identifier);
+                    base_type = parse_user_type_name(context, scope, t->identifier);
                 }
 
                 if (base_type == null) {
@@ -3682,7 +3773,7 @@ Type *parse_fn_signature(Context *context, Scope *scope, Token *t, u32 *length, 
                 var->local_index = fn->body.var_count;
                 fn->body.var_count += 1;
 
-                Decl *decl = add_declaration(&context->arena, &fn->body.scope, DECL_VAR, p->name, p->pos, false);
+                Decl *decl = add_declaration(context, &fn->body.scope, DECL_VAR, p->name, p->pos, false);
                 assert(decl != null);
                 decl->var  = var;
 
@@ -3856,7 +3947,7 @@ bool parse_struct_declaration(Context *context, Scope *scope, Token* t, u32* len
 
     *length = t - t_start;
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos, false);
+    Decl *decl = add_declaration(context, scope, DECL_TYPE, type->enumeration.name, declaration_pos, false);
     if (decl == null) return false;
     decl->type = type;
 
@@ -4094,7 +4185,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
         }
     }
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, type->enumeration.name, declaration_pos, false);
+    Decl *decl = add_declaration(context, scope, DECL_TYPE, type->enumeration.name, declaration_pos, false);
     if (decl == null) return false;
     decl->type = type;
 
@@ -4308,7 +4399,7 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                     } else if (t[1].kind == TOKEN_BRACKET_CURLY_OPEN && !stop_on_open_curly) {
                         File_Pos start_pos = t->pos;
 
-                        Type *type = parse_user_type_name(scope, t->identifier);
+                        Type *type = parse_user_type_name(context, scope, t->identifier);
                         if (type == null) {
                             type = arena_new(&context->arena, Type);
                             type->kind = TYPE_UNRESOLVED_NAME;
@@ -4330,32 +4421,27 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                         shunting_yard_push_expr(context, yard, expr);
 
                     } else if (t[1].kind == TOKEN_STATIC_ACCESS) {
-                        u8 *parent_name = t->identifier;
-
+                        u8 *first_name = t->identifier;
                         File_Pos start_pos = t->pos;
                         t += 2;
 
-                        if (t->kind != TOKEN_IDENTIFIER) {
-                            print_file_pos(&t->pos);
-                            printf("Expected struct name, but got ");
-                            print_token(t);
-                            printf("\n");
+                        Expr* expr = arena_new(&context->arena, Expr);
+                        expr->kind = EXPR_STATIC_ACCESS;
+                        expr->static_access.name = first_name;
+                        expr->pos = start_pos;
+
+                        Static_Access_Link *last = &expr->static_access;
+
+                        u32 chain_length = 0;
+                        bool success = parse_static_access(context, &expr->static_access, t, &chain_length);
+                        t += chain_length;
+
+                        if (!success) {
                             *length = t - t_start;
                             return null;
                         }
 
-                        u8 *member_name = t->identifier;
-                        t += 1;
-
-                        Expr* expr = arena_new(&context->arena, Expr);
-                        expr->kind = EXPR_STATIC_MEMBER_ACCESS;
-                        expr->static_member_access.parent_name = parent_name;
-                        expr->static_member_access.member_name = member_name;
-                        expr->flags |= EXPR_FLAG_UNRESOLVED;
-                        expr->pos = start_pos;
-
                         shunting_yard_push_expr(context, yard, expr);
-
                     } else {
                         u8 *name = t->identifier;
 
@@ -5308,7 +5394,7 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
             scope->fn->body.var_count += 1;
         }
 
-        Decl *decl = add_declaration(&context->arena, scope, DECL_VAR, entry->name, decl_pos, !(scope->fn == null || info->constant));
+        Decl *decl = add_declaration(context, scope, DECL_VAR, entry->name, decl_pos, !(scope->fn == null || info->constant));
         if (decl == null) return false;
         decl->var = var;
     }
@@ -5652,7 +5738,7 @@ Stmt* parse_stmts(Context *context, Scope *scope, Token *t, u32 *length, bool si
                     var->local_index = scope->fn->body.var_count;
                     scope->fn->body.var_count += 1;
 
-                    Decl *index_decl = add_declaration(&context->arena, &stmt->for_.scope, DECL_VAR, index_var_name, index_var_pos, true);
+                    Decl *index_decl = add_declaration(context, &stmt->for_.scope, DECL_VAR, index_var_name, index_var_pos, true);
                     assert(index_decl != null);
                     index_decl->var = var;
 
@@ -5989,7 +6075,7 @@ Fn *parse_fn(Context *context, Scope *scope, Token *t, u32 *length) {
     *length = t - t_start;
     if (!valid) return null;
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_FN, fn->name, declaration_pos, false);
+    Decl *decl = add_declaration(context, scope, DECL_FN, fn->name, declaration_pos, false);
     if (decl == null) return null;
     decl->fn = fn;
 
@@ -6031,7 +6117,7 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
 
     *length = t - t_start;
 
-    Decl *decl = add_declaration(&context->arena, scope, DECL_TYPE, name, declaration_pos, false);
+    Decl *decl = add_declaration(context, scope, DECL_TYPE, name, declaration_pos, false);
     if (decl == null) return false;
     decl->type = type;
 
@@ -6116,7 +6202,7 @@ bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32
 }
 
 
-bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_length);
+bool lex_and_parse_text(Context *context, Scope *scope, u8* file_name, u8* file, u32 file_length);
 
 bool build_ast(Context *context, u8* file_name) {
     init_keyword_names(context);
@@ -6125,36 +6211,38 @@ bool build_ast(Context *context, u8* file_name) {
 
     bool valid = true;
 
-    assert(lex_and_parse_text(context, "<preload>", preload_code_text, str_length(preload_code_text)));
+    assert(lex_and_parse_text(context, &context->preload_scope, "<preload>", preload_code_text, str_length(preload_code_text)));
 
     u8 *string_type_name = string_intern(&context->string_table, "String");
-    context->string_type = parse_user_type_name(&context->global_scope, string_type_name);
+    context->string_type = parse_user_type_name(context, &context->preload_scope, string_type_name);
     assert(context->string_type != null && context->string_type->kind == TYPE_STRUCT);
 
     u8 *type_kind_type_name = string_intern(&context->string_table, "Type_Kind");
-    context->type_info_type = parse_user_type_name(&context->global_scope, type_kind_type_name);
+    context->type_info_type = parse_user_type_name(context, &context->preload_scope, type_kind_type_name);
     assert(context->type_info_type != null && context->type_info_type->kind == TYPE_ENUM);
 
 
-    buf_push(context->source_names, file_name);
+    buf_push(context->sources, ((Source_Import) {
+        .given_name = file_name,
+        .inferred_path = file_name,
+        .scope = &context->global_scope,
+    }));
     u8 *source_folder = path_get_folder(&context->arena, file_name);
 
-    for (u32 i = 0; i < buf_length(context->source_names); i += 1) {
-        u8 *file_name = context->source_names[i];
-        if (i > 0) {
-            file_name = path_join(&context->arena, source_folder, file_name);
-        }
+    for (u32 i = 0; i < buf_length(context->sources); i += 1) {
+        Scope *import_scope = context->sources[i].scope;
+        u8 *import_path = context->sources[i].inferred_path;
 
         u8* file;
         u32 file_length;
 
-        IO_Result read_result = read_entire_file(file_name, &file, &file_length);
+        IO_Result read_result = read_entire_file(import_path, &file, &file_length);
         if (read_result != IO_OK) {
-            printf("Couldn't load \"%s\": %s\n", file_name, io_result_message(read_result));
+            printf("Couldn't load \"%s\": %s\n", import_path, io_result_message(read_result));
             return false;
         }
 
-        valid &= lex_and_parse_text(context, file_name, file, file_length);
+        valid &= lex_and_parse_text(context, import_scope, import_path, file, file_length);
 
         sc_free(file);
     }
@@ -6167,7 +6255,9 @@ bool build_ast(Context *context, u8* file_name) {
     }
 }
 
-bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_length) {
+bool lex_and_parse_text(Context *context, Scope *scope, u8 *file_name, u8 *file, u32 file_length) {
+    u8 *folder = null;
+
     bool valid = true;
 
     // Lex
@@ -6778,7 +6868,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
     while (t->kind != TOKEN_END_OF_STREAM && valid) switch (t->kind) {
         case TOKEN_KEYWORD_FN: {
             u32 length = 0;
-            Fn* fn = parse_fn(context, &context->global_scope, t, &length);
+            Fn* fn = parse_fn(context, scope, t, &length);
             t += length;
 
             if (fn == null) {
@@ -6792,13 +6882,19 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
         case TOKEN_KEYWORD_EXTERN: {
             u32 length = 0;
-            valid &= parse_extern(context, &context->global_scope, file_name, t, &length);
+            valid &= parse_extern(context, scope, file_name, t, &length);
             t += length;
         } break;
 
         case TOKEN_KEYWORD_IMPORT: {
             File_Pos pos = t->pos;
             t += 1;
+
+            u8 *subscope_name = null;
+            if (t->kind == TOKEN_IDENTIFIER) {
+                subscope_name = t->identifier;
+                t += 1;
+            }
 
             if (t->kind != TOKEN_STRING) {
                 print_file_pos(&pos);
@@ -6807,7 +6903,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
                 printf("\n");
                 valid = false;
             }
-            u8 *file_name = str_null_terminate(&context->arena, t->string.bytes, t->string.length);
+            u8 *import_name = str_null_terminate(&context->arena, t->string.bytes, t->string.length);
             t += 1;
 
             if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after import")) {
@@ -6815,12 +6911,38 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             }
             t += 1;
 
-            buf_push(context->source_names, file_name);
+            if (folder == null) folder = path_get_folder(&context->arena, file_name);
+            u8 *full_import_path = path_join(&context->arena, folder, import_name);
+
+
+            Scope *subscope = null;
+            buf_foreach (Source_Import, other_import, context->sources) {
+                if (str_cmp(other_import->inferred_path, full_import_path)) {
+                    subscope = other_import->scope;
+                }
+            }
+
+            if (subscope == null) {
+                subscope = arena_new(&context->arena, Scope);
+
+                buf_push(context->sources, ((Source_Import) {
+                    .given_name = import_name,
+                    .inferred_path = full_import_path,
+                    .scope = subscope,
+                }));
+            }
+
+            Decl *import_decl = add_declaration(context, scope, DECL_IMPORT, subscope_name, pos, subscope_name == null);
+            if (import_decl == null) {
+                valid = false;
+                break; // NB breaks out of switch
+            }
+            import_decl->import_scope = subscope;
         } break;
 
         case TOKEN_KEYWORD_TYPEDEF: {
             u32 length = 0;
-            valid &= parse_typedef(context, &context->global_scope, t, &length);
+            valid &= parse_typedef(context, scope, t, &length);
             t += length;
         } break;
 
@@ -6832,7 +6954,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             Var_Decl_Info info;
 
             u32 decl_length;
-            bool success = parse_variable_declaration(context, &context->global_scope, t, &decl_length, &info);
+            bool success = parse_variable_declaration(context, scope, t, &decl_length, &info);
             t += decl_length;
 
             if (!success) {
@@ -6840,7 +6962,7 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
             } else {
                 buf_push(context->global_lets, ((Global_Let) {
                     .pos = decl_pos,
-                    .scope = &context->global_scope,
+                    .scope = scope,
                     .vars = info.vars,
                     .var_count = info.var_count,
                     .expr = info.expr,
@@ -6850,13 +6972,13 @@ bool lex_and_parse_text(Context *context, u8* file_name, u8* file, u32 file_leng
 
         case TOKEN_KEYWORD_ENUM: {
             u32 length = 0;
-            valid &= parse_enum_declaration(context, &context->global_scope, t, &length);
+            valid &= parse_enum_declaration(context, scope, t, &length);
             t += length;
         } break;
 
         case TOKEN_KEYWORD_STRUCT: {
             u32 length = 0;
-            valid &= parse_struct_declaration(context, &context->global_scope, t, &length);
+            valid &= parse_struct_declaration(context, scope, t, &length);
             t += length;
         } break;
 
@@ -7078,7 +7200,7 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, u32 scope_pos, Typ
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
 
                 if (type->flags & TYPE_FLAG_UNRESOLVED) {
-                    Type *new = parse_user_type_name(scope, type->unresolved_name);
+                    Type *new = parse_user_type_name(context, scope, type->unresolved_name);
 
                     if (new == null) {
                         print_file_pos(pos);
@@ -7152,13 +7274,49 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, u32 scope_pos, Typ
 }
 
 
+bool fix_variable_expr(Context *context, Expr *expr, Type *solidify_to) {
+    assert(expr->kind == EXPR_VARIABLE && !(expr->flags & EXPR_FLAG_UNRESOLVED));
+
+    bool strong = true;
+    Var *var = expr->variable.var;
+
+    if (!(var->flags & VAR_FLAG_CONSTANT)) expr->flags |= EXPR_FLAG_ASSIGNABLE;
+    expr->flags |= EXPR_FLAG_ADDRESSABLE;
+
+    if (
+        (var->flags & VAR_FLAG_CONSTANT) &&
+        (var->flags & VAR_FLAG_LOOSE_TYPE) &&
+        (primitive_is_integer(solidify_to->kind) || solidify_to->kind == TYPE_VOID) &&
+        var->type->kind == TYPE_DEFAULT_INT
+    ) {
+        // NB we play a bit fast and loose here, by allowing constant integers without a specific type
+        // given to be used as any integer type (assuming that downcasts from the default integer type
+        // is a no-op). This simplifies using constants in c-libraries like opengl, which is particularly
+        // wierd about switching around the specific types it expects in function signatures, largely
+        // (I pressume) because C does a lot of casts implicitly.
+        static_assert(TYPE_DEFAULT_INT == TYPE_I64, "Need to potentially generate upcasts if this assert fails!");
+
+        if (solidify_to->kind == TYPE_VOID) {
+            expr->type = &context->primitive_types[TYPE_DEFAULT_INT];
+        } else {
+            expr->type = solidify_to;
+        }
+        strong = false;
+    } else {
+        expr->type = var->type;
+    }
+
+    return strong;
+}
+
+
 Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_pos, Expr* expr, Type* solidify_to) {
     bool strong = true;
 
     switch (expr->kind) {
         case EXPR_VARIABLE: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                Var *var = find_var(scope, expr->variable.unresolved_name, scope_pos);
+                Var *var = find_var(context, scope, expr->variable.unresolved_name, scope_pos, true);
 
                 if (var == null) {
                     u8 *var_name = expr->variable.unresolved_name;
@@ -7176,35 +7334,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
 
                 expr->variable.var = var;
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
-
-                if (!(var->flags & VAR_FLAG_CONSTANT)) expr->flags |= EXPR_FLAG_ASSIGNABLE;
-                expr->flags |= EXPR_FLAG_ADDRESSABLE;
             }
 
-            Var *var = expr->variable.var;
-
-            if (
-                (var->flags & VAR_FLAG_CONSTANT) &&
-                (var->flags & VAR_FLAG_LOOSE_TYPE) &&
-                (primitive_is_integer(solidify_to->kind) || solidify_to->kind == TYPE_VOID) &&
-                var->type->kind == TYPE_DEFAULT_INT
-            ) {
-                // NB we play a bit fast and loose here, by allowing constant integers without a specific type
-                // given to be used as any integer type (assuming that downcasts from the default integer type
-                // is a no-op). This simplifies using constants in c-libraries like opengl, which is particularly
-                // wierd about switching around the specific types it expects in function signatures, largely
-                // (I pressume) because C does a lot of casts implicitly.
-                static_assert(TYPE_DEFAULT_INT == TYPE_I64, "Need to potentially generate upcasts if this assert fails!");
-
-                if (solidify_to->kind == TYPE_VOID) {
-                    expr->type = &context->primitive_types[TYPE_DEFAULT_INT];
-                } else {
-                    expr->type = solidify_to;
-                }
-                strong = false;
-            } else {
-                expr->type = var->type;
-            }
+            strong = fix_variable_expr(context, expr, solidify_to);
         } break;
 
         case EXPR_LITERAL: {
@@ -7598,7 +7730,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
                 expr->unary.op == UNARY_ADDRESS_OF &&
                 expr->unary.inner->kind == EXPR_VARIABLE &&
                 (expr->unary.inner->flags & EXPR_FLAG_UNRESOLVED) &&
-                (find_var(scope, expr->unary.inner->variable.unresolved_name, scope_pos) == null)
+                (find_var(context, scope, expr->unary.inner->variable.unresolved_name, scope_pos, true) == null)
             ) {
                 // Special case: We are trying to take the address of a undefined variable, which means we might
                 // be trying to actually get a function pointer. We have to slightly modify the ast in this case.
@@ -7606,7 +7738,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
                 // functions and variables in the same namespace.
 
                 u8 *name = expr->unary.inner->variable.unresolved_name;
-                Decl *fn_decl = find_declaration(scope, name, DECL_FN);
+                Decl *fn_decl = find_declaration(context, scope, name, DECL_FN, true);
 
                 if (fn_decl != null) {
                     expr->kind = EXPR_ADDRESS_OF_FUNCTION;
@@ -7711,7 +7843,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
 
         case EXPR_CALL: {
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                Decl *fn_decl = find_declaration(scope, expr->call.unresolved_name, DECL_FN);
+                Decl *fn_decl = find_declaration(context, scope, expr->call.unresolved_name, DECL_FN, true);
 
                 if (fn_decl != null) {
                     Type *signature = fn_decl->fn->signature_type;
@@ -7721,7 +7853,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
 
                     expr->call.callee = fn_decl->fn;
                 } else {
-                    Var *var = find_var(scope, expr->call.unresolved_name, scope_pos);
+                    Var *var = find_var(context, scope, expr->call.unresolved_name, scope_pos, true);
 
                     if (var == null) {
                         print_file_pos(&expr->pos);
@@ -7743,8 +7875,20 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
                 expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
 
-            Type *callee_signature_type;
-            u8 *callee_name;
+            if (expr->call.pointer_call) {
+                if (expr->call.pointer_expr->kind == EXPR_STATIC_ACCESS) {
+                    Fn *callee = resolve_static_access_to_fn(context, scope, &expr->call.pointer_expr->static_access, &expr->pos);
+                    if (callee != null) {
+                        expr->call.pointer_call = false;
+                        expr->call.callee = callee;
+                    }
+                }
+            }
+
+
+
+            Type *callee_signature_type = null;
+            u8 *callee_name = null;
 
             if (expr->call.pointer_call) {
                 Typecheck_Expr_Result r = typecheck_expr(context, scope, scope_pos, expr->call.pointer_expr, &context->primitive_types[TYPE_VOID]);
@@ -7937,48 +8081,98 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
             if (bad_but_keep_on_going != TYPECHECK_EXPR_STRONG) return bad_but_keep_on_going;
         } break;
 
-        case EXPR_STATIC_MEMBER_ACCESS: {
-            if (expr->flags & EXPR_FLAG_UNRESOLVED) {
-                Type *parent = parse_user_type_name(scope, expr->static_member_access.parent_name);
+        case EXPR_STATIC_ACCESS: {
+            Scope *search_scope = scope;
+            u8 *search_scope_name = "the current scope";
 
-                if (parent == null) {
-                    u8 *name_string = expr->static_member_access.parent_name;
+            bool done = false;
+            for (Static_Access_Link *link = &expr->static_access; link != null && !done; link = link->next) {
+                Decl *decl = find_declaration(context, search_scope, link->name, DECL_ANY_KIND, true);
+
+                if (decl == null) {
                     print_file_pos(&expr->pos);
-                    printf("No such type in scope: '%s'\n", name_string);
+                    printf("No member '%s' in %s\n", link->name, search_scope_name);
                     return TYPECHECK_EXPR_BAD;
                 }
 
-                if (parent->kind != TYPE_ENUM) {
-                    print_file_pos(&expr->pos);
-                    printf("Can't use operator :: on non-enum type ");
-                    print_type(context, parent);
-                    printf("\n");
-                    return TYPECHECK_EXPR_BAD;
+                switch (decl->kind) {
+                    case DECL_VAR: {
+                        if (link->next != null) {
+                            print_file_pos(&expr->pos);
+                            printf("Can't use operator :: on variable '%s'\n", link->name);
+                            return TYPECHECK_EXPR_BAD;
+                        }
+
+                        Var *var = decl->var;
+
+                        expr->kind = EXPR_VARIABLE;
+                        expr->type = var->type;
+                        expr->variable.var = var;
+
+                        strong = fix_variable_expr(context, expr, solidify_to);
+
+                        done = true;
+                    } break;
+
+                    case DECL_FN: {
+                        print_file_pos(&expr->pos);
+                        printf("Can't reference a function here.\n", link->name);
+                        return TYPECHECK_EXPR_BAD;
+                    } break;
+
+                    case DECL_TYPE: {
+                        Type *type = decl->type;
+
+                        if (link->next == null) {
+                            print_file_pos(&expr->pos);
+                            printf("Can't reference a type here. Expected '%s::SOME_MEMBER_NAME'\n", link->name);
+                            return TYPECHECK_EXPR_BAD;
+                        }
+
+                        if (type->kind != TYPE_ENUM) {
+                            print_file_pos(&expr->pos);
+                            printf("Can't use operator :: on non-enum type ");
+                            print_type(context, type);
+                            printf("\n");
+                            return TYPECHECK_EXPR_BAD;
+                        }
+
+                        u8 *member_name = link->next->name;
+
+                        if (link->next->next != null) {
+                            print_file_pos(&expr->pos);
+                            printf("Can't use operator :: on enum member %s::%s\n", link->name, member_name);
+                            return TYPECHECK_EXPR_BAD;
+                        }
+
+                        u32 member_index = find_enum_member(type, member_name);
+                        if (member_index == U32_MAX) {
+                            print_file_pos(&expr->pos);
+                            print_type(context, type);
+                            printf(" has no member '%s'\n", member_name);
+                            return TYPECHECK_EXPR_BAD;
+                        }
+
+                        expr->kind = EXPR_ENUM_MEMBER_ACCESS;
+                        expr->enum_member_access.type = type;
+                        expr->enum_member_access.member_index = member_index;
+                        expr->type = type;
+
+                        done = true;
+                    } break;
+
+                    case DECL_IMPORT: {
+                        search_scope = decl->import_scope;
+                        search_scope_name = link->name;
+
+                        if (link->next == null) {
+                            print_file_pos(&expr->pos);
+                            printf("Can't directly reference a namespace, expected '::some_var_or_fn_name'\n");
+                            return TYPECHECK_EXPR_BAD;
+                        }
+                    } break;
                 }
-
-                u32 member_index = U32_MAX;
-                for (u32 i = 0; i < parent->enumeration.member_count; i += 1) {
-                    if (parent->enumeration.members[i].name == expr->static_member_access.member_name) {
-                        member_index = i;
-                        break;
-                    }
-                }
-
-                if (member_index == U32_MAX) {
-                    u8 *member_name = expr->static_member_access.member_name;
-                    print_file_pos(&expr->pos);
-                    print_type(context, parent);
-                    printf(" has no member '%s'\n", member_name);
-                    return TYPECHECK_EXPR_BAD;
-                }
-
-                expr->static_member_access.parent_type = parent;
-                expr->static_member_access.member_index = member_index;
-
-                expr->flags &= ~EXPR_FLAG_UNRESOLVED;
             }
-
-            expr->type = expr->static_member_access.parent_type;
         } break;
 
 
@@ -8022,8 +8216,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
             }
         } break;
 
+        case EXPR_ENUM_MEMBER_ACCESS:
         case EXPR_ADDRESS_OF_FUNCTION: {
-            // We only generate 'EXPR_ADDRESS_OF_FUNCTION' from within 'typecheck_expr',
+            // We only generate these expression kinds from within 'typecheck_expr',
             // so we don't need to do anything more if we get here, because that means we are
             // allready on a second pass (retrying because we had missing dependencies
             // on the first pass)
@@ -8267,11 +8462,11 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                             key->is_identifier = false;
                             key->expr = arena_new(&context->arena, Expr);
                             *key->expr = (Expr) {
-                                .kind = EXPR_STATIC_MEMBER_ACCESS,
+                                .kind = EXPR_ENUM_MEMBER_ACCESS,
                                 .type = automatch_enum,
                                 .pos = c->pos,
-                                .static_member_access = {
-                                    .parent_type = automatch_enum,
+                                .enum_member_access = {
+                                    .type = automatch_enum,
                                     .member_index = member_index,
                                 },
                             };
@@ -8279,7 +8474,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     }
 
                     if (key->is_identifier) {
-                        Var *key_var = find_var(scope, key->identifier, scope_pos);
+                        Var *key_var = find_var(context, scope, key->identifier, scope_pos, true);
 
                         if (key_var != null) {
                             if (key_var->flags & VAR_FLAG_GLOBAL) {
@@ -8951,11 +9146,11 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             return EVAL_OK;
         } break;
 
-        case EXPR_STATIC_MEMBER_ACCESS: {
+        case EXPR_ENUM_MEMBER_ACCESS: {
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
-            Type* type = expr->static_member_access.parent_type;
-            u32 member_index = expr->static_member_access.member_index;
+            Type *type = expr->enum_member_access.type;
+            u32 member_index = expr->enum_member_access.member_index;
             assert(type->kind == TYPE_ENUM);
 
             u64 member_value = type->enumeration.members[member_index].value;
@@ -9020,6 +9215,7 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
             return EVAL_DO_AT_RUNTIME;
         } break;
 
+        case EXPR_STATIC_ACCESS: assert(false); // All instances of this should be eliminated during typechecking
         default: assert(false); return EVAL_BAD;
     }
 }
@@ -9183,8 +9379,10 @@ typedef struct Typecheck_Item {
 } Typecheck_Item;
 
 typedef struct Typecheck_Queue {
+    // all members are stretchy buffers
+
     Fn **all_fns;
-    Typecheck_Item *items, *unresolved; // stretchy-buffer
+    Typecheck_Item *items, *unresolved;
 } Typecheck_Queue;
 
 
@@ -9397,6 +9595,9 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
 void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stmt *stmt);
 
 void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Scope *scope) {
+    if (scope->typecheck_queued == true) return;
+    scope->typecheck_queued = true;
+
     for (u32 i = 0; i < scope->decls_length; i += 1) {
         Decl *decl = &scope->decls[i];
 
@@ -9435,13 +9636,12 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                     },
                 }));
 
-                if (fn->kind == FN_KIND_NORMAL) {
-                    buf_push(queue->items, ((Typecheck_Item) {
-                        .kind = TYPECHECK_FN_BODY,
-                        .fn = fn,
-                    }));
+                buf_push(queue->items, ((Typecheck_Item) {
+                    .kind = TYPECHECK_FN_BODY,
+                    .fn = fn,
+                }));
 
-                    assert(fn->body.local_vars == null);
+                if (fn->kind == FN_KIND_NORMAL) {
                     fn->body.local_vars = (Var**) arena_alloc(&context->arena, fn->body.var_count * sizeof(Var*));
 
                     typecheck_queue_include_stmts(context, queue, fn->body.first_stmt);
@@ -9461,6 +9661,10 @@ void typecheck_queue_include_scope(Context *context, Typecheck_Queue *queue, Sco
                     assert(fn != null && fn->kind == FN_KIND_NORMAL && fn->body.local_vars != null);
                     fn->body.local_vars[var->local_index] = var;
                 }
+            } break;
+
+            case DECL_IMPORT: {
+                typecheck_queue_include_scope(context, queue, decl->import_scope);
             } break;
         }
     }
@@ -9501,6 +9705,8 @@ void typecheck_queue_include_stmts(Context *context, Typecheck_Queue *queue, Stm
 bool typecheck(Context *context) {
     Typecheck_Queue queue = {0};
     typecheck_queue_include_scope(context, &queue, &context->global_scope);
+    typecheck_queue_include_scope(context, &queue, &context->preload_scope);
+
     buf_foreach (Global_Let, global_let, context->global_lets) {
         buf_push(queue.items, ((Typecheck_Item) {
             .kind = TYPECHECK_GLOBAL_LET,
@@ -11574,12 +11780,14 @@ u32 machinecode_expr_reserves(Expr *expr) {
         case EXPR_VARIABLE:
         case EXPR_LITERAL:
         case EXPR_STRING_LITERAL:
-        case EXPR_STATIC_MEMBER_ACCESS:
+        case EXPR_ENUM_MEMBER_ACCESS:
         case EXPR_TYPE_INFO_OF_TYPE:
         case EXPR_TYPE_INFO_OF_VALUE:
         case EXPR_QUERY_TYPE_INFO:
         case EXPR_ADDRESS_OF_FUNCTION:
         {} break;
+
+        case EXPR_STATIC_ACCESS: assert(false);
 
         case EXPR_COMPOUND: {
             for (u32 i = 0; i < expr->compound.count; i += 1) {
@@ -12788,14 +12996,14 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
             }
         } break;
 
-        case EXPR_STATIC_MEMBER_ACCESS: {
+        case EXPR_ENUM_MEMBER_ACCESS: {
             if (place.kind == PLACE_NOWHERE) return;
 
             assert(!(expr->flags & EXPR_FLAG_UNRESOLVED));
 
-            Type* type = expr->static_member_access.parent_type;
+            Type* type = expr->enum_member_access.type;
             assert(type->kind == TYPE_ENUM);
-            u32 member_index = expr->static_member_access.member_index;
+            u32 member_index = expr->enum_member_access.member_index;
             u64 member_value = type->enumeration.members[member_index].value;
             u8 size = primitive_size_of(type->enumeration.value_primitive);
 
@@ -12911,6 +13119,8 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
             register_allocator_leave_frame(context, reg_allocator);
         } break;
+
+        case EXPR_STATIC_ACCESS: assert(false);
     }
 }
 
@@ -13686,7 +13896,7 @@ void build_machinecode(Context *context) {
     // Normal functions
     u8 *prolog = null; // stretchy-buffer, this is a huge hack :(
 
-    Decl *main_fn_decl = find_declaration(&context->global_scope, string_intern(&context->string_table, "main"), DECL_FN);
+    Decl *main_fn_decl = find_declaration(context, &context->global_scope, string_intern(&context->string_table, "main"), DECL_FN, false);
     if (main_fn_decl == null) panic("No main function");
     Fn *main_fn = main_fn_decl->fn;
     assert(main_fn->kind == FN_KIND_NORMAL);
@@ -14672,7 +14882,7 @@ bool write_executable(u8 *path, u8 *debug_path, Context *context) {
     image.size_of_initialized_data = data_length + rdata_length;
     image.size_of_uninitialized_data = 0;
 
-    Decl *main_fn_decl = find_declaration(&context->global_scope, string_intern(&context->string_table, "main"), DECL_FN);
+    Decl *main_fn_decl = find_declaration(context, &context->global_scope, string_intern(&context->string_table, "main"), DECL_FN, false);
     if (main_fn_decl == null) panic("No main function");
     Fn *main_fn = main_fn_decl->fn;
     assert(main_fn_decl->fn->kind == FN_KIND_NORMAL);
