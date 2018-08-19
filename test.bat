@@ -15,3 +15,5 @@ build\sea src\assorted\fourth.sea build\test4.exe -r
 build\sea src\link_test\backend.sea src\link_test\build\out.exe -r
 @echo.
 build\sea src\glfw_test\main.sea src\glfw_test\out.exe
+@echo.
+src\namespaces\build.bat

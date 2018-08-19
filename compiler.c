@@ -2145,7 +2145,7 @@ typedef struct Import_Index {
 } Import_Index;
 
 typedef struct Library_Import {
-    u8 *importing_source_file; // NB not interned in the string table
+    u8 *imported_from_folder;
     u8 *lib_name;
     u8 **function_names; // stretchy-buffer
 
@@ -2824,7 +2824,7 @@ u64 size_mask(u8 size) {
 // NB This currently just assumes we are trying to import a function. In the future we might want to support importing
 // other items, though we probably want to find an example of that first, so we know what we are doing!
 // 'library_name' and 'function_name' should be interned in the string table!
-Import_Index add_import(Context *context, u8 *source_path, u8 *library_name, u8 *function_name) {
+Import_Index add_import(Context *context, u8 *folder, u8 *library_name, u8 *function_name) {
     Import_Index index = {0};
 
     Library_Import* import = null;
@@ -2840,7 +2840,7 @@ Import_Index add_import(Context *context, u8 *source_path, u8 *library_name, u8 
 
         Library_Import new = {0};
         new.lib_name = library_name;
-        new.importing_source_file = source_path;
+        new.imported_from_folder = folder;
         buf_push(context->imports, new);
 
         import = buf_end(context->imports) - 1;
@@ -6118,7 +6118,7 @@ bool parse_typedef(Context *context, Scope *scope, Token *t, u32 *length) {
     return true;
 }
 
-bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32 *length) {
+bool parse_extern(Context *context, Scope *scope, u8 *source_folder, Token *t, u32 *length) {
     assert(t->kind == TOKEN_KEYWORD_EXTERN);
 
     Token *start = t;
@@ -6172,7 +6172,7 @@ bool parse_extern(Context *context, Scope *scope, u8 *source_path, Token *t, u32
                     printf("Function '%s' has a body, but functions inside 'extern' blocks can't have bodies\n", fn->name);
                     valid = false;
                 } else {
-                    Import_Index import_index = add_import(context, source_path, library_name, fn->name);
+                    Import_Index import_index = add_import(context, source_folder, library_name, fn->name);
                     fn->import_info.index = import_index;
                 }
 
@@ -6875,8 +6875,10 @@ bool lex_and_parse_text(Context *context, Scope *scope, u8 *file_name, u8 *file,
         } break;
 
         case TOKEN_KEYWORD_EXTERN: {
+            if (folder == null) folder = path_get_folder(&context->arena, file_name);
+
             u32 length = 0;
-            valid &= parse_extern(context, scope, file_name, t, &length);
+            valid &= parse_extern(context, scope, folder, t, &length);
             t += length;
         } break;
 
@@ -14391,8 +14393,7 @@ bool parse_library(Context *context, Library_Import* import) {
     arena_stack_push(&context->stack);
 
     u8 *raw_lib_name = import->lib_name;
-    u8 *source_path = import->importing_source_file;
-    u8 *source_folder = path_get_folder(&context->stack, source_path);
+    u8 *source_folder = import->imported_from_folder;
     u8 *path = path_join(&context->stack, source_folder, raw_lib_name);
 
     u8 *file;
