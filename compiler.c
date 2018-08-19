@@ -1506,6 +1506,14 @@ struct Scope {
 };
 
 
+typedef struct Static_Access_Link Static_Access_Link;
+struct Static_Access_Link {
+    u8 *name;
+    Static_Access_Link *next;
+};
+
+
+
 typedef struct Fn_Signature {
     bool has_return;
     bool return_by_reference; // otherwise return in RAX, which we can even do for structs. See reference/notes.md
@@ -1524,7 +1532,8 @@ struct Type {
 
     union {
         u8 *primitive_name;
-        u8 *unresolved_name;
+
+        Static_Access_Link unresolved;
 
         struct {
             u8 *name;
@@ -1835,12 +1844,6 @@ typedef struct Compound_Member {
         u32 member_index;
     };
 } Compound_Member;
-
-typedef struct Static_Access_Link Static_Access_Link;
-struct Static_Access_Link {
-    u8 *name;
-    Static_Access_Link *next;
-};
 
 #define EXPR_FLAG_UNRESOLVED  0x01
 #define EXPR_FLAG_ASSIGNABLE  0x02
@@ -2259,6 +2262,7 @@ typedef struct Context {
     Type **fn_signatures; // stretchy buffer
 
     Type primitive_types[TYPE_KIND_COUNT];
+    u8 *short_string_name;
     Type *void_pointer_type, *string_type, *type_info_type, *char_type;
     Type *void_fn_signature;
 
@@ -2925,7 +2929,12 @@ void print_type(Context *context, Type* type) {
             } break;
 
             case TYPE_UNRESOLVED_NAME: {
-                printf("<unresolved %s>", type->unresolved_name);
+                printf("<unresolved ");
+                for (Static_Access_Link *link = &type->unresolved; link != null; link = link->next) {
+                    printf(link->name);
+                    if (link->next != null) printf("::");
+                }
+                printf(">");
                 type = null;
             } break;
 
@@ -3400,15 +3409,13 @@ f64 parse_f64(u8* string, u64 length) {
     return value;
 }
 
-Fn *resolve_static_access_to_fn(Context *context, Scope *scope, Static_Access_Link *link, File_Pos *pos) {
-    u8 *scope_name = "the current scope";
-
+Decl *resolve_static_access(Context *context, Scope *scope, Static_Access_Link *link, File_Pos *pos, int kind) {
     for (; link != null; link = link->next) {
         Decl *decl = find_declaration(context, scope, link->name, DECL_ANY_KIND, true);
         if (decl == null) {
             return null;
-        } else if (decl->kind == DECL_FN) {
-            return decl->fn;
+        } else if (decl->kind == kind) {
+            return decl;
         } else if (decl->kind == DECL_IMPORT) {
             scope = decl->import_scope;
         } else {
@@ -3452,6 +3459,10 @@ bool parse_static_access(Context *context, Static_Access_Link *last, Token *t, u
 }
 
 Type *parse_primitive_name(Context *context, u8 *interned_name) {
+    if (interned_name == context->short_string_name) {
+        return context->string_type;
+    }
+
     for (u32 i = 0; i < TYPE_KIND_COUNT; i += 1) {
         Type *type = &context->primitive_types[i];
         if (type->primitive_name == interned_name) {
@@ -3500,21 +3511,38 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
     while (base_type == null) {
         switch (t->kind) {
             case TOKEN_IDENTIFIER: {
-                base_type = parse_primitive_name(context, t->identifier);
-
-                if (base_type == null) {
-                    Decl *decl = find_declaration(context, scope, t->identifier, DECL_TYPE, true);
-                    if (decl != null) base_type = decl->type;
-                }
-
-                if (base_type == null) {
+                if (t[1].kind == TOKEN_STATIC_ACCESS) {
                     base_type = arena_new(&context->arena, Type);
                     base_type->kind = TYPE_UNRESOLVED_NAME;
-                    base_type->unresolved_name = t->identifier;
+                    base_type->unresolved.name = t->identifier;
                     base_type->flags |= TYPE_FLAG_UNRESOLVED;
-                }
+                    t += 2;
+                    
+                    u32 chain_length;
+                    bool success = parse_static_access(context, &base_type->unresolved, t, &chain_length);
+                    t += chain_length;
 
-                t += 1;
+                    if (!success) {
+                        *length = t - t_start;
+                        return null;
+                    };
+                } else {
+                    base_type = parse_primitive_name(context, t->identifier);
+
+                    if (base_type == null) {
+                        Decl *decl = find_declaration(context, scope, t->identifier, DECL_TYPE, true);
+                        if (decl != null) base_type = decl->type;
+                    }
+
+                    if (base_type == null) {
+                        base_type = arena_new(&context->arena, Type);
+                        base_type->kind = TYPE_UNRESOLVED_NAME;
+                        base_type->unresolved.name = t->identifier;
+                        base_type->flags |= TYPE_FLAG_UNRESOLVED;
+                    }
+
+                    t += 1;
+                }
             } break;
 
             case TOKEN_BRACKET_SQUARE_OPEN: {
@@ -4385,14 +4413,17 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                     } else if (t[1].kind == TOKEN_BRACKET_CURLY_OPEN && !stop_on_open_curly) {
                         File_Pos start_pos = t->pos;
 
-                        Decl *type_decl = find_declaration(context, scope, t->identifier, DECL_TYPE, true);
-                        Type *type = null;
-                        if (type_decl != null) {
-                            type = type_decl->type;
-                        } else {
+                        Type *type = parse_primitive_name(context, t->identifier);
+
+                        if (type == null) {
+                            Decl *decl = find_declaration(context, scope, t->identifier, DECL_TYPE, true);
+                            if (decl != null) type = decl->type;
+                        }
+
+                        if (type == null) {
                             type = arena_new(&context->arena, Type);
                             type->kind = TYPE_UNRESOLVED_NAME;
-                            type->unresolved_name = t->identifier;
+                            type->unresolved.name = t->identifier;
                             type->flags |= TYPE_FLAG_UNRESOLVED;
                         }
                         t += 1;
@@ -6205,31 +6236,27 @@ bool build_ast(Context *context, u8* file_name) {
     Decl *string_decl = find_declaration(context, &context->preload_scope, string_intern(&context->string_table, "String"), DECL_TYPE, false);
     assert(string_decl != null);
     context->string_type = string_decl->type;
+    context->short_string_name = string_intern(&context->string_table, "str");
 
     Decl *type_kind_decl = find_declaration(context, &context->preload_scope, string_intern(&context->string_table, "Type_Kind"), DECL_TYPE, false);
     assert(type_kind_decl != null && type_kind_decl->type->kind == TYPE_ENUM);
     context->type_info_type = type_kind_decl->type;
 
 
+    u8 *sea_lang_name = string_intern(&context->string_table, "sea_lang");
+
     buf_push(context->sources, ((Source_Import) {
         .given_name = file_name,
         .inferred_path = file_name,
         .scope = &context->global_scope,
     }));
-    u8 *source_folder = path_get_folder(&context->arena, file_name);
 
     for (u32 i = 0; i < buf_length(context->sources); i += 1) {
         Scope *scope = context->sources[i].scope;
         u8 *path = context->sources[i].inferred_path;
 
-        u8 *sea_lang_name = string_intern(&context->string_table, "sea_lang");
-        u8 *str_name = string_intern(&context->string_table, "str");
-
         Decl *preload_decl = add_declaration(context, scope, DECL_IMPORT, sea_lang_name, (File_Pos) { path }, false);
         preload_decl->import_scope = &context->preload_scope;
-
-        Decl *str_decl = add_declaration(context, scope, DECL_TYPE, str_name, (File_Pos) { path }, false);
-        str_decl->type = context->string_type;
 
 
         u8* file;
@@ -7208,11 +7235,16 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, u32 scope_pos, Typ
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
 
                 if (type->flags & TYPE_FLAG_UNRESOLVED) {
-                    Decl *decl = find_declaration(context, scope, type->unresolved_name, DECL_TYPE, true);
+                    Decl *decl = resolve_static_access(context, scope, &type->unresolved, pos, DECL_TYPE);
 
                     if (decl == null) {
                         print_file_pos(pos);
-                        printf("No such type in scope: '%s'\n", type->unresolved_name);
+                        printf("No such type in scope: '");
+                        for (Static_Access_Link *link = &type->unresolved; link != null; link = link->next) {
+                            printf(link->name);
+                            if (link->next != null) printf("::");
+                        }
+                        printf("'\n");
                         return TYPECHECK_RESULT_BAD;
                     }
 
@@ -7885,10 +7917,11 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 scope_p
 
             if (expr->call.pointer_call) {
                 if (expr->call.pointer_expr->kind == EXPR_STATIC_ACCESS) {
-                    Fn *callee = resolve_static_access_to_fn(context, scope, &expr->call.pointer_expr->static_access, &expr->pos);
-                    if (callee != null) {
+                    Static_Access_Link *first = &expr->call.pointer_expr->static_access;
+                    Decl *callee_decl = resolve_static_access(context, scope, first, &expr->pos, DECL_FN);
+                    if (callee_decl != null) {
                         expr->call.pointer_call = false;
-                        expr->call.callee = callee;
+                        expr->call.callee = callee_decl->fn;
                     }
                 }
             }
