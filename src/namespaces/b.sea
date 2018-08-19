@@ -1,0 +1,6 @@
+
+import "print.sea";
+
+fn say_hi() {
+    print("Hello from namespace b!\n");
+}

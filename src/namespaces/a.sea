@@ -1,0 +1,8 @@
+
+import b "b.sea";
+import c "c.sea";
+
+fn main() {
+    b::say_hi();
+    c::say_hi();
+}
