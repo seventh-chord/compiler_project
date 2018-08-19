@@ -4,3 +4,10 @@ import "print.sea";
 fn say_hi() {
     print("Hello from namespace b!\n");
 }
+
+
+struct Foo {
+    x, y, z: i32;
+}
+
+fn take_foo(foo: Foo) {}

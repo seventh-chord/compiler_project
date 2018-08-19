@@ -5,4 +5,7 @@ import c "c.sea";
 fn main() {
     b::say_hi();
     c::say_hi();
+
+    let x = b::Foo { 1, 2, 3 };
+    b::take_foo(x);
 }
