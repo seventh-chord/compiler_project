@@ -71,7 +71,7 @@ fn open() {
         let length = 0;
         for (*extensions != 0) {
             if (*extensions == ' ') {
-                let string = String { substring, length };
+                let string = str { substring, length };
 
                 for e : 0..enum_length(WGL_Extensions) {
                     let extension_name = enum_member_name(cast(WGL_Extensions, e));

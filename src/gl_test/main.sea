@@ -427,8 +427,8 @@ fn framebuffer_blit(framebuffer: *Framebuffer, width, height: i64) {
 }
 
 
-fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
-    fn compile_single(source: String, type: u32) -> u32 {
+fn load_shader(vertex_source, geometry_source, fragment_source: str) -> u32 {
+    fn compile_single(source: str, type: u32) -> u32 {
         let shader = glCreateShader(type);
         let source_length = i32(source.length);
         glShaderSource(shader, 1, &source.data, &source_length);
@@ -439,7 +439,7 @@ fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
         if status == GL_FALSE {
             let log_length: i32;
             glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
-            let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
+            let log_string = str { data: alloc(i64(log_length)), length: i64(log_length) };
             glGetShaderInfoLog(shader, log_length, null, log_string.data);
 
             print("Error in ");
@@ -472,7 +472,7 @@ fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
     if status == GL_FALSE {
         let log_length: i32;
         glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_length);
-        let log_string = String { data: alloc(i64(log_length)), length: i64(log_length) };
+        let log_string = str { data: alloc(i64(log_length)), length: i64(log_length) };
         glGetProgramInfoLog(program, log_length, null, log_string.data);
 
         print("Error linking shader\n");
@@ -487,7 +487,7 @@ fn load_shader(vertex_source, geometry_source, fragment_source: String) -> u32 {
 
 
 struct Mesh {
-    name: String;
+    name: str;
     vao, vbo: u32;
     vertex_count: i32;
 
@@ -506,7 +506,7 @@ fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
 
     let MAGIC = "sea\nmesh";
     assert(file.length >= MAGIC.length, "Failed to load mesh: File is too small");
-    let actual_magic = String { file.data, MAGIC.length };
+    let actual_magic = str { file.data, MAGIC.length };
     assert(string_cmp(MAGIC, actual_magic), "Failed to load mesh: Invalid magic value");
 
     let cursor = file.data + MAGIC.length;
@@ -521,7 +521,7 @@ fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
         cursor_length -= size_of(u16);
 
         assert(cursor_length > name_length, "Failed to load mesh: Missing name data");
-        let name = String { data: cursor, length: name_length };
+        let name = str { data: cursor, length: name_length };
         cursor += name_length;
         cursor_length -= name_length;
 
@@ -539,7 +539,7 @@ fn mesh_import(arena: *Arena, filepath: *u8) -> *Mesh {
 
         let MAGIC = "mesh_end";
         assert(cursor_length >= MAGIC.length, "Failed to load mesh: Missing end of mesh");
-        assert(string_cmp(MAGIC, String { cursor, MAGIC.length }), "Failed to load mesh: Invalid end of mesh");
+        assert(string_cmp(MAGIC, str { cursor, MAGIC.length }), "Failed to load mesh: Invalid end of mesh");
         cursor += MAGIC.length;
         cursor_length -= MAGIC.length;
 

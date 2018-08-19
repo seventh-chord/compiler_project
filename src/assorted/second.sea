@@ -6,12 +6,12 @@ extern "kernel32.lib" {
 }
 
 let stdout_handle = GetStdHandle(-11);
-fn print(string: String) {
+fn print(string: str) {
     let written: u32;
     WriteFile(stdout_handle, string.data, u32(string.length), &written, null);
 }
 
-fn assert(condition: bool, message: String) {
+fn assert(condition: bool, message: str) {
     if !condition {
         print("Assertion failed: ");
         print(message);
@@ -42,7 +42,7 @@ fn main() {
 
     big_bummer();
 
-    assert(enum_length(Type_Kind) == i64(Type_Kind::FN_POINTER) + 1, "There are not enough types!");
+    assert(enum_length(sea_lang::Type_Kind) == i64(sea_lang::Type_Kind::FN_POINTER) + 1, "There are not enough types!");
 
     print(get_second_word("This Whoa\n sentence will not be printed!"));
 
@@ -147,13 +147,13 @@ fn build(town: Another_Town) {
 
     town.a = 1;
 
-    let t: Type_Kind;
+    let t: sea_lang::Type_Kind;
 
     t = type_info_of_value(town);
-    assert(t == Type_Kind::STRUCT, "Darn this is no good");
+    assert(t == sea_lang::Type_Kind::STRUCT, "Darn this is no good");
 
     t = type_info_of_type(Another_Town);
-    assert(t == Type_Kind::STRUCT, "At least this works as intended");
+    assert(t == sea_lang::Type_Kind::STRUCT, "At least this works as intended");
 }
 
 
@@ -240,8 +240,8 @@ fn empty_structs_should_work(e: Empty) {
 }
 
 
-fn get_second_word(string: String) -> String {
-    let result: String;
+fn get_second_word(string: str) -> str {
+    let result: str;
 
     let i = 0;
     for i < string.length {
@@ -305,9 +305,9 @@ fn who_are_you(x: u32) {
     print("x is a ");
     print(enum_member_name(t));
     print(", but whoa, that is a ");
-    print(enum_member_name(cast(Type_Kind, 3)));
+    print(enum_member_name(cast(sea_lang::Type_Kind, 3)));
     print(" and another ");
-    print(enum_member_name(cast(Type_Kind, 30)));
+    print(enum_member_name(cast(sea_lang::Type_Kind, 30)));
     print("!\n");
 }
 

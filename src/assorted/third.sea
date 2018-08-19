@@ -9,7 +9,7 @@ typedef WriteFile_Type = *fn(file: u64, buffer: *u8, length: u32, written: *u32,
 let write_fn: WriteFile_Type = &WriteFile;
 
 let stdout_handle = GetStdHandle(u32(-11));
-fn print(string: String) {
+fn print(string: str) {
     let written: u32;
     write_fn(stdout_handle, string.data, u32(string.length), &written, null);
 }
@@ -58,9 +58,9 @@ fn down_the_rabbit_hole() -> *fn() -> *fn(p: i32) -> int {
 }
 
 
-typedef Keyword_Factory = *fn() -> String;
+typedef Keyword_Factory = *fn() -> str;
 
-fn get_keyword() -> String {
+fn get_keyword() -> str {
     return "...mean mean pride";
 }
 
@@ -116,7 +116,7 @@ fn crash() -> bool {
     print("Short circuiting is not working at all\n");
 
     let bell: u8 = 0x07;
-    print(String { &bell, 1 });
+    print(str { &bell, 1 });
 
     ExitProcess(-1);
     return true;

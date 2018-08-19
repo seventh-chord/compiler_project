@@ -2308,9 +2308,6 @@ Decl *find_declaration(Context *context, Scope *scope, u8 *interned_name, int ki
         if (scope->parent != null) {
             scope = scope->parent;
             continue;
-        } else if (scope != &context->preload_scope) {
-            scope = &context->preload_scope;
-            continue;
         } else {
             break;
         }
@@ -2354,8 +2351,6 @@ Var *find_var(Context *context, Scope *scope, u8 *interned_name, u32 before_posi
         if (scope->parent != null) {
             scope = scope->parent;
             continue;
-        } else if (scope != &context->preload_scope) {
-            scope = &context->preload_scope;
         } else {
             break;
         }
@@ -6224,19 +6219,29 @@ bool build_ast(Context *context, u8* file_name) {
     u8 *source_folder = path_get_folder(&context->arena, file_name);
 
     for (u32 i = 0; i < buf_length(context->sources); i += 1) {
-        Scope *import_scope = context->sources[i].scope;
-        u8 *import_path = context->sources[i].inferred_path;
+        Scope *scope = context->sources[i].scope;
+        u8 *path = context->sources[i].inferred_path;
+
+        u8 *sea_lang_name = string_intern(&context->string_table, "sea_lang");
+        u8 *str_name = string_intern(&context->string_table, "str");
+
+        Decl *preload_decl = add_declaration(context, scope, DECL_IMPORT, sea_lang_name, (File_Pos) { path }, false);
+        preload_decl->import_scope = &context->preload_scope;
+
+        Decl *str_decl = add_declaration(context, scope, DECL_TYPE, str_name, (File_Pos) { path }, false);
+        str_decl->type = context->string_type;
+
 
         u8* file;
         u32 file_length;
 
-        IO_Result read_result = read_entire_file(import_path, &file, &file_length);
+        IO_Result read_result = read_entire_file(path, &file, &file_length);
         if (read_result != IO_OK) {
-            printf("Couldn't load \"%s\": %s\n", import_path, io_result_message(read_result));
+            printf("Couldn't load \"%s\": %s\n", path, io_result_message(read_result));
             return false;
         }
 
-        valid &= lex_and_parse_text(context, import_scope, import_path, file, file_length);
+        valid &= lex_and_parse_text(context, scope, path, file, file_length);
 
         sc_free(file);
     }
