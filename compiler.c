@@ -6249,7 +6249,7 @@ bool build_ast(Context *context, u8* file_name) {
     }
 }
 
-bool lex_and_parse_text(Context *context, Scope *scope, u8 *file_name, u8 *file, u32 file_length) {
+bool lex_and_parse_text(Context *context, Scope *scope, u8 *source_path, u8 *file, u32 file_length) {
     u8 *folder = null;
 
     bool valid = true;
@@ -6272,7 +6272,7 @@ bool lex_and_parse_text(Context *context, Scope *scope, u8 *file_name, u8 *file,
 
     Token* tokens = null;
     File_Pos file_pos = {0};
-    file_pos.file_name = file_name;
+    file_pos.file_name = source_path;
     file_pos.line = 1;
     file_pos.character = 1;
 
@@ -6875,7 +6875,7 @@ bool lex_and_parse_text(Context *context, Scope *scope, u8 *file_name, u8 *file,
         } break;
 
         case TOKEN_KEYWORD_EXTERN: {
-            if (folder == null) folder = path_get_folder(&context->arena, file_name);
+            if (folder == null) folder = path_get_folder(&context->arena, source_path);
 
             u32 length = 0;
             valid &= parse_extern(context, scope, folder, t, &length);
@@ -6907,33 +6907,40 @@ bool lex_and_parse_text(Context *context, Scope *scope, u8 *file_name, u8 *file,
             }
             t += 1;
 
-            if (folder == null) folder = path_get_folder(&context->arena, file_name);
+            if (folder == null) folder = path_get_folder(&context->arena, source_path);
             u8 *full_import_path = path_join(&context->arena, folder, import_name);
 
-
-            Scope *subscope = null;
-            buf_foreach (Source_Import, other_import, context->sources) {
-                if (str_cmp(other_import->inferred_path, full_import_path)) {
-                    subscope = other_import->scope;
-                }
-            }
-
-            if (subscope == null) {
-                subscope = arena_new(&context->arena, Scope);
-
-                buf_push(context->sources, ((Source_Import) {
-                    .given_name = import_name,
-                    .inferred_path = full_import_path,
-                    .scope = subscope,
-                }));
-            }
-
-            Decl *import_decl = add_declaration(context, scope, DECL_IMPORT, subscope_name, pos, subscope_name == null);
-            if (import_decl == null) {
+            if (str_cmp(full_import_path, source_path)) {
+                print_file_pos(&pos);
+                printf("Can't import \"%s\", it's the current file\n", import_name);
                 valid = false;
-                break; // NB breaks out of switch
             }
-            import_decl->import_scope = subscope;
+
+            if (valid) {
+                Scope *subscope = null;
+                buf_foreach (Source_Import, other_import, context->sources) {
+                    if (str_cmp(other_import->inferred_path, full_import_path)) {
+                        subscope = other_import->scope;
+                    }
+                }
+
+                if (subscope == null) {
+                    subscope = arena_new(&context->arena, Scope);
+
+                    buf_push(context->sources, ((Source_Import) {
+                        .given_name = import_name,
+                        .inferred_path = full_import_path,
+                        .scope = subscope,
+                    }));
+                }
+
+                Decl *import_decl = add_declaration(context, scope, DECL_IMPORT, subscope_name, pos, subscope_name == null);
+                if (import_decl == null) {
+                    valid = false;
+                    break; // NB breaks out of switch
+                }
+                import_decl->import_scope = subscope;
+            }
         } break;
 
         case TOKEN_KEYWORD_TYPEDEF: {
