@@ -7277,7 +7277,7 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, u32 fn_pos, Type *
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
                 assert(type->flags & TYPE_FLAG_UNRESOLVED);
 
-                Decl *decl = find_declaration(context, scope, &type->unresolved, DECL_TYPE, false);
+                Decl *decl = find_declaration(context, scope, &type->unresolved, DECL_TYPE, true);
                 if (decl == null) {
                     print_file_pos(pos);
                     printf("No such type in scope: ");
