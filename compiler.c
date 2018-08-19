@@ -3477,16 +3477,6 @@ Builtin_Fn parse_builtin_fn_name(Context *context, u8 *name) {
     return BUILTIN_INVALID;
 }
 
-Type *parse_user_type_name(Context *context, Scope *scope, u8 *interned_name) {
-    Decl *decl = find_declaration(context, scope, interned_name, DECL_TYPE, true);
-    if (decl == null) {
-        return null;
-    } else {
-        assert(decl->kind == DECL_TYPE);
-        return decl->type;
-    }
-}
-
 Type*parse_fn_signature    (Context *context, Scope *scope, Token *t, u32 *length, Fn *fn);
 Expr *parse_expr           (Context *context, Scope *scope, Token *t, u32 *length, bool stop_on_open_curly);
 Expr *parse_compound       (Context *context, Scope *scope, Token *t, u32 *length);
@@ -3518,7 +3508,8 @@ Type *parse_type(Context *context, Scope *scope, Token* t, u32* length) {
                 base_type = parse_primitive_name(context, t->identifier);
 
                 if (base_type == null) {
-                    base_type = parse_user_type_name(context, scope, t->identifier);
+                    Decl *decl = find_declaration(context, scope, t->identifier, DECL_TYPE, true);
+                    if (decl != null) base_type = decl->type;
                 }
 
                 if (base_type == null) {
@@ -4399,8 +4390,11 @@ Expr *parse_expr(Context *context, Scope *scope, Token* t, u32* length, bool sto
                     } else if (t[1].kind == TOKEN_BRACKET_CURLY_OPEN && !stop_on_open_curly) {
                         File_Pos start_pos = t->pos;
 
-                        Type *type = parse_user_type_name(context, scope, t->identifier);
-                        if (type == null) {
+                        Decl *type_decl = find_declaration(context, scope, t->identifier, DECL_TYPE, true);
+                        Type *type = null;
+                        if (type_decl != null) {
+                            type = type_decl->type;
+                        } else {
                             type = arena_new(&context->arena, Type);
                             type->kind = TYPE_UNRESOLVED_NAME;
                             type->unresolved_name = t->identifier;
@@ -6213,13 +6207,13 @@ bool build_ast(Context *context, u8* file_name) {
 
     assert(lex_and_parse_text(context, &context->preload_scope, "<preload>", preload_code_text, str_length(preload_code_text)));
 
-    u8 *string_type_name = string_intern(&context->string_table, "String");
-    context->string_type = parse_user_type_name(context, &context->preload_scope, string_type_name);
-    assert(context->string_type != null && context->string_type->kind == TYPE_STRUCT);
+    Decl *string_decl = find_declaration(context, &context->preload_scope, string_intern(&context->string_table, "String"), DECL_TYPE, false);
+    assert(string_decl != null);
+    context->string_type = string_decl->type;
 
-    u8 *type_kind_type_name = string_intern(&context->string_table, "Type_Kind");
-    context->type_info_type = parse_user_type_name(context, &context->preload_scope, type_kind_type_name);
-    assert(context->type_info_type != null && context->type_info_type->kind == TYPE_ENUM);
+    Decl *type_kind_decl = find_declaration(context, &context->preload_scope, string_intern(&context->string_table, "Type_Kind"), DECL_TYPE, false);
+    assert(type_kind_decl != null && type_kind_decl->type->kind == TYPE_ENUM);
+    context->type_info_type = type_kind_decl->type;
 
 
     buf_push(context->sources, ((Source_Import) {
@@ -7200,15 +7194,15 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, u32 scope_pos, Typ
                 assert(!(type->flags & TYPE_FLAG_UNRESOLVED_CHILD));
 
                 if (type->flags & TYPE_FLAG_UNRESOLVED) {
-                    Type *new = parse_user_type_name(context, scope, type->unresolved_name);
+                    Decl *decl = find_declaration(context, scope, type->unresolved_name, DECL_TYPE, true);
 
-                    if (new == null) {
+                    if (decl == null) {
                         print_file_pos(pos);
                         printf("No such type in scope: '%s'\n", type->unresolved_name);
                         return TYPECHECK_RESULT_BAD;
                     }
 
-                    type = new;
+                    type = decl->type;
                 }
 
                 done = true;
