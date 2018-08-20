@@ -716,12 +716,12 @@ void arena_make_space(Arena* arena, u64 size) {
     }
 }
 
-u8* arena_alloc(Arena* arena, u64 size) {
+u8 *arena_alloc(Arena *arena, u64 size) {
     assert(size < ARENA_PAGE_SIZE);
 
     arena_make_space(arena, size);
 
-    u8* ptr = ((u8*) arena->current_page) + sizeof(Arena_Page) + arena->current_page->used;
+    u8 *ptr = ((u8*) arena->current_page) + sizeof(Arena_Page) + arena->current_page->used;
     u64 align_offset = ((u64) ptr) % ARENA_ALIGN;
     if (align_offset != 0) {
         align_offset = ARENA_ALIGN - align_offset;
@@ -733,13 +733,13 @@ u8* arena_alloc(Arena* arena, u64 size) {
     return ptr;
 }
 
-void* arena_insert_with_size(Arena* arena, void* element, u64 size) {
+void *arena_insert_with_size(Arena *arena, void *element, u64 size) {
     u8* ptr = arena_alloc(arena, size); 
     mem_copy((u8*) element, ptr, size);
     return (void*) ptr;
 }
 
-void arena_stack_push(Arena* arena) {
+void arena_stack_push(Arena *arena) {
     Arena_Stack_Frame new_frame = {0};
     new_frame.head = arena->current_page;
     new_frame.head_used = arena->current_page? arena->current_page->used : 0;
@@ -747,7 +747,7 @@ void arena_stack_push(Arena* arena) {
     arena->frame = new_frame;
 }
 
-void arena_stack_pop(Arena* arena) {
+void arena_stack_pop(Arena *arena) {
     while (arena->current_page != arena->frame.head) {
         arena->current_page->used = 0;
         if (arena->current_page->previous == null) {
@@ -1073,6 +1073,15 @@ u8 *path_get_folder(Arena *arena, u8 *path) {
     new_path[last_separator + 1] = '\0';
 
     return new_path;
+}
+
+u8 *path_get_filename(u8 *path) {
+    u8 *filename = path;
+    while (*path != 0) {
+        if (*path == '/' || *path == '\\') filename = path + 1;
+        path += 1;
+    }
+    return filename;
 }
 
 u8 *path_join(Arena *arena, u8 *a, u8 *b) {
@@ -14986,7 +14995,9 @@ bool run_executable(u8 *exe_path) {
 }
 
 void print_usage() {
-    printf("Usage:  sea <source> <executable> [flags]\n");
+    printf("Usage:\n");
+    printf("    sea <source> [flags]\n");
+    printf("    sea <source> <executable> [flags]\n");
     printf("Flags:\n");
     printf("    -r    Run generated executable\n");
     printf("    -d    Generate debug info\n");
@@ -14998,59 +15009,75 @@ void main() {
     u8 *command_line = GetCommandLineA();
     eat_word(&command_line); // skip executable name
 
-    u8 *source_name = command_line;
-    u64 source_name_length = eat_word(&command_line);
-    source_name = str_null_terminate(&arena, source_name, source_name_length);
-
-    if (source_name_length == 0) {
-        printf("No source name given\n");
-        print_usage();
-        return;
-    }
-
-    u8 *exe_name = command_line;
-    u64 exe_name_length = eat_word(&command_line);
-    exe_name = str_null_terminate(&arena, exe_name, exe_name_length);
-
-    if (exe_name_length == 0) {
-        printf("No executable name given\n");
-        print_usage();
-        return;
-    }
-
+    u8 *source_name = null, *exe_name = null;
     bool run_after_compile = false;
-    u8 *debug_name = null;
+    bool gen_debug_info = false;
 
     while (true) {
-        u8* flag = command_line;
-        u64 flag_length = eat_word(&command_line);
-        if (flag_length == 0) break;
+        u8 *word = command_line;
+        u64 word_length = eat_word(&command_line);
+        if (word_length == 0) break;
 
-        bool found_match = false;
-        if (flag_length == 2 && flag[0] == '-') {
-            found_match = true;
+        if (word[0] == '-') {
+            bool matched_flag = false;
 
-            u8 c = flag[1];
-            switch (c) {
-                case 'r': {
-                    run_after_compile = true;
-                } break;
+            if (word_length == 2 && word[1] == 'd') {
+                matched_flag = true;
+                gen_debug_info = true;
+            }
 
-                case 'd': {
-                    debug_name = str_join(&arena, exe_name, ".pdb");
-                } break;
+            if (word_length == 2 && word[1] == 'r') {
+                matched_flag = true;
+                run_after_compile = true;
+            }
 
-                default: {
-                    found_match = false;
-                } break;
+            if (!matched_flag) {
+                printf("Unknown flag: %z\n", word_length, word);
+                print_usage();
+                return;
+            }
+        } else {
+            word = str_null_terminate(&arena, word, word_length);
+            if (source_name == null) {
+                source_name = word;
+            } else if (exe_name == null) {
+                exe_name = word;
+            } else {
+                printf("Unexpected parameter: %z\n", word_length, word);
+                print_usage();
+                return;
             }
         }
+    }
 
-        if (!found_match) {
-            printf("Unkown flag: %z\n", flag_length, flag);
-            print_usage();
-            return;
+    if (source_name == null) {
+        printf("No source file given\n");
+        print_usage();
+        return;
+    }
+
+    if (exe_name == null) {
+        u8 *file_name = path_get_filename(source_name);
+        u64 file_name_length = str_length(file_name);
+        u8 *file_name_end = &file_name[file_name_length - 4];
+        if (file_name_length > 4 && file_name_end[0] == '.' && file_name_end[1] == 's' && file_name_end[2] == 'e' && file_name_end[3] == 'a') {
+            exe_name = arena_insert_with_size(&arena, file_name, file_name_length);
+            exe_name[file_name_length - 3] = 'e';
+            exe_name[file_name_length - 2] = 'x';
+            exe_name[file_name_length - 1] = 'e';
+        } else {
+            exe_name = arena_alloc(&arena, file_name_length + 4);
+            mem_copy(file_name, exe_name, file_name_length);
+            exe_name[file_name_length + 0] = '.';
+            exe_name[file_name_length + 1] = 'e';
+            exe_name[file_name_length + 2] = 'x';
+            exe_name[file_name_length + 3] = 'e';
         }
+    }
+
+    u8 *debug_name = null;
+    if (gen_debug_info) {
+        debug_name = str_join(&arena, exe_name, ".pdb");
     }
 
     printf("Compiling %s to %s\n", source_name, exe_name);
