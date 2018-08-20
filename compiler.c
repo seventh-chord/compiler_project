@@ -7071,6 +7071,8 @@ bool lex_and_parse_text(Context *context, Scope *scope, u8 *source_path, u8 *fil
         } break;
     }
 
+    buf_free(tokens);
+
     return valid;
 }
 
