@@ -2290,6 +2290,89 @@ bool file_pos_is_greater(File_Pos *a, File_Pos *b) {
     return a->line > b->line || (a->line == b->line && a->character > b->character);
 }
 
+void print_decl(Decl *decl) {
+    u8 *kind_name;
+    switch (decl->kind) {
+        case DECL_VAR:    kind_name = "variable"; break;
+        case DECL_FN:     kind_name = "function"; break;
+        case DECL_TYPE:   kind_name = "type";     break;
+        case DECL_IMPORT: kind_name = "import";   break;
+        default: assert(false);
+    }
+    printf("%s '%s'", kind_name, decl->name);
+}
+
+typedef struct Global_Decl_Iterator {
+    Scope *scope;
+    u32 i, j;
+} Global_Decl_Iterator;
+
+Decl *global_decl_iterator_next(Global_Decl_Iterator *iterator) {
+    if (iterator->i >= iterator->scope->decls_length) return null;
+
+    while (true) {
+        Decl *decl = &iterator->scope->decls[iterator->i];
+
+        if (decl->kind == DECL_IMPORT && decl->name == null) {
+            Scope *inner_scope = decl->import_scope;
+            if (iterator->j >= inner_scope->decls_length) {
+                iterator->i += 1;
+                continue;
+            } else {
+                decl = &inner_scope->decls[iterator->j];
+                iterator->j += 1;
+                return decl;
+            }
+        } else {
+            iterator->j = 0;
+            iterator->i += 1;
+            return decl;
+        }
+    }
+}
+
+bool find_duplicate_declarations(Scope *scope) {
+    Global_Decl_Iterator outer_iterator = { scope, 0, 0 };
+    Decl *outer;
+    while (outer = global_decl_iterator_next(&outer_iterator)) {
+        if (outer->kind == DECL_IMPORT) continue;
+
+        Global_Decl_Iterator inner_iterator = { scope, outer_iterator.i, 0 };
+        if (outer_iterator.j > 0) inner_iterator.i += 1;
+
+        Decl *inner;
+        while (inner = global_decl_iterator_next(&inner_iterator)) {
+            if (inner->kind == outer->kind && inner->name == outer->name) {
+                print_file_pos(&outer->pos);
+                printf("The ");
+                print_decl(outer);
+                printf(" is shadowed by another declaration\n");
+
+                print_file_pos(&inner->pos);
+                printf("Hint: The shadowing declaration is here\n");
+
+                if (outer_iterator.j > 0) {
+                    Decl *outer_importing_decl = &outer_iterator.scope->decls[outer_iterator.i];
+                    assert(outer_importing_decl->kind == DECL_IMPORT);
+                    print_file_pos(&outer_importing_decl->pos);
+                    printf("Hint: The first declaration is imported here\n");
+                }
+
+                if (inner_iterator.j > 0) {
+                    Decl *inner_importing_decl = &inner_iterator.scope->decls[inner_iterator.i];
+                    assert(inner_importing_decl->kind == DECL_IMPORT);
+                    print_file_pos(&inner_importing_decl->pos);
+                    printf("Hint: The first declaration is imported here\n");
+                }
+
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 
 #define DECL_ANY_KIND -1
 Decl *find_declaration(Context *context, Scope *scope, Identifier_Chain *identifier, int kind, bool check_nested) {
@@ -2435,20 +2518,10 @@ Decl *add_declaration(
         Decl *other_decl = find_declaration(context, scope, &fake_chain, kind, true);
 
         if (other_decl != null) {
-            u8 *kind_name;
-            switch (other_decl->kind) {
-                case DECL_VAR:    kind_name = "variable"; break;
-                case DECL_FN:     kind_name = "function"; break;
-                case DECL_TYPE:   kind_name = "type";     break;
-                case DECL_IMPORT: kind_name = "import";   break;
-                default: assert(false);
-            }
-
             print_file_pos(&pos);
-            printf(
-                "Redefinition of %s '%s'. First definition on line %u\n",
-                kind_name, name, (u64) other_decl->pos.line
-            );
+            printf("Redefinition of ");
+            print_decl(other_decl);
+            printf(". First definition on line %u\n", (u64) other_decl->pos.line);
             return null;
         }
     }
@@ -5344,11 +5417,17 @@ bool parse_variable_declaration(Context *context, Scope *scope, Token *t, u32 *l
             continue;
         } else if (t->kind == TOKEN_COLON || t->kind == TOKEN_ASSIGN) {
             break;
+        } else if (t->kind == TOKEN_SEMICOLON) {
+            print_file_pos(&t->pos);
+            printf("Can't declare variables without giving initial type or value\n");
+            *length = t - t_start;
+            return false;
         } else {
             print_file_pos(&t->pos);
             printf("Expected a comma ',', a colon ':', or a =, but got a ");
             print_token(t);
             printf("\n");
+            *length = t - t_start;
             return false;
         }
     }
@@ -6285,6 +6364,14 @@ bool build_ast(Context *context, u8* file_name) {
         valid &= lex_and_parse_text(context, scope, path, file, file_length);
 
         sc_free(file);
+
+        if (!valid) break;
+    }
+
+    // Check for shadowing definitions *after* we have parsed all files
+    for (u32 i = 0; i < buf_length(context->sources); i += 1) {
+        Scope *scope = context->sources[i].scope;
+        if (valid && find_duplicate_declarations(scope)) valid = false;
     }
 
     if (valid) {
