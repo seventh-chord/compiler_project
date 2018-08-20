@@ -125,7 +125,7 @@ const ORTHO = [3]v2 {
     { 0.0, 1.0 },         // z
 };
 
-enum Dir(u8) { X = 0, Y = 1, Z = 2 }
+enum Dir(u8) { X = 0; Y = 1; Z = 2; }
 
 let vert_source = "
     #version 330 core

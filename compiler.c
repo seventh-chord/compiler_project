@@ -222,23 +222,23 @@ void printf_flush();
 u8 *preload_code_text = PRELOAD_QUOTE(
 
 enum Type_Kind (u8) { // We rely on this enum being one byte large!
-    VOID        = 1,
-    BOOL        = 2,
-    U8          = 4,
-    U16         = 5,
-    U32         = 6,
-    U64         = 7,
-    I8          = 8,
-    I16         = 9,
-    I32         = 10,
-    I64         = 11,
-    F32         = 13,
-    F64         = 14,
-    POINTER     = 15,
-    ARRAY       = 16,
-    STRUCT      = 18,
-    ENUM        = 19,
-    FN_POINTER  = 20,
+    VOID        = 1;
+    BOOL        = 2;
+    U8          = 4;
+    U16         = 5;
+    U32         = 6;
+    U64         = 7;
+    I8          = 8;
+    I16         = 9;
+    I32         = 10;
+    I64         = 11;
+    F32         = 13;
+    F64         = 14;
+    POINTER     = 15;
+    ARRAY       = 16;
+    STRUCT      = 18;
+    ENUM        = 19;
+    FN_POINTER  = 20;
 }
 
 // NB Don't change the definition of this struct. It's exact definition is depended
@@ -4004,7 +4004,11 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
     type->enumeration.name = t->identifier_chain.name;
     t += 1;
 
+    bool specific_type_given = false;
+
     if (t->kind == TOKEN_BRACKET_ROUND_OPEN) {
+        specific_type_given = true;
+
         t += 1;
         File_Pos type_start_pos = t->pos;
 
@@ -4040,7 +4044,7 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
 
     u8 primitive_size = primitive_size_of(type->enumeration.value_primitive);
 
-    if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, "after enum name/type")) {
+    if (!expect_single_token(context, t, TOKEN_BRACKET_CURLY_OPEN, specific_type_given? "after enum type" : "after enum name")) {
         *length = t - t_start;
         return false;
     }
@@ -4124,19 +4128,13 @@ bool parse_enum_declaration(Context *context, Scope *scope, Token* t, u32* lengt
 
         type->enumeration.member_count += 1;
 
-        if (t->kind != TOKEN_BRACKET_CURLY_CLOSE) {
-            if (t->kind == TOKEN_COMMA) {
-                t += 1;
-            } else {
-                print_file_pos(&t->pos);
-                printf("Expected comma ',' or closing curly brace '}' after value in enum, but got ");
-                print_token(t);
-                printf("\n");
-                *length = t - t_start;
-                return false;
-            }
+        if (!expect_single_token(context, t, TOKEN_SEMICOLON, "after enum member")) {
+            *length = t - t_start;
+            return false;
         }
+        t += 1;
     }
+    assert(t->kind == TOKEN_BRACKET_CURLY_CLOSE);
     t += 1;
 
     type->enumeration.members = (void*) arena_alloc(&context->arena, type->enumeration.member_count * sizeof(*type->enumeration.members));

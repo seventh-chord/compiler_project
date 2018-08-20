@@ -41,7 +41,7 @@ fn get_direction_instruction(dir: Direction) -> str {
     }
 }
 
-enum Direction { NORTH, SOUTH, EAST, WEST }
+enum Direction { NORTH; SOUTH; EAST; WEST; }
 
 fn array_length_test() {
     let questionable = [][][QUESTIONABLE_OK_THANKS - 1]u32 { { { 1, 2 } }, { { 1, 2 } } };
