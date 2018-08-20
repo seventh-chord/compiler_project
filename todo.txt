@@ -5,27 +5,33 @@ Unimplemented & bugs
     'enum Foo(i64) { A = I64_MIN - 1 }', with the value as a literal, does not generate an error, because we have no way of detecting the underflow happening...
 
 Other
-    infer executable name if none is given on command line
-    allow passing command line before source name (do we want this? it probably what people expect though)
     a proper test-suite for the compiler
+    some static access errors still are obtuse
 
 Language features
-    namespaces, for includes, extern-blocks, etc
-    includes - either textual or preferably with some nice system!
+    c-style for loops, for e.g. link list iteration
     comparing pointer as if they were integers (doable in C, and potentially usefull...)
     complete type_info_of_{value, type}
     slices
     a 'any' type (void pointer + type info)
     uninitialized (zeroed) global variables in .bss
     unions
-    a defer statement
     maybe a better parser for floats? The current one is pretty accurate for f32 at least though
     casts from/to bool
     flags enums
     array bounds checking
     static_assert
+    ignore spaces in identifier chains
+    intrinsics - then we could remove the sqrt() builtin
+
+    function overloading
+    default function parameter values
+    vararg functions
+    multiple return values
 
 Compiler internals
+    strings as compile time exprs
+    just move 'context' into a global
     reorder 'Typecheck_Item's to reduce passes in typechecker
     don't generate jump at end of switch case of block in 'if' if we know the block will return for sure
     stack unwinding - so we can produce a stack trace on e.g. assert
@@ -35,7 +41,6 @@ Compiler internals
     growing the stack? __chkstk
     static libraries (currently we only support dynamic libraries) (Although both static and dynamic libraries have a .lib file on windows, I think explicitly stating whether we expect to load a file as static or dynamic in code is good, as it serves to avoid confusion)
     can we toggle fp exceptions? Should we expose that?
-    'const's inside a function can still be modified through pointers
 
 Optimized code-gen
     constant folding
@@ -46,3 +51,12 @@ Optimized code-gen
     register allocation accross statement-boundaries
     align functions to 32-bit boundaries, padding with nops (many compilers do this, do we have to though? also, why the padding with noops?)
     peephole optimizations
+
+Considerations for new code-gen
+    Common subexpression elimination - Should this be done in the codegen backend, or in the frontend?
+    Register allocation
+    Calls, jumps
+    Compound types, which wont fit in registers - Should the backend hide this
+    mul, div, shl and co., which have special register allocation considerations
+    large SSE registers
+    negated jumps - there are some complex cases related to floats
