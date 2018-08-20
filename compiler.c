@@ -71,6 +71,7 @@ int _fltused; // To make floating point work without the crt
         u32 flags_and_attributes,   // FILE_ATTRIBUTE_NORMAL
         Handle template_file        // null
     );
+    WINAPI_PRE bool WINAPI_POST DeleteFileA(u8 *file_name);
 
     WINAPI_PRE bool WINAPI_POST CloseHandle(Handle handle);
 
@@ -1205,6 +1206,19 @@ IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length) {
     return IO_OK;
 }
 
+IO_Result delete_file(u8 *file_name) {
+    bool result = DeleteFileA(file_name);
+    if (!result) {
+        u32 error_code = GetLastError();
+        switch (error_code) {
+            case 2:  return IO_NOT_FOUND; // File not found
+            case 3:  return IO_NOT_FOUND; // Path not found
+            default: return IO_ERROR;
+        }
+    } else {
+        return IO_OK;
+    }
+}
 
 typedef struct File_Pos {
     u8 *file_name;
@@ -15000,6 +15014,7 @@ void print_usage() {
     printf("    sea <source> <executable> [flags]\n");
     printf("Flags:\n");
     printf("    -r    Run generated executable\n");
+    printf("    -R    Run generated executable, then delete it\n");
     printf("    -d    Generate debug info\n");
 }
 
@@ -15010,7 +15025,7 @@ void main() {
     eat_word(&command_line); // skip executable name
 
     u8 *source_name = null, *exe_name = null;
-    bool run_after_compile = false;
+    enum { DONT_RUN, RUN, RUN_AND_DELETE } run_mode = DONT_RUN;
     bool gen_debug_info = false;
 
     while (true) {
@@ -15028,7 +15043,12 @@ void main() {
 
             if (word_length == 2 && word[1] == 'r') {
                 matched_flag = true;
-                run_after_compile = true;
+                if (run_mode != RUN_AND_DELETE) run_mode = RUN;
+            }
+
+            if (word_length == 2 && word[1] == 'R') {
+                matched_flag = true;
+                run_mode = RUN_AND_DELETE;
             }
 
             if (!matched_flag) {
@@ -15100,7 +15120,13 @@ void main() {
     printf("Generated %u bytes of machine code\n", buf_length(context.seg_text));
     printf("Compiled in %i ms\n", time_in_ms);
 
-    if (run_after_compile) {
-        run_executable(exe_name);
+    if (run_mode == RUN || run_mode == RUN_AND_DELETE) {
+        bool ran = run_executable(exe_name);
+        if (ran && run_mode == RUN_AND_DELETE) {
+            IO_Result delete_result = delete_file(exe_name);
+            if (delete_result != IO_OK) {
+                printf("Couldn't delete \"%s\": %s\n", exe_name, io_result_message(delete_result));
+            }
+        }
     }
 }
