@@ -2994,9 +2994,9 @@ u64 add_exe_data(Context *context, bool read_only, u8 *data, u64 length, u64 ali
     return aligned_data_offset;
 }
 
-void print_expr(Context *context, Expr *expr);
+void print_expr(Expr *expr);
 
-void print_type(Context *context, Type* type) {
+void print_type(Type* type) {
     while (type != null) {
         switch (type->kind) {
             case TYPE_POINTER: {
@@ -3010,12 +3010,12 @@ void print_type(Context *context, Type* type) {
                 printf("*fn(");
                 for (u32 i = 0; i < signature->param_count; i += 1) {
                     if (i > 0) printf(", ");
-                    print_type(context, signature->params[i].type);
+                    print_type(signature->params[i].type);
                 }
                 printf(")");
                 if (signature->has_return) {
                     printf(" -> ");
-                    print_type(context, signature->return_type);
+                    print_type(signature->return_type);
                 }
 
                 type = null;
@@ -3026,7 +3026,7 @@ void print_type(Context *context, Type* type) {
                     printf("[]");
                 } else if (type->flags & TYPE_FLAG_UNRESOLVED) {
                     printf("[");
-                    print_expr(context, type->array.length_expr);
+                    print_expr(type->array.length_expr);
                     printf("]");
                 } else {
                     printf("[%u]", type->array.length);
@@ -3081,7 +3081,7 @@ void print_token(Token* t) {
     }
 }
 
-void print_expr(Context *context, Expr *expr) {
+void print_expr(Expr *expr) {
     switch (expr->kind) {
         case EXPR_UNRESOLVED_IDENTIFIER: {
             printf("<unresolved ");
@@ -3125,7 +3125,7 @@ void print_expr(Context *context, Expr *expr) {
         } break;
 
         case EXPR_COMPOUND: {
-            print_type(context, expr->type);
+            print_type(expr->type);
 
             printf(" { ");
             for (u32 i = 0; i < expr->compound.member_count; i += 1) {
@@ -3134,10 +3134,10 @@ void print_expr(Context *context, Expr *expr) {
                 Compound_Member *member = &expr->compound.members[i];
 
                 if (member->key_expr != null) {
-                    print_expr(context, member->key_expr);
+                    print_expr(member->key_expr);
                     printf(": ");
                 }
-                print_expr(context, member->value_expr);
+                print_expr(member->value_expr);
             }
             printf(" }");
         } break;
@@ -3148,25 +3148,25 @@ void print_expr(Context *context, Expr *expr) {
 
         case EXPR_BINARY: {
             printf("(");
-            print_expr(context, expr->binary.left);
+            print_expr(expr->binary.left);
             printf(" %s ", BINARY_OP_SYMBOL[expr->binary.op]);
-            print_expr(context, expr->binary.right);
+            print_expr(expr->binary.right);
             printf(")");
         } break;
 
         case EXPR_TERNARY: {
             printf("(");
-            print_expr(context, expr->ternary.condition);
+            print_expr(expr->ternary.condition);
             printf("? ");
-            print_expr(context, expr->binary.left);
+            print_expr(expr->binary.left);
             printf(" : ");
-            print_expr(context, expr->binary.right);
+            print_expr(expr->binary.right);
             printf(")");
         } break;
 
         case EXPR_UNARY: {
             printf(UNARY_OP_SYMBOL[expr->unary.op]);
-            print_expr(context, expr->unary.inner);
+            print_expr(expr->unary.inner);
         } break;
 
         case EXPR_CALL: {
@@ -3178,7 +3178,7 @@ void print_expr(Context *context, Expr *expr) {
                 bool parenthesize = expr->call.pointer_expr->kind != EXPR_VARIABLE;
 
                 if (parenthesize) printf("(");
-                print_expr(context, expr->call.pointer_expr);
+                print_expr(expr->call.pointer_expr);
                 if (parenthesize) printf(")");
             } else {
                 printf("%s", expr->call.callee->name);
@@ -3188,7 +3188,7 @@ void print_expr(Context *context, Expr *expr) {
             for (u32 i = 0; i < expr->call.param_count; i += 1) {
                 if (i > 0) printf(", ");
                 Expr* child = expr->call.params[i];
-                print_expr(context, child);
+                print_expr(child);
             }
             printf(")");
         } break;
@@ -3197,28 +3197,28 @@ void print_expr(Context *context, Expr *expr) {
             Type_Kind primitive = expr->type->kind;
 
             if (primitive_is_integer(primitive)) {
-                print_type(context, expr->type);
+                print_type(expr->type);
                 printf("(");
-                print_expr(context, expr->cast_from);
+                print_expr(expr->cast_from);
                 printf(")");
             } else {
                 printf("cast(");
-                print_type(context, expr->type);
+                print_type(expr->type);
                 printf(", ");
-                print_expr(context, expr->cast_from);
+                print_expr(expr->cast_from);
                 printf(")");
             }
         } break;
 
         case EXPR_SUBSCRIPT: {
-            print_expr(context, expr->subscript.array);
+            print_expr(expr->subscript.array);
             printf("[");
-            print_expr(context, expr->subscript.index);
+            print_expr(expr->subscript.index);
             printf("]");
         } break;
 
         case EXPR_MEMBER_ACCESS: {
-            print_expr(context, expr->member_access.parent);
+            print_expr(expr->member_access.parent);
             printf(".");
             if (expr->flags & EXPR_FLAG_UNRESOLVED) {
                 printf("<unresolved %s>", expr->member_access.member_name);
@@ -3245,13 +3245,13 @@ void print_expr(Context *context, Expr *expr) {
 
         case EXPR_TYPE_INFO_OF_TYPE: {
             printf("type_info_of_type(");
-            print_type(context, expr->type_info_of_type);
+            print_type(expr->type_info_of_type);
             printf(")");
         } break;
 
         case EXPR_TYPE_INFO_OF_VALUE: {
             printf("type_info_of_value(");
-            print_expr(context, expr->type_info_of_value);
+            print_expr(expr->type_info_of_value);
             printf(")");
         } break;
 
@@ -3265,13 +3265,13 @@ void print_expr(Context *context, Expr *expr) {
             }
 
             printf("%s(", name);
-            print_type(context, expr->query_type_info.type);
+            print_type(expr->query_type_info.type);
             printf(")");
         } break;
 
         case EXPR_ENUM_MEMBER_NAME: {
             printf("enum_member_name(");
-            print_expr(context, expr->enum_member);
+            print_expr(expr->enum_member);
             printf(")");
         } break;
 
@@ -3284,26 +3284,26 @@ void print_expr(Context *context, Expr *expr) {
     }
 }
 
-void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
+void print_stmt(Stmt* stmt, u32 indent_level) {
     for (u32 i = 0; i < indent_level; i += 1) printf("    ");
 
     switch (stmt->kind) {
         case STMT_ASSIGNMENT: {
-            print_expr(context, stmt->assignment.left);
+            print_expr(stmt->assignment.left);
             printf(" = ");
-            print_expr(context, stmt->assignment.right);
+            print_expr(stmt->assignment.right);
             printf(";");
         } break;
 
         case STMT_OP_ASSIGNMENT: {
-            print_expr(context, stmt->op_assignment.left);
+            print_expr(stmt->op_assignment.left);
             printf(" %s= ", BINARY_OP_SYMBOL[stmt->op_assignment.op]);
-            print_expr(context, stmt->op_assignment.right);
+            print_expr(stmt->op_assignment.right);
             printf(";");
         } break;
 
         case STMT_EXPR: {
-            print_expr(context, stmt->expr);
+            print_expr(stmt->expr);
             printf(";");
         } break;
 
@@ -3318,11 +3318,11 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
             }
             printf(": ");
 
-            print_type(context, stmt->let.vars[0].type);
+            print_type(stmt->let.vars[0].type);
 
             if (stmt->let.right != null) {
                 printf(" = ");
-                print_expr(context, stmt->let.right);
+                print_expr(stmt->let.right);
             }
 
             printf(";");
@@ -3332,7 +3332,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
             printf("{\n");
 
             for (Stmt *inner = stmt->block.stmt; inner->kind != STMT_END; inner = inner->next) {
-                print_stmt(context, inner, indent_level + 1);
+                print_stmt(inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -3341,11 +3341,11 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
 
         case STMT_IF: {
             printf("if (");
-            print_expr(context, stmt->if_.condition);
+            print_expr(stmt->if_.condition);
             printf(") {\n");
 
             for (Stmt *inner = stmt->if_.then; inner->kind != STMT_END; inner = inner->next) {
-                print_stmt(context, inner, indent_level + 1);
+                print_stmt(inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -3355,7 +3355,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                 printf(" else {\n");
 
                 for (Stmt *inner = stmt->if_.else_then; inner->kind != STMT_END; inner = inner->next) {
-                    print_stmt(context, inner, indent_level + 1);
+                    print_stmt(inner, indent_level + 1);
                 }
 
                 for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -3365,7 +3365,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
 
         case STMT_SWITCH: {
             printf("switch (");
-            print_expr(context, stmt->switch_.index);
+            print_expr(stmt->switch_.index);
             printf(") {\n");
 
             for (u32 i = 0; i < stmt->switch_.case_count; i += 1) {
@@ -3377,12 +3377,12 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                     Switch_Case_Key *key = &c->keys[i];
 
                     if (i > 0) printf(", ");
-                    print_expr(context, key->expr);
+                    print_expr(key->expr);
                 }
                 printf(": {\n");
 
                 for (Stmt *inner = c->body; inner->kind != STMT_END; inner = inner->next) {
-                    print_stmt(context, inner, indent_level + 2);
+                    print_stmt(inner, indent_level + 2);
                 }
 
                 for (u32 i = 0; i <= indent_level; i += 1) printf("    ");
@@ -3394,7 +3394,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                 printf("_: {\n");
 
                 for (Stmt *inner = stmt->switch_.default_case->body; inner->kind != STMT_END; inner = inner->next) {
-                    print_stmt(context, inner, indent_level + 2);
+                    print_stmt(inner, indent_level + 2);
                 }
 
                 for (u32 i = 0; i <= indent_level; i += 1) printf("    ");
@@ -3408,7 +3408,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
         case STMT_FOR: {
             if (stmt->for_.kind == LOOP_CONDITIONAL) {
                 printf("for ");
-                print_expr(context, stmt->for_.condition);
+                print_expr(stmt->for_.condition);
                 printf(" {\n");
             } else if (stmt->for_.kind == LOOP_INFINITE) {
                 printf("for {\n");
@@ -3416,16 +3416,16 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
                 u8 *var_name = stmt->for_.range.var->name;
 
                 printf("for %s : ", var_name);
-                print_expr(context, stmt->for_.range.start);
+                print_expr(stmt->for_.range.start);
                 printf("..");
-                print_expr(context, stmt->for_.range.end);
+                print_expr(stmt->for_.range.end);
                 printf(" {\n");
             } else {
                 assert(false);
             }
 
             for (Stmt *inner = stmt->for_.body; inner->kind != STMT_END; inner = inner->next) {
-                print_stmt(context, inner, indent_level + 1);
+                print_stmt(inner, indent_level + 1);
             }
 
             for (u32 i = 0; i < indent_level; i += 1) printf("    ");
@@ -3435,7 +3435,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
         case STMT_RETURN: {
             if (stmt->return_.value != null) {
                 printf("return ");
-                print_expr(context, stmt->return_.value);
+                print_expr(stmt->return_.value);
                 printf(";");
             } else {
                 printf("return;");
@@ -3444,7 +3444,7 @@ void print_stmt(Context *context, Stmt* stmt, u32 indent_level) {
 
         case STMT_DEFER: {
             printf("defer ");
-            print_stmt(context, stmt->defer, indent_level);
+            print_stmt(stmt->defer, indent_level);
         };
 
         case STMT_CONTINUE: printf("continue;"); break;
@@ -7675,7 +7675,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                             if (!primitive_is_integer(primitive_of(key->type))) {
                                 print_file_pos(&key->pos);
                                 printf("Expected integer for array compound literal, but got ");
-                                print_type(context, key->type);
+                                print_type(key->type);
                                 printf("\n");
                                 return TYPECHECK_EXPR_BAD;
                             }
@@ -7736,9 +7736,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                         if (expected_child_type != member->value_expr->type) {
                             print_file_pos(&expr->pos);
                             printf("Invalid type inside compound literal: Expected ");
-                            print_type(context, expected_child_type);
+                            print_type(expected_child_type);
                             printf(" but got ");
-                            print_type(context, member->value_expr->type);
+                            print_type(member->value_expr->type);
                             printf("\n");
                             return TYPECHECK_EXPR_BAD;
                         }
@@ -7775,7 +7775,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                             if (member->key_expr->kind != EXPR_UNRESOLVED_IDENTIFIER || member->key_expr->unresolved.next != null) {
                                 print_file_pos(&expr->pos);
                                 printf("Expected structure member name, but got ");
-                                print_expr(context, expr);
+                                print_expr(expr);
                                 printf("\n");
                                 return TYPECHECK_EXPR_BAD;
                             }
@@ -7813,9 +7813,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
 
                             print_file_pos(&member->value_expr->pos);
                             printf("Expected ");
-                            print_type(context, member_type);
+                            print_type(member_type);
                             printf(" but got ");
-                            print_type(context, member->value_expr->type);
+                            print_type(member->value_expr->type);
                             printf(" for member '%s' of struct '%s'\n", member_name, struct_name);
                             return TYPECHECK_EXPR_BAD;
                         }
@@ -7833,7 +7833,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                 default: {
                     print_file_pos(&expr->pos);
                     printf("Invalid type for compound literal: ");
-                    print_type(context, expr->type);
+                    print_type(expr->type);
                     printf("\n");
                     return TYPECHECK_EXPR_BAD;
                 } break;
@@ -7873,9 +7873,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             if (expr->ternary.left->type != expr->ternary.right->type) {
                 print_file_pos(&expr->pos);
                 printf("Different types for halves of ternary operator: ");
-                print_type(context, expr->ternary.left->type);
+                print_type(expr->ternary.left->type);
                 printf(" vs ");
-                print_type(context, expr->ternary.right->type);
+                print_type(expr->ternary.right->type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -7957,15 +7957,15 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                 if (expr->binary.left->type != expr->binary.right->type) {
                     print_file_pos(&expr->pos);
                     printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[expr->binary.op]);
-                    print_type(context, expr->binary.left->type);
+                    print_type(expr->binary.left->type);
                     printf(" vs ");
-                    print_type(context, expr->binary.right->type);
+                    print_type(expr->binary.right->type);
                     printf("\n");
                     return TYPECHECK_EXPR_BAD;
                 } else {
                     print_file_pos(&expr->pos);
                     printf("Can't use operator %s on ", BINARY_OP_SYMBOL[expr->binary.op]);
-                    print_type(context, expr->binary.left->type);
+                    print_type(expr->binary.left->type);
                     printf("\n");
                     return TYPECHECK_EXPR_BAD;
                 }
@@ -8017,7 +8017,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (expr->type->kind != TYPE_BOOL) {
                         print_file_pos(&expr->unary.inner->pos);
                         printf("Can't apply unary not (!) to ");
-                        print_type(context, expr->type);
+                        print_type(expr->type);
                         printf(", only to bool\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -8028,7 +8028,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (!(primitive_is_integer(expr->type->kind) || primitive_is_float(expr->type->kind))) {
                         print_file_pos(&expr->unary.inner->pos);
                         printf("Can not apply unary negative (-) to ");
-                        print_type(context, expr->type);
+                        print_type(expr->type);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -8039,7 +8039,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (child_primitive != TYPE_POINTER) {
                         print_file_pos(&expr->pos);
                         printf("Can't dereference non-pointer type ");
-                        print_type(context, expr->unary.inner->type);
+                        print_type(expr->unary.inner->type);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -8048,7 +8048,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (pointer_to == TYPE_VOID) {
                         print_file_pos(&expr->pos);
                         printf("Can't dereference void pointer ");
-                        print_expr(context, expr->unary.inner);
+                        print_expr(expr->unary.inner);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -8063,7 +8063,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (!(expr->unary.inner->flags & EXPR_FLAG_ADDRESSABLE)) {
                         print_file_pos(&expr->pos);
                         printf("Can't take address of ");
-                        print_expr(context, expr->unary.inner);
+                        print_expr(expr->unary.inner);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -8075,7 +8075,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (!primitive_is_float(expr->unary.inner->type->kind)) {
                         print_file_pos(&expr->pos);
                         printf("Can't take the square root of a ");
-                        print_type(context, expr->type);
+                        print_type(expr->type);
                         printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     }
@@ -8135,7 +8135,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                 if (t->kind != TYPE_FN_POINTER) {
                     print_file_pos(&expr->call.pointer_expr->pos);
                     printf("Expected function pointer, but got ");
-                    print_type(context, t);
+                    print_type(t);
                     printf(" on left hand side of call\n");
                     return TYPECHECK_EXPR_BAD;
                 }
@@ -8188,9 +8188,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                 if (!type_can_assign(expected_type, actual_type)) {
                     print_file_pos(&expr->pos);
                     printf("Invalid type for %n parameter to '%s' Expected ", (u64) (p + 1), callee_name);
-                    print_type(context, expected_type);
+                    print_type(expected_type);
                     printf(" but got ");
-                    print_type(context, actual_type);
+                    print_type(actual_type);
                     printf("\n");
 
                     return TYPECHECK_EXPR_BAD;
@@ -8225,9 +8225,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             if (!valid) {
                 print_file_pos(&expr->pos);
                 printf("Invalid cast. Can't cast from ");
-                print_type(context, expr->cast_from->type);
+                print_type(expr->cast_from->type);
                 printf(" to ");
-                print_type(context, expr->type);
+                print_type(expr->type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -8254,7 +8254,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             } else {
                 print_file_pos(&expr->pos);
                 printf("Can't index a ");
-                print_type(context, array_type);
+                print_type(array_type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -8263,7 +8263,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             if (!primitive_is_integer(index_type)) {
                 print_file_pos(&expr->subscript.index->pos);
                 printf("Can only use integers as array indices, not ");
-                print_type(context, expr->subscript.index->type);
+                print_type(expr->subscript.index->type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -8309,7 +8309,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
 
                 if (!has_member) {
                     print_file_pos(&expr->pos);
-                    print_type(context, parent->type);
+                    print_type(parent->type);
                     printf(" has no member '%s'\n", access_name);
                     return TYPECHECK_EXPR_BAD;
                 }
@@ -8339,7 +8339,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             ) {
                 print_file_pos(&expr->pos);
                 printf("Can't call 'enum_length' on ");
-                print_type(context, expr->query_type_info.type);
+                print_type(expr->query_type_info.type);
                 printf(", it's not an enum");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -8352,7 +8352,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             if (expr->enum_member->type->kind != TYPE_ENUM) {
                 print_file_pos(&expr->enum_member->pos);
                 printf("Can't call 'enum_member_name' on a ");
-                print_type(context, expr->enum_member->type);
+                print_type(expr->enum_member->type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -8399,9 +8399,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             if (!type_can_assign(right_type, left_type)) {
                 print_file_pos(&left->pos);
                 printf("Types in assignment don't match: ");
-                print_type(context, left_type);
+                print_type(left_type);
                 printf(" vs ");
-                print_type(context, right_type);
+                print_type(right_type);
                 printf("\n");
                 return TYPECHECK_RESULT_BAD;
             }
@@ -8414,7 +8414,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf(", %s is const", const_name);
                 } else {
                     printf(" of type ");
-                    print_type(context, left->type);
+                    print_type(left->type);
                 }
                 printf("\n");
                 return TYPECHECK_RESULT_BAD;
@@ -8451,7 +8451,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 if (!valid_types) {
                     print_file_pos(&left->pos);
                     printf("Can't use operator %s on ", BINARY_OP_SYMBOL[op]);
-                    print_type(context, left_type);
+                    print_type(left_type);
                     printf("\n");
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -8464,9 +8464,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             } else {
                 print_file_pos(&left->pos);
                 printf("Types for operator %s don't match: ", BINARY_OP_SYMBOL[op]);
-                print_type(context, left_type);
+                print_type(left_type);
                 printf(" vs ");
-                print_type(context, right_type);
+                print_type(right_type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
             }
@@ -8479,7 +8479,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     printf(", %s is const", const_name);
                 } else {
                     printf(" of type ");
-                    print_type(context, left->type);
+                    print_type(left->type);
                 }
                 printf("\n");
                 return TYPECHECK_RESULT_BAD;
@@ -8530,9 +8530,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                         printf("'%s'", vars[i].name);
                     }
                     printf(var_count > 1? " have type " : " has type ");
-                    print_type(context, var_type);
+                    print_type(var_type);
                     printf(" but right hand side has type ");
-                    print_type(context, right->type);
+                    print_type(right->type);
                     printf("\n");
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -8566,7 +8566,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
             if (condition_primitive != TYPE_BOOL) {
                 print_file_pos(&stmt->if_.condition->pos);
                 printf("Expected bool but got ");
-                print_type(context, stmt->if_.condition->type);
+                print_type(stmt->if_.condition->type);
                 printf(" in 'if'-statement\n");
                 return TYPECHECK_RESULT_BAD;
             }
@@ -8618,9 +8618,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     if (stmt->switch_.index->type != key->expr->type) {
                         print_file_pos(&c->pos);
                         printf("Invalid type for case, expected ");
-                        print_type(context, stmt->switch_.index->type);
+                        print_type(stmt->switch_.index->type);
                         printf(" but got ");
-                        print_type(context, key->expr->type);
+                        print_type(key->expr->type);
                         printf("\n");
                     }
                     
@@ -8653,9 +8653,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                             if (key2->value == key->value) {
                                 print_file_pos(&key->expr->pos);
                                 printf("Multiple cases with key %u: ", key->value);
-                                print_expr(context, key->expr);
+                                print_expr(key->expr);
                                 printf(" and ");
-                                print_expr(context, key2->expr);
+                                print_expr(key2->expr);
                                 printf(". First case on line %u\n", key2->expr->pos.line);
                                 return TYPECHECK_RESULT_BAD;
                             }
@@ -8687,7 +8687,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 if (condition_primitive != TYPE_BOOL) {
                     print_file_pos(&stmt->for_.condition->pos);
                     printf("Expected bool but got ");
-                    print_type(context, stmt->for_.condition->type);
+                    print_type(stmt->for_.condition->type);
                     printf(" in 'for'-loop\n");
                     return TYPECHECK_RESULT_DONE;
                 }
@@ -8714,9 +8714,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 if (start->type != end->type) {
                     print_file_pos(&stmt->for_.range.start->pos);
                     printf("Ends of range have different type: ");
-                    print_type(context, start->type);
+                    print_type(start->type);
                     printf(" vs ");
-                    print_type(context, end->type);
+                    print_type(end->type);
                     printf("\n");
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -8725,7 +8725,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                 if (!primitive_is_integer(primitive_of(index_type))) {
                     print_file_pos(&stmt->for_.range.start->pos);
                     printf("Can't iterate over a range of ");
-                    print_type(context, index_type);
+                    print_type(index_type);
                     printf("\n");
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -8761,7 +8761,7 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Function '%s' is declared to return a ", name);
-                    print_type(context, expected_type);
+                    print_type(expected_type);
                     printf(", but tried to return a value. value\n");
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -8773,9 +8773,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                     u8 *name = scope->fn->name;
                     print_file_pos(&stmt->pos);
                     printf("Expected ");
-                    print_type(context, expected_type);
+                    print_type(expected_type);
                     printf(" but got ");
-                    print_type(context, stmt->return_.value->type);
+                    print_type(stmt->return_.value->type);
                     printf(" for return value in function '%s'\n", name);
                     return TYPECHECK_RESULT_BAD;
                 }
@@ -9518,9 +9518,9 @@ Typecheck_Result check_global(Context *context, Scope *scope, Global_Let *global
         if (!type_can_assign(var_type, global_let->expr->type)) {
             print_file_pos(&global_let->pos);
             printf("Right hand side of global variable declaration doesn't have correct type. Expected ");
-            print_type(context, var_type);
+            print_type(var_type);
             printf(" but got ");
-            print_type(context, global_let->expr->type);
+            print_type(global_let->expr->type);
             printf("\n");
             return TYPECHECK_RESULT_BAD;
         }
@@ -9843,7 +9843,7 @@ bool typecheck(Context *context) {
                 switch (item->kind) {
                     case TYPECHECK_RESOLVE_TYPE: {
                         printf("    The type of ");
-                        print_type(context, *item->resolve_type.slot);
+                        print_type(*item->resolve_type.slot);
                         printf("\n");
                     } break;
 
@@ -13496,7 +13496,7 @@ void machinecode_for_stmt(Context *context, Reg_Allocator *reg_allocator, Fn *fn
 
     #ifdef PRINT_GENERATED_INSTRUCTIONS
     printf("; ");
-    print_stmt(context, stmt, 0);
+    print_stmt(stmt, 0);
     #endif
 
     switch (stmt->kind) {
