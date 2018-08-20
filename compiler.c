@@ -1386,10 +1386,10 @@ u8* TOKEN_NAMES[TOKEN_KIND_COUNT] = {
 
     [TOKEN_BRACKET_ROUND_OPEN]   = "an opening parenthesis '('",
     [TOKEN_BRACKET_ROUND_CLOSE]  = "a closing parenthesis ')'",
-    [TOKEN_BRACKET_SQUARE_OPEN]  = "an opening square bracket '['",
-    [TOKEN_BRACKET_SQUARE_CLOSE] = "a closing square bracket ']'",
-    [TOKEN_BRACKET_CURLY_OPEN]   = "an opening curly brace '{'",
-    [TOKEN_BRACKET_CURLY_CLOSE]  = "a closing curly brace '}'",
+    [TOKEN_BRACKET_SQUARE_OPEN]  = "an opening bracket '['",
+    [TOKEN_BRACKET_SQUARE_CLOSE] = "a closing bracket ']'",
+    [TOKEN_BRACKET_CURLY_OPEN]   = "an opening bracket '{'",
+    [TOKEN_BRACKET_CURLY_CLOSE]  = "a closing bracket '}'",
 
     [TOKEN_KEYWORD_FN]           = "fn",
     [TOKEN_KEYWORD_EXTERN]       = "extern",
@@ -1856,18 +1856,8 @@ bool BINARY_OP_VALIDITY_MAP[BINARY_OP_COUNT][PRIMITIVE_GROUP_COUNT] = {
 
 
 typedef struct Compound_Member {
-    Expr *expr;
-
-    enum {
-        EXPR_COMPOUND_NO_NAME,
-        EXPR_COMPOUND_UNRESOLVED_NAME,
-        EXPR_COMPOUND_NAME
-    } name_mode;
-
-    union {
-        u8 *unresolved_name;
-        u32 member_index;
-    };
+    Expr *key_expr, *value_expr;
+    u32 member_index; // not set if EXPR_FLAG_UNRESOLVED
 } Compound_Member;
 
 #define EXPR_FLAG_UNRESOLVED  0x01
@@ -1927,8 +1917,9 @@ struct Expr { // 'typedef'd earlier!
         } string;
 
         struct {
-            Compound_Member *content;
-            u32 count;
+            Compound_Member *members;
+            u32 member_count;
+            bool keyed; // if true, all members have a 'key_expr', otherwise none have
         } compound;
 
         struct {
@@ -2819,29 +2810,6 @@ u8 primitive_size_of(Type_Kind primitive) {
     }
 }
 
-u8* compound_member_name(Context *context, Expr* expr, Compound_Member* member) {
-    switch (member->name_mode) {
-        case EXPR_COMPOUND_NAME: {
-            assert(expr->type->kind == TYPE_STRUCT);
-            u32 member_index = member->member_index;
-            return expr->type->structure.members[member_index].name;
-        } break;
-
-        case EXPR_COMPOUND_UNRESOLVED_NAME: {
-            return member->unresolved_name;
-        } break;
-
-        case EXPR_COMPOUND_NO_NAME: {
-            return null;
-        } break;
-
-        default: {
-            assert(false);
-            return null;
-        } break;
-    }
-}
-
 u64 type_size_of(Type* type) {
     u64 array_multiplier = 1;
 
@@ -3160,14 +3128,16 @@ void print_expr(Context *context, Expr *expr) {
             print_type(context, expr->type);
 
             printf(" { ");
-            for (u32 i = 0; i < expr->compound.count; i += 1) {
+            for (u32 i = 0; i < expr->compound.member_count; i += 1) {
                 if (i > 0) printf(", ");
 
-                u8* member_name = compound_member_name(context, expr, &expr->compound.content[i]);
-                if (member_name != null) printf("%s: ", member_name);
+                Compound_Member *member = &expr->compound.members[i];
 
-                Expr* child = expr->compound.content[i].expr;
-                print_expr(context, child);
+                if (member->key_expr != null) {
+                    print_expr(context, member->key_expr);
+                    printf(": ");
+                }
+                print_expr(context, member->value_expr);
             }
             printf(" }");
         } break;
@@ -4915,60 +4885,56 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
     }
     t += 1;
 
-    typedef struct Member_Expr Member_Expr;
-    struct Member_Expr {
-        Expr* expr;
-        u8 *name;
-        Member_Expr *next, *previous;
+    typedef struct Link Link;
+    struct Link {
+        Compound_Member member;
+        Link *next;
     };
 
     u32 member_count = 0;
-    Member_Expr* first_member = null;
-    Member_Expr* last_member = null;
+    Link *first_link = null, *last_link = null;
 
     arena_stack_push(&context->stack);
 
     while (t->kind != TOKEN_BRACKET_CURLY_CLOSE) {
-        u8 *name = null;
-        if (t[0].kind == TOKEN_IDENTIFIER && t[1].kind == TOKEN_COLON) {
-            if (t[0].identifier_chain.next != null) {
-                print_file_pos(&t->pos);
-                printf("Can't use identifier chain ");
-                print_identifier_chain(&t->identifier_chain);
-                printf(" as compound member name\n");
-                return null;
-            }
-            name = t[0].identifier_chain.name;
-            t += 2;
-        }
+        u32 expr_length;
 
-        u32 member_length = 0;
-        Expr* member = parse_expr(context, scope, t, &member_length, false);
-        t += member_length;
+        Expr *first_expr = parse_expr(context, scope, t, &expr_length, false);
+        t += expr_length;
 
-        if (member == null) {
+        if (first_expr == null) {
             *length = t - t_start;
             return null;
         }
 
-        Member_Expr* next = arena_new(&context->stack, Member_Expr);
-        next->name = name;
-        next->expr = member;
+        Expr *second_expr = null;
+        if (t->kind == TOKEN_COLON) {
+            t += 1;
+            second_expr = parse_expr(context, scope, t, &expr_length, false);
+            t += expr_length;
 
-        if (first_member == null) {
-            first_member = next;
-        } else {
-            next->previous = last_member;
-            last_member->next = next;
+            if (second_expr == null) {
+                *length = t - t_start;
+                return null;
+            }
         }
-        last_member = next;
 
+
+        Link *link = arena_new(&context->stack, Link);
+        if (second_expr == null) {
+            link->member.value_expr = first_expr;
+        } else {
+            link->member.key_expr   = first_expr;
+            link->member.value_expr = second_expr;
+        }
+
+        last_link = (first_link == null? (first_link = link) : (last_link->next = link));
         member_count += 1;
 
         if (t->kind != TOKEN_BRACKET_CURLY_CLOSE) {
             if (t->kind != TOKEN_COMMA) {
                 print_file_pos(&t->pos);
-                printf("Expected comma ',' or closing parenthesis '}' after value in compound, but got ");
+                printf("Expected comma ',' or closing bracket '}' after value in compound, but got ");
                 print_token(t);
                 printf("\n");
                 *length = t - t_start;
@@ -4983,30 +4949,40 @@ Expr* parse_compound(Context *context, Scope *scope, Token* t, u32* length) {
         return null;
     }
     t += 1;
+    *length = t - t_start;
 
     Expr* expr = arena_new(&context->arena, Expr);
     expr->kind = EXPR_COMPOUND;
     expr->pos = t_start->pos;
+    expr->flags |= EXPR_FLAG_UNRESOLVED;
 
-    expr->compound.count = member_count;
-    expr->compound.content = (void*) arena_alloc(&context->arena, member_count * sizeof(Compound_Member));
+    expr->compound.member_count = member_count;
+    expr->compound.members = (void*) arena_alloc(&context->arena, member_count * sizeof(Compound_Member));
 
-    Member_Expr* p = first_member;
-    for (u32 i = 0; i < member_count; i += 1, p = p->next) {
-        Compound_Member* member = &expr->compound.content[i];
-        member->expr = p->expr;
+    bool any_with_key = false;
+    bool any_without_key = false;
 
-        if (p->name == null) {
-            member->name_mode = EXPR_COMPOUND_NO_NAME;
+    Link *link = first_link;
+    for (u32 i = 0; i < member_count; i += 1, link = link->next) {
+        expr->compound.members[i] = link->member;
+
+        if (link->member.key_expr == null) {
+            any_without_key = true;
         } else {
-            member->unresolved_name = p->name;
-            member->name_mode = EXPR_COMPOUND_UNRESOLVED_NAME;
+            any_with_key = true;
         }
     }
+    assert(link == null);
 
     arena_stack_pop(&context->stack);
 
-    *length = t - t_start;
+    if (any_with_key && any_without_key) {
+        print_file_pos(&t_start->pos);
+        printf("Compound literal can't contain both indexed and non-indexed members\n");
+        return null;
+    }
+    expr->compound.keyed = any_with_key;
+
     return expr;
 }
 
@@ -7635,17 +7611,23 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
 
                 while ((*array_layer)->kind == TYPE_ARRAY && compound_expr->kind == EXPR_COMPOUND) {
                     if (((*array_layer)->flags & TYPE_FLAG_UNRESOLVED) && (*array_layer)->array.length_expr == null) {
-                        u64 infered_length = compound_expr->compound.count;
-                        Type *array_of_type = (*array_layer)->array.of;
-                        *array_layer = get_array_type(context, array_of_type, infered_length);
+                        if (compound_expr->compound.keyed) {
+                            print_file_pos(&expr->pos);
+                            printf("Can't infer array from a indexed compound literal\n");
+                            return TYPECHECK_EXPR_BAD;
+                        } else {
+                            u64 infered_length = compound_expr->compound.member_count;
+                            Type *array_of_type = (*array_layer)->array.of;
+                            *array_layer = get_array_type(context, array_of_type, infered_length);
+                        }
                     }
 
-                    if (compound_expr->compound.count <= 0) {
+                    if (compound_expr->compound.member_count <= 0) {
                         break;
                     }
 
                     array_layer = &((*array_layer)->array.of);
-                    compound_expr = compound_expr->compound.content[0].expr;
+                    compound_expr = compound_expr->compound.members[0].value_expr;
                 }
             }
 
@@ -7659,37 +7641,43 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             switch (expr->type->kind) {
                 case TYPE_ARRAY: {
                     u64 expected_child_count = expr->type->array.length;
-                    Type* expected_child_type = expr->type->array.of;
+                    Type *expected_child_type = expr->type->array.of;
 
-                    if (expr->compound.count != expected_child_count) {
+                    if (expr->compound.member_count != expected_child_count) {
                         print_file_pos(&expr->pos);
                         printf(
                             "Too %s values in compound literal: expected %u, got %u\n",
-                            (expr->compound.count > expected_child_count)? "many" : "few",
+                            (expr->compound.member_count > expected_child_count)? "many" : "few",
                             (u64) expected_child_count,
-                            (u64) expr->compound.count
+                            (u64) expr->compound.member_count
                         );
                         return TYPECHECK_EXPR_BAD;
                     }
 
-                    for (u32 m = 0; m < expr->compound.count; m += 1) {
-                        Compound_Member* member = &expr->compound.content[m];
+                    for (u32 m = 0; m < expr->compound.member_count; m += 1) {
+                        Compound_Member *member = &expr->compound.members[m];
+                        assert(expr->compound.keyed == (member->key_expr != null));
 
-                        if (member->name_mode != EXPR_COMPOUND_NO_NAME) {
+                        if (member->key_expr != null) {
+                            // TODO Actually try to evaluate the key_expr as a compile time expr, and use it as an index into the array
                             print_file_pos(&expr->pos);
-                            printf("Unexpected member name '%s' given inside array literal\n", compound_member_name(context, expr, member));
+                            printf("Unexpected member index ");
+                            print_expr(context, member->key_expr);
+                            printf(" given inside array literal\n");
                             return TYPECHECK_EXPR_BAD;
+                        } else {
+                            member->member_index = m;
                         }
 
-                        Typecheck_Expr_Result r = typecheck_expr(context, scope, fn_pos, member->expr, expected_child_type);
+                        Typecheck_Expr_Result r = typecheck_expr(context, scope, fn_pos, member->value_expr, expected_child_type);
                         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-                        if (expected_child_type != member->expr->type) {
+                        if (expected_child_type != member->value_expr->type) {
                             print_file_pos(&expr->pos);
                             printf("Invalid type inside compound literal: Expected ");
                             print_type(context, expected_child_type);
                             printf(" but got ");
-                            print_type(context, member->expr->type);
+                            print_type(context, member->value_expr->type);
                             printf("\n");
                             return TYPECHECK_EXPR_BAD;
                         }
@@ -7697,27 +7685,32 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                 } break;
 
                 case TYPE_STRUCT: {
-                    if (expr->compound.count > expr->type->structure.member_count) {
+                    if (expr->compound.member_count > expr->type->structure.member_count) {
                         u64 expected = expr->type->structure.member_count;
-                        u64 given = expr->compound.count;
+                        u64 given = expr->compound.member_count;
                         print_file_pos(&expr->pos);
                         printf("Expected at most %u %s, but got %u for struct literal\n", expected, expected == 1? "member" : "members", given);
                         return TYPECHECK_EXPR_BAD;
                     }
 
-                    bool any_named = false;
-                    bool any_unnamed = false;
-
                     u8 *set_map = arena_alloc(&context->stack, expr->type->structure.member_count);
                     mem_clear(set_map, expr->type->structure.member_count);
 
-                    for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        Expr *child = expr->compound.content[i].expr;
+                    for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                        Compound_Member *member = &expr->compound.members[i];
+                        assert(expr->compound.keyed == (member->key_expr != null));
 
-                        if (expr->compound.content[i].name_mode == EXPR_COMPOUND_UNRESOLVED_NAME) {
-                            u8 *unresolved_name = expr->compound.content[i].unresolved_name;
+                        if (member->key_expr != null) {
+                            if (member->key_expr->kind != EXPR_UNRESOLVED_IDENTIFIER || member->key_expr->unresolved.next != null) {
+                                print_file_pos(&expr->pos);
+                                printf("Expected structure member name, but got ");
+                                print_expr(context, expr);
+                                printf("\n");
+                                return TYPECHECK_EXPR_BAD;
+                            }
+
+                            u8 *unresolved_name = member->key_expr->unresolved.name;
                             u32 member_index = U32_MAX;
-
                             for (u32 m = 0; m < expr->type->structure.member_count; m += 1) {
                                 if (expr->type->structure.members[m].name == unresolved_name) {
                                     member_index = m;
@@ -7732,57 +7725,44 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                                 printf("Struct '%s' has no member '%s'\n", struct_name, member_name);
                                 return TYPECHECK_EXPR_BAD;
                             } else {
-                                expr->compound.content[i].name_mode = EXPR_COMPOUND_NAME;
-                                expr->compound.content[i].member_index = member_index;
+                                member->member_index = member_index;
                             }
-                        }
-
-                        if (expr->compound.content[i].name_mode == EXPR_COMPOUND_NO_NAME) {
-                            expr->compound.content[i].member_index = i;
-                            any_unnamed = true;
                         } else {
-                            any_named = true;
+                            member->member_index = i;
                         }
 
-                        u32 m = expr->compound.content[i].member_index;
-                        Type *member_type = expr->type->structure.members[m].type;
+                        Type *member_type = expr->type->structure.members[member->member_index].type;
                         
-                        Typecheck_Expr_Result r = typecheck_expr(context, scope, fn_pos, child, member_type);
+                        Typecheck_Expr_Result r = typecheck_expr(context, scope, fn_pos, member->value_expr, member_type);
                         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
 
-                        if (!type_can_assign(member_type, child->type)) {
-                            u8 *member_name = expr->type->structure.members[m].name;
+                        if (!type_can_assign(member_type, member->value_expr->type)) {
+                            u8 *member_name = expr->type->structure.members[member->member_index].name;
                             u8 *struct_name = expr->type->structure.name;
 
-                            print_file_pos(&child->pos);
+                            print_file_pos(&member->value_expr->pos);
                             printf("Expected ");
                             print_type(context, member_type);
                             printf(" but got ");
-                            print_type(context, child->type);
+                            print_type(context, member->value_expr->type);
                             printf(" for member '%s' of struct '%s'\n", member_name, struct_name);
                             return TYPECHECK_EXPR_BAD;
                         }
 
                         if (set_map[i]) {
-                            u8 *name = expr->type->structure.members[m].name;
-                            u8* member_name = name;
-
-                            print_file_pos(&child->pos);
+                            u8 *member_name = expr->type->structure.members[member->member_index].name;
+                            print_file_pos(&member->value_expr->pos);
                             printf("'%s' is set more than once in struct literal\n", member_name);
                             return TYPECHECK_EXPR_BAD;
                         }
                         set_map[i] = true;
                     }
 
-                    if (any_named && any_unnamed) {
+                    u64 expected_members = expr->type->structure.member_count;
+                    u64 given_members = expr->compound.member_count;
+                    if (!expr->compound.keyed && given_members > 0 && expected_members != given_members) {
                         print_file_pos(&expr->pos);
-                        printf("Struct literal can't have both named and unnamed members\n");
-                        return TYPECHECK_EXPR_BAD;
-                    }
-
-                    if (any_unnamed && expr->compound.count != expr->type->structure.member_count) {
-                        print_file_pos(&expr->pos);
-                        printf("Expected %u members, but got %u for struct literal\n", expr->type->structure.member_count, expr->compound.count);
+                        printf("Expected %u %s, but got %u for struct literal\n", expected_members, expected_members == 1? "member" : "members", given_members);
                         return TYPECHECK_EXPR_BAD;
                     }
                 } break;
@@ -7795,6 +7775,8 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     return TYPECHECK_EXPR_BAD;
                 } break;
             }
+
+            expr->flags &= ~EXPR_FLAG_UNRESOLVED;
         } break;
 
         case EXPR_TERNARY: {
@@ -9150,25 +9132,20 @@ Eval_Result eval_compile_time_expr(Context* context, Expr* expr, u8* result_into
                     u64 child_size = type_size_of(child_type);
 
                     u8* mem = result_into;
-                    for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        assert(expr->compound.content[i].name_mode == EXPR_COMPOUND_NO_NAME);
-                        Expr* child = expr->compound.content[i].expr;
-                        Eval_Result result = eval_compile_time_expr(context, child, mem);
+                    for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                        Compound_Member *member = &expr->compound.members[i];
+                        Eval_Result result = eval_compile_time_expr(context, member->value_expr, mem + child_size*member->member_index);
                         if (result != EVAL_OK) return result;
-                        mem += child_size;
                     }
                 } break;
 
                 case TYPE_STRUCT: {
                     u8* mem = result_into;
 
-                    for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        assert(expr->compound.content[i].name_mode != EXPR_COMPOUND_UNRESOLVED_NAME);
-                        u32 m = expr->compound.content[i].member_index;
-                        u64 offset = expr->type->structure.members[m].offset;
-
-                        Expr* child = expr->compound.content[i].expr;
-                        Eval_Result result = eval_compile_time_expr(context, child, mem + offset);
+                    for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                        Compound_Member *member = &expr->compound.members[i];
+                        u64 offset = expr->type->structure.members[member->member_index].offset;
+                        Eval_Result result = eval_compile_time_expr(context, member->value_expr, mem + offset);
                         if (result != EVAL_OK) return result;
                     }
                 } break;
@@ -11849,8 +11826,8 @@ u32 machinecode_expr_reserves(Expr *expr) {
         case EXPR_UNRESOLVED_IDENTIFIER: assert(false);
 
         case EXPR_COMPOUND: {
-            for (u32 i = 0; i < expr->compound.count; i += 1) {
-                flags |= machinecode_expr_reserves(expr->compound.content[i].expr);
+            for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                flags |= machinecode_expr_reserves(expr->compound.members[i].value_expr);
             }
         } break;
 
@@ -12106,9 +12083,9 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
 
         case EXPR_COMPOUND: {
             if (place.kind == PLACE_NOWHERE) {
-                for (u32 i = 0; i < expr->compound.count; i += 1) {
-                    Expr *child = expr->compound.content[i].expr;
-                    machinecode_for_expr(context, fn, child, reg_allocator, place);
+                for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                    Compound_Member *member = &expr->compound.members[i];
+                    machinecode_for_expr(context, fn, member->value_expr, reg_allocator, place);
                 }
                 return;
             }
@@ -12138,36 +12115,32 @@ void machinecode_for_expr(Context *context, Fn *fn, Expr *expr, Reg_Allocator *r
                     Type* child_type = expr->type->array.of;
                     u64 child_size = type_size_of(child_type);
 
-                    for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        assert(expr->compound.content[i].name_mode == EXPR_COMPOUND_NO_NAME);
+                    for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                        Compound_Member *member = &expr->compound.members[i];
 
-                        Expr *child = expr->compound.content[i].expr;
-                        machinecode_for_expr(context, fn, child, reg_allocator, place);
+                        X64_Place child_place = place;
+                        child_place.address.immediate_offset += (i32) (child_size * member->member_index);
 
-                        assert((((i64) place.address.immediate_offset) + ((i64) child_size)) < I32_MAX);
-                        place.address.immediate_offset += child_size;
+                        machinecode_for_expr(context, fn, member->value_expr, reg_allocator, child_place);
                     }
                 } break;
 
                 case TYPE_STRUCT: {
-                    if (expr->compound.count != expr->type->structure.member_count) {
+                    if (expr->compound.member_count != expr->type->structure.member_count) {
                         u64 size = type_size_of(expr->type);
                         u64 align = type_align_of(expr->type);
                         machinecode_zero_out_struct(context, reg_allocator, place.address, size, align);
                     }
 
-                    for (u32 i = 0; i < expr->compound.count; i += 1) {
-                        assert(expr->compound.content[i].name_mode != EXPR_COMPOUND_UNRESOLVED_NAME);
+                    for (u32 i = 0; i < expr->compound.member_count; i += 1) {
+                        Compound_Member *member = &expr->compound.members[i];
 
-                        u32 type_member_index = expr->compound.content[i].member_index;
-                        i32 member_offset = expr->type->structure.members[type_member_index].offset;
+                        i32 member_offset = expr->type->structure.members[member->member_index].offset;
 
-                        assert((place.address.immediate_offset + member_offset) < I32_MAX);
-                        X64_Place offset_place = place;
-                        offset_place.address.immediate_offset += (i32) member_offset;
+                        X64_Place child_place = place;
+                        child_place.address.immediate_offset += (i32) member_offset;
 
-                        Expr* child = expr->compound.content[i].expr;
-                        machinecode_for_expr(context, fn, child, reg_allocator, offset_place);
+                        machinecode_for_expr(context, fn, member->value_expr, reg_allocator, child_place);
                     }
                 } break;
 
