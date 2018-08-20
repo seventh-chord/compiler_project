@@ -7293,7 +7293,7 @@ Typecheck_Result resolve_type(Context *context, Scope *scope, u32 fn_pos, Type *
                         printf("Can't infer array size in this context\n");
                         return TYPECHECK_RESULT_BAD;
                     } else {
-                        Type *type_default_int = &context->primitive_types[TYPE_U64];
+                        Type *type_default_int = &context->primitive_types[TYPE_DEFAULT_INT];
                         Typecheck_Expr_Result check_result = typecheck_expr(context, scope, fn_pos, length_expr, type_default_int);
                         if (check_result == TYPECHECK_EXPR_BAD || check_result == TYPECHECK_EXPR_DEPENDENT) {
                             return check_result;
@@ -7613,7 +7613,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     if (((*array_layer)->flags & TYPE_FLAG_UNRESOLVED) && (*array_layer)->array.length_expr == null) {
                         if (compound_expr->compound.keyed) {
                             print_file_pos(&expr->pos);
-                            printf("Can't infer array from a indexed compound literal\n");
+                            printf("Can't infer array length from a indexed compound literal\n");
                             return TYPECHECK_EXPR_BAD;
                         } else {
                             u64 infered_length = compound_expr->compound.member_count;
@@ -7643,10 +7643,12 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                     u64 expected_child_count = expr->type->array.length;
                     Type *expected_child_type = expr->type->array.of;
 
-                    if (expr->compound.member_count != expected_child_count) {
+                    bool to_many = expr->compound.member_count > expected_child_count;
+                    bool to_few  = !expr->compound.keyed && expr->compound.member_count < expected_child_count;
+                    if (expr->compound.member_count > 0 && (to_many || to_few)) {
                         print_file_pos(&expr->pos);
                         printf(
-                            "Too %s values in compound literal: expected %u, got %u\n",
+                            "Too %s values in array literal: expected %u, got %u\n",
                             (expr->compound.member_count > expected_child_count)? "many" : "few",
                             (u64) expected_child_count,
                             (u64) expr->compound.member_count
@@ -7654,20 +7656,79 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                         return TYPECHECK_EXPR_BAD;
                     }
 
+                    u8 *set_map = arena_alloc(&context->stack, expected_child_count);
+                    mem_clear(set_map, expected_child_count);
+
                     for (u32 m = 0; m < expr->compound.member_count; m += 1) {
                         Compound_Member *member = &expr->compound.members[m];
                         assert(expr->compound.keyed == (member->key_expr != null));
 
                         if (member->key_expr != null) {
-                            // TODO Actually try to evaluate the key_expr as a compile time expr, and use it as an index into the array
-                            print_file_pos(&expr->pos);
-                            printf("Unexpected member index ");
-                            print_expr(context, member->key_expr);
-                            printf(" given inside array literal\n");
-                            return TYPECHECK_EXPR_BAD;
+                            Expr *key = member->key_expr;
+
+                            Type *type_default_int = &context->primitive_types[TYPE_DEFAULT_INT];
+                            Typecheck_Expr_Result check_result = typecheck_expr(context, scope, fn_pos, key, type_default_int);
+                            if (check_result == TYPECHECK_EXPR_BAD || check_result == TYPECHECK_EXPR_DEPENDENT) return check_result;
+
+                            // NB We are a bit relaxed about type restrictions here, effectively allowing
+                            // enums members to be used as indices.
+                            if (!primitive_is_integer(primitive_of(key->type))) {
+                                print_file_pos(&key->pos);
+                                printf("Expected integer for array compound literal, but got ");
+                                print_type(context, key->type);
+                                printf("\n");
+                                return TYPECHECK_EXPR_BAD;
+                            }
+
+                            u64 value = 0;
+                            arena_stack_push(&context->stack);
+                            Eval_Result eval_result = eval_compile_time_expr(context, key, (u8*) &value);
+                            arena_stack_pop(&context->stack);
+
+                            switch (eval_result) {
+                                case EVAL_DEPENDENT: return TYPECHECK_RESULT_DEPENDENT;
+                                case EVAL_BAD: return TYPECHECK_RESULT_BAD;
+                                case EVAL_DO_AT_RUNTIME: {
+                                    print_file_pos(&key->pos);
+                                    printf("Can't compute array literal index at compile time\n");
+                                    return TYPECHECK_RESULT_BAD;
+                                } break;
+                                case EVAL_OK: break;
+                                default: assert(false);
+                            }
+
+                            i64 signed_value;
+                            if (primitive_is_signed(primitive_of(key->type))) {
+                                switch (type_size_of(key->type)) {
+                                    case 1: signed_value = (i64) ((i8) value); break;
+                                    case 2: signed_value = (i64) ((i8) value); break;
+                                    case 4: signed_value = (i64) ((i8) value); break;
+                                    case 8: signed_value = (i64) ((i8) value); break;
+                                    default: assert(false);
+                                }
+                            } else {
+                                assert(value <= I64_MAX);
+                                signed_value = value;
+                            }
+
+                            if (signed_value < 0 || signed_value >= expected_child_count) {
+                                print_file_pos(&key->pos);
+                                printf("Key value %i is out of range for array literal of length %u\n", signed_value, expected_child_count);
+                                return TYPECHECK_RESULT_BAD;
+                            }
+
+                            member->member_index = value;
                         } else {
                             member->member_index = m;
                         }
+
+                        assert(member->member_index < expected_child_count);
+                        if (set_map[member->member_index]) {
+                            print_file_pos(&member->value_expr->pos);
+                            printf("Index %u is set more than once in array literal\n", (u64) member->member_index);
+                            return TYPECHECK_EXPR_BAD;
+                        }
+                        set_map[member->member_index] = true;
 
                         Typecheck_Expr_Result r = typecheck_expr(context, scope, fn_pos, member->value_expr, expected_child_type);
                         if (r == TYPECHECK_EXPR_BAD || r == TYPECHECK_EXPR_DEPENDENT) return r;
@@ -7685,12 +7746,22 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                 } break;
 
                 case TYPE_STRUCT: {
-                    if (expr->compound.member_count > expr->type->structure.member_count) {
-                        u64 expected = expr->type->structure.member_count;
-                        u64 given = expr->compound.member_count;
-                        print_file_pos(&expr->pos);
-                        printf("Expected at most %u %s, but got %u for struct literal\n", expected, expected == 1? "member" : "members", given);
-                        return TYPECHECK_EXPR_BAD;
+                    if (expr->compound.keyed) {
+                        if (expr->compound.member_count > expr->type->structure.member_count) {
+                            u64 expected = expr->type->structure.member_count;
+                            u64 given = expr->compound.member_count;
+                            print_file_pos(&expr->pos);
+                            printf("Expected at most %u %s, but got %u for struct literal\n", expected, expected == 1? "member" : "members", given);
+                            return TYPECHECK_EXPR_BAD;
+                        }
+                    } else {
+                        u64 expected_members = expr->type->structure.member_count;
+                        u64 given_members = expr->compound.member_count;
+                        if (!expr->compound.keyed && given_members > 0 && expected_members != given_members) {
+                            print_file_pos(&expr->pos);
+                            printf("Expected %u %s, but got %u for struct literal\n", expected_members, expected_members == 1? "member" : "members", given_members);
+                            return TYPECHECK_EXPR_BAD;
+                        }
                     }
 
                     u8 *set_map = arena_alloc(&context->stack, expr->type->structure.member_count);
@@ -7756,14 +7827,6 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
                             return TYPECHECK_EXPR_BAD;
                         }
                         set_map[i] = true;
-                    }
-
-                    u64 expected_members = expr->type->structure.member_count;
-                    u64 given_members = expr->compound.member_count;
-                    if (!expr->compound.keyed && given_members > 0 && expected_members != given_members) {
-                        print_file_pos(&expr->pos);
-                        printf("Expected %u %s, but got %u for struct literal\n", expected_members, expected_members == 1? "member" : "members", given_members);
-                        return TYPECHECK_EXPR_BAD;
                     }
                 } break;
 
@@ -8040,7 +8103,9 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
 
                     if (var == null) {
                         print_file_pos(&expr->pos);
-                        printf("No such function or function pointer '%s'\n", expr->call.unresolved);
+                        printf("No such function or function pointer: ");
+                        print_identifier_chain(&expr->call.unresolved);
+                        printf("\n");
                         return TYPECHECK_EXPR_BAD;
                     } else {
                         // Modify the call to call a function pointer stored in a variable
@@ -8197,7 +8262,7 @@ Typecheck_Expr_Result typecheck_expr(Context *context, Scope *scope, u32 fn_pos,
             Type_Kind index_type = primitive_of(expr->subscript.index->type);
             if (!primitive_is_integer(index_type)) {
                 print_file_pos(&expr->subscript.index->pos);
-                printf("Can only use %s and %s as an array index, not ", PRIMITIVE_NAMES[TYPE_U64], PRIMITIVE_NAMES[TYPE_I64]);
+                printf("Can only use integers as array indices, not ");
                 print_type(context, expr->subscript.index->type);
                 printf("\n");
                 return TYPECHECK_EXPR_BAD;
@@ -8559,7 +8624,9 @@ Typecheck_Result typecheck_stmt(Context* context, Scope *scope, Stmt* stmt) {
                         printf("\n");
                     }
                     
-                    // TODO ensure that the key expr is actually a constant!
+                    // TODO ensure that the key expr is actually a constant, and not just something
+                    // we can evaluate at compiletime (which, NB, are different). If we don't do
+                    // this, we can get potentially confusing behaviour.
 
                     arena_stack_push(&context->stack);
                     Eval_Result eval_result = eval_compile_time_expr(context, key->expr, (u8*) &key->value);
@@ -9593,7 +9660,7 @@ Typecheck_Result typecheck_item_resolve(Context *context, Typecheck_Item *item) 
 
 
             if (fn->kind == FN_KIND_NORMAL) { 
-                arena_stack_push(&context->stack); // TODO do we still need this?
+                arena_stack_push(&context->stack); // Used i.e. in typecheck_expr > EXPR_COMPOUND
 
                 // Body types
                 for (Stmt* stmt = fn->body.first_stmt; stmt->kind != STMT_END; stmt = stmt->next) {

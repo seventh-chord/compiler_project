@@ -18,6 +18,7 @@ fn main() {
     print(get_direction_instruction(Direction::EAST));
     print(get_direction_instruction(cast(Direction, 7)));
     shadowing();
+    array_test();
     ExitProcess(0);
 }
 
@@ -43,8 +44,20 @@ fn get_direction_instruction(dir: Direction) -> str {
 
 enum Direction { NORTH; SOUTH; EAST; WEST; }
 
-fn array_length_test() {
+fn array_test() {
     let questionable = [][][QUESTIONABLE_OK_THANKS - 1]u32 { { { 1, 2 } }, { { 1, 2 } } };
+
+    let info = [enum_length(Direction)]bool {
+        Direction::EAST:  true,
+        Direction::NORTH: true,
+    };
+
+    if info[Direction::NORTH] && info[Direction::EAST] && !info[Direction::SOUTH] && !info[Direction::WEST] {
+        print("Well that means we have done the right thing\n");
+    } else {
+        print("Apparently something has gotten really sauced up\n");
+        print("Stuff is broken!\n");
+    }
 }
 
 const QUESTIONABLE_OK_THANKS = 3;
