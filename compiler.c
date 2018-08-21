@@ -8854,7 +8854,7 @@ typedef enum Register {
     R8,  R9,  R10, R11,
     R12, R13, R14, R15,
 
-    AH, CH, DH, BH, // Not sure if we need these yet
+    AH, CH, DH, BH,
 
     // XMM media registers, up to 128 bits
     XMM0,  XMM1,  XMM2,  XMM3, 

@@ -3,5 +3,6 @@
 build
 out.exe
 reference/*.pdf
+reference/*.exe
 debug_test/*
 *.blend1
