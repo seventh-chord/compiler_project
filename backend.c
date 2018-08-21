@@ -1,9 +1,5 @@
 
-// TODO do MUL, DIV, SHL, SAR, SHR next, as these are nasty special cases
-// TODO We don't have all encoding modes yet
-// TODO multi-byte opcodes (sse, and I think also inc/dec)
-// TODO f2 and f3 prefixes for sse
-// TODO restrictions on registers (for mul and shift instructions)
+// TODO sse instructions, which get somewhat funky
 
 #include "common.c"
 
@@ -66,6 +62,11 @@ typedef struct Place {
 typedef enum Inst_Kind {
     INST_ADD,
 
+    INST_MUL,
+    INST_IMUL,
+    INST_DIV,
+    INST_IDIV,
+
     INST_COUNT,
 } Inst_Kind;
 
@@ -96,14 +97,18 @@ typedef enum Encoding_Mode {
     ENCODE_R1_M1, ENCODE_R2_M2, ENCODE_R4_M4, ENCODE_R8_M8,
     ENCODE_M1_R1, ENCODE_M2_R2, ENCODE_M4_R4, ENCODE_M8_R8,
 
+    ENCODE_R1, ENCODE_R2, ENCODE_R4, ENCODE_R8,
+    ENCODE_M1, ENCODE_M2, ENCODE_M4, ENCODE_M8,
+
     ENCODING_MODE_COUNT,
 } Encoding_Mode;
 
 
-#define ENCODING_WORD_OPERANDS 0x01 // prefixes 0x66
-#define ENCODING_REX_W         0x02
-#define ENCODING_MODRM_FLAG    0x04 // sets modrm.reg to Encoding.modrm_flag
-#define ENCODING_REG_IN_OPCODE 0x08
+#define ENCODING_WORD_OPERANDS    0x01 // prefixes 0x66
+#define ENCODING_REX_W            0x02
+#define ENCODING_MODRM_FLAG       0x04 // sets modrm.reg to Encoding.modrm_flag
+#define ENCODING_REG_IN_OPCODE    0x08
+#define ENCODING_SECONDARY        0x10 // prefixes 0x0f
 
 typedef struct Encoding {
     u8 exists;
@@ -143,6 +148,56 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         [ENCODE_R4_R4] = { 1, 0x03 },
         [ENCODE_R8_R8] = { 1, 0x03, ENCODING_REX_W },
     },
+
+    [INST_MUL] = {
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4 },
+    },
+    [INST_DIV] = {
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 6 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 6 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 6 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 6 },
+    },
+    [INST_IMUL] = {
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5 },
+
+        [ENCODE_R2_R2] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_WORD_OPERANDS },
+        [ENCODE_R4_R4] = { 1, 0xaf, ENCODING_SECONDARY },
+        [ENCODE_R8_R8] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_REX_W },
+        [ENCODE_R2_M2] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_WORD_OPERANDS },
+        [ENCODE_R4_M4] = { 1, 0xaf, ENCODING_SECONDARY },
+        [ENCODE_R8_M8] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_REX_W },
+
+        // We don't have the ENCODE_R*_R*_I* and ENCODE_R*_M*_I* variants of imul at the moment
+    },
+    [INST_IDIV] = {
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7 },
+    },
 };
 
 u8 REG_INDEX_MAP[REG_COUNT] = {
@@ -164,7 +219,7 @@ u8 REG_INDEX_MAP[REG_COUNT] = {
     [R15] = 15,
 };
 
-Encoded_Inst encode(Inst *inst) {
+Encoded_Inst encode(Inst inst) {
     Encoding_Mode encoding_mode = ENCODING_MODE_INVALID;
     {
         enum {
@@ -176,34 +231,34 @@ Encoded_Inst encode(Inst *inst) {
 
         int size_offset;
 
-        switch (inst->a.size) {
+        switch (inst.a.size) {
             case 1: size_offset = 0; break;
             case 2: size_offset = 1; break;
             case 4: size_offset = 2; break;
             case 8: size_offset = 3; break;
             default: assert(false);
         }
-        switch (inst->a.kind) {
+        switch (inst.a.kind) {
             case PLACE_NONE: a_mode = NONE; break;
-            case PLACE_REG: switch (reg_kind(inst->a.reg)) {
+            case PLACE_REG: switch (reg_kind(inst.a.reg)) {
                 case REG_KIND_GPR: a_mode = R1 + size_offset; break;
                 case REG_KIND_XMM: a_mode = X1 + size_offset; break;
                 default: assert(false);
             } break;
             case PLACE_MEM:  a_mode = M1 + size_offset; break;
-            default: assert(inst->a.kind == PLACE_NONE);
+            default: assert(inst.a.kind == PLACE_NONE);
         }
 
-        switch (inst->b.size) {
+        switch (inst.b.size) {
             case 1: size_offset = 0; break;
             case 2: size_offset = 1; break;
             case 4: size_offset = 2; break;
             case 8: size_offset = 3; break;
-            default: assert(inst->b.kind == PLACE_NONE);
+            default: assert(inst.b.kind == PLACE_NONE);
         }
-        switch (inst->b.kind) {
+        switch (inst.b.kind) {
             case PLACE_NONE: b_mode = NONE; break;
-            case PLACE_REG: switch (reg_kind(inst->b.reg)) {
+            case PLACE_REG: switch (reg_kind(inst.b.reg)) {
                 case REG_KIND_GPR: b_mode = R1 + size_offset; break;
                 case REG_KIND_XMM: b_mode = X1 + size_offset; break;
                 default: assert(false);
@@ -213,7 +268,7 @@ Encoded_Inst encode(Inst *inst) {
         }
 
         #define ENC(x, y, s) ((x << 0) | (y << 4) | (s << 8))
-        switch (ENC(a_mode, b_mode, inst->immediate_size)) {
+        switch (ENC(a_mode, b_mode, inst.immediate_size)) {
             case ENC(R1, 0,  1): encoding_mode = ENCODE_R1_I1; break;
             case ENC(R2, 0,  1): encoding_mode = ENCODE_R2_I1; break;
             case ENC(R4, 0,  1): encoding_mode = ENCODE_R4_I1; break;
@@ -222,6 +277,16 @@ Encoded_Inst encode(Inst *inst) {
             case ENC(R4, 0,  4): encoding_mode = ENCODE_R4_I4; break;
             case ENC(R8, 0,  4): encoding_mode = ENCODE_R8_I4; break;
             case ENC(R8, 0,  8): encoding_mode = ENCODE_R8_I8; break;
+
+            case ENC(R1, 0,  0): encoding_mode = ENCODE_R1; break;
+            case ENC(R2, 0,  0): encoding_mode = ENCODE_R2; break;
+            case ENC(R4, 0,  0): encoding_mode = ENCODE_R4; break;
+            case ENC(R8, 0,  0): encoding_mode = ENCODE_R8; break;
+            case ENC(M1, 0,  0): encoding_mode = ENCODE_M1; break;
+            case ENC(M2, 0,  0): encoding_mode = ENCODE_M2; break;
+            case ENC(M4, 0,  0): encoding_mode = ENCODE_M4; break;
+            case ENC(M8, 0,  0): encoding_mode = ENCODE_M8; break;
+
             case ENC(R1, R1, 0): encoding_mode = ENCODE_R1_R1; break;
             case ENC(R2, R2, 0): encoding_mode = ENCODE_R2_R2; break;
             case ENC(R4, R4, 0): encoding_mode = ENCODE_R4_R4; break;
@@ -239,7 +304,7 @@ Encoded_Inst encode(Inst *inst) {
         #undef ENC
     }
 
-    Encoding encoding = ENCODING_TABLE[inst->kind][encoding_mode];
+    Encoding encoding = ENCODING_TABLE[inst.kind][encoding_mode];
     assert(encoding.exists == 1);
 
     enum {
@@ -250,6 +315,7 @@ Encoded_Inst encode(Inst *inst) {
         REX_B    = 0x01, // Most significant, fourth, bit of modrm/rm, SIB base or opcode reg
 
         WORD_OPERAND_PREFIX = 0x66, // selects 16-bit operands over 32-bit operands
+        SECONDARY_OPCODE_MAP_PREFIX = 0x0f,
 
         // Keep in mind that when modrm/rm is RSP or RBP, R12 or R13 using MODRM_RM_POINTER_* has special semantics
         MODRM_MOD_MEM          = 0x00,
@@ -281,41 +347,41 @@ Encoded_Inst encode(Inst *inst) {
         encode_in_reg = ENCODE_NEITHER,
         encode_in_rm  = ENCODE_NEITHER;
 
-        switch (inst->a.kind) {
+        switch (inst.a.kind) {
             case PLACE_NONE: assert(false);
             case PLACE_REG: {
                 encode_in_reg = ENCODE_A;
-                encode_in_rm  = inst->b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
+                encode_in_rm  = inst.b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
             } break;
             case PLACE_MEM: {
                 encode_in_rm  = ENCODE_A;
-                assert(inst->b.kind != PLACE_MEM);
-                encode_in_reg = inst->b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
+                assert(inst.b.kind != PLACE_MEM);
+                encode_in_reg = inst.b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
             } break;
         }
 
         if (encoding.flags & ENCODING_MODRM_FLAG) {
             assert(!(encoding.flags & ENCODING_REG_IN_OPCODE));
-            assert(inst->a.kind != PLACE_NONE && inst->b.kind == PLACE_NONE);
+            assert(inst.a.kind != PLACE_NONE && inst.b.kind == PLACE_NONE);
             assert((encoding.modrm_flag & 7) == encoding.modrm_flag);
             modrm |= (encoding.modrm_flag & 7) << 3;
 
             encode_in_reg = ENCODE_NEITHER;
-            encode_in_rm = inst->a.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_A;
+            encode_in_rm = inst.a.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_A;
             use_modrm = true;
         }
 
         if (encoding.flags & ENCODING_REG_IN_OPCODE) {
-            assert(inst->a.kind == PLACE_REG && inst->b.kind == PLACE_NONE);
+            assert(inst.a.kind == PLACE_REG && inst.b.kind == PLACE_NONE);
 
-            u8 index = REG_INDEX_MAP[inst->a.reg];
+            u8 index = REG_INDEX_MAP[inst.a.reg];
             opcode |= index & 7;
             if (index & 8) rex |= REX_B;
         }
 
         if (encode_in_reg != ENCODE_NEITHER) {
             use_modrm = true;
-            Place *place = encode_in_reg == ENCODE_A? &inst->a : &inst->b;
+            Place *place = encode_in_reg == ENCODE_A? &inst.a : &inst.b;
             assert(place->kind == PLACE_REG);
 
             u8 index = REG_INDEX_MAP[place->reg];
@@ -325,7 +391,7 @@ Encoded_Inst encode(Inst *inst) {
 
         if (encode_in_rm != ENCODE_NEITHER) {
             use_modrm = true;
-            Place *place = encode_in_rm == ENCODE_A? &inst->a : &inst->b;
+            Place *place = encode_in_rm == ENCODE_A? &inst.a : &inst.b;
 
             if (place->kind == PLACE_REG) {
                 modrm |= MODRM_MOD_REG;
@@ -393,8 +459,8 @@ Encoded_Inst encode(Inst *inst) {
         }
 
         // Avoid encoding AH, CH, DH and BH
-        if ((inst->a.kind == PLACE_REG && inst->a.size == 1 && inst->a.reg >= RSP && inst->a.reg <= RDI) ||
-            (inst->b.kind == PLACE_REG && inst->b.size == 1 && inst->b.reg >= RSP && inst->b.reg <= RDI)) {
+        if ((inst.a.kind == PLACE_REG && inst.a.size == 1 && inst.a.reg >= RSP && inst.a.reg <= RDI) ||
+            (inst.b.kind == PLACE_REG && inst.b.size == 1 && inst.b.reg >= RSP && inst.b.reg <= RDI)) {
             rex |= REX_BASE;
         }
     }
@@ -407,6 +473,10 @@ Encoded_Inst encode(Inst *inst) {
 
     if (rex != 0) {
         result.bytes[result.length++] = rex;
+    }
+
+    if (encoding.flags & ENCODING_SECONDARY) {
+        result.bytes[result.length++] = SECONDARY_OPCODE_MAP_PREFIX;
     }
 
     result.bytes[result.length++] = opcode;
@@ -426,9 +496,9 @@ Encoded_Inst encode(Inst *inst) {
         }
     }
 
-    if (inst->immediate_size > 0) {
-        u64 imm_bytes = inst->immediate;
-        for (u8 i = 0; i < inst->immediate_size; i += 1) {
+    if (inst.immediate_size > 0) {
+        u64 imm_bytes = inst.immediate;
+        for (u8 i = 0; i < inst.immediate_size; i += 1) {
             result.bytes[result.length++] = imm_bytes & 0xff;
             imm_bytes >>= 8;
         }
@@ -441,6 +511,11 @@ Encoded_Inst encode(Inst *inst) {
 
 u8 *INST_NAMES[INST_COUNT] = {
     [INST_ADD] = "add",
+
+    [INST_MUL]  = "mul",
+    [INST_IMUL] = "imul",
+    [INST_DIV]  = "div",
+    [INST_IDIV] = "idiv",
 };
 
 u8 *REG_NAMES[REG_COUNT][4] = {
@@ -561,8 +636,8 @@ void print_encoded_inst(Encoded_Inst encoded) {
 
 
 void main() {
-    Inst add = { INST_ADD, { PLACE_REG, 1, .reg = RAX }, { PLACE_MEM, 1, .address = { RIP, 0, 0, 24 } } };
+    Inst i = { INST_IMUL, { PLACE_REG, 2, .reg = R12 }, { PLACE_MEM, 2, .address = { RCX, R13, 4, 9 } } };
 
-    print_inst(&add);
-    print_encoded_inst(encode(&add));
+    //print_inst(&i);
+    print_encoded_inst(encode(i));
 }
