@@ -1,6 +1,19 @@
 
 #include "common.c"
 
+
+typedef struct Big_Imm {
+    u32 size;
+    u8 data[];
+} Big_Imm;
+
+typedef struct Key {
+    u64 index;
+
+    u32 size;
+    enum { KEY_INTEGER, KEY_FLOAT, KEY_COMPOUND } kind;
+} Key;
+
 typedef enum Reg {
     REG_NONE = 0,
 
@@ -39,23 +52,26 @@ typedef struct Address {
 } Address;
 
 
-typedef enum Place_Kind {
-    PLACE_NONE,
-    PLACE_REG,
-    PLACE_MEM,
-} Place_Kind;
 
 typedef struct Place {
-    u8 kind;
-    u8 size;
+    enum {
+        PLACE_NONE,
+        PLACE_KEY,
+        PLACE_REG,
+        PLACE_MEM,
+    } kind;
+    u32 size;
 
     union {
+        Key *key;
         Reg reg;
         Address address;
     };
 } Place;
 
 typedef enum Inst_Kind {
+    INST_INVALID = 0,
+
     INST_CALL,
     INST_JMP,
     INST_RET,
@@ -72,6 +88,8 @@ typedef enum Inst_Kind {
     INST_SHL,
     INST_SHR,
     INST_SAR,
+    INST_INC,
+    INST_DEC,
     INST_MUL,
     INST_IMUL,
     INST_DIV,
@@ -91,6 +109,8 @@ typedef enum Inst_Kind {
     INST_JLE, // ZF = 1 || ZF != OF
     INST_JG,  // ZF = 0 && ZF == OF
     INST_JGE, // SF == OF
+    #define INST_JCC_FIRST INST_JE
+    #define INST_JCC_LAST  INST_JGE
 
     INST_SETE,  // ZF = 1
     INST_SETNE, // ZF = 0
@@ -110,13 +130,307 @@ typedef enum Inst_Kind {
     INST_COUNT,
 } Inst_Kind;
 
+#define INST_IMM_USE_POINTER 0xff
+
 typedef struct Inst {
     Inst_Kind kind;
     Place a, b;
 
-    u8 immediate_size;
-    u64 immediate;
+    u8 imm_size;
+    union { u64 imm; Big_Imm *imm_pointer; };
 } Inst;
+
+
+typedef enum Condition {
+    CONDITION_NONE = 0,
+
+    CONDITION_E,
+    CONDITION_NE,
+    CONDITION_P,
+    CONDITION_NP,
+    CONDITION_A,
+    CONDITION_AE,
+    CONDITION_B,
+    CONDITION_BE,
+    CONDITION_L,
+    CONDITION_LE,
+    CONDITION_G,
+    CONDITION_GE,
+
+    CONDITION_COUNT,
+} Condition;
+
+Inst_Kind JMP_FOR_CONDITION[CONDITION_COUNT] = {
+    [CONDITION_NONE] = INST_JMP,
+    [CONDITION_E]    = INST_JE,
+    [CONDITION_NE]   = INST_JNE,
+    [CONDITION_P]    = INST_JP,
+    [CONDITION_NP]   = INST_JNP,
+    [CONDITION_A]    = INST_JA,
+    [CONDITION_AE]   = INST_JAE,
+    [CONDITION_B]    = INST_JB,
+    [CONDITION_BE]   = INST_JBE,
+    [CONDITION_L]    = INST_JL,
+    [CONDITION_LE]   = INST_JLE,
+    [CONDITION_G]    = INST_JG,
+    [CONDITION_GE]   = INST_JGE,
+};
+
+
+typedef struct Inst_Block Inst_Block;
+typedef struct Link_List Link_List; // A linked list of jump links
+
+typedef struct Jump_To {
+    u8 *debug_name;
+    Inst_Block *block;
+} Jump_To;
+
+typedef struct Jump_From {
+    Jump_To *jump_to;
+    Inst_Block *block;
+} Jump_From;
+
+
+enum {
+    LINK_LIST_BLOCK_CAPACITY = 16,
+    DEFAULT_INST_BLOCK_CAPACITY = 16,
+};
+
+struct Inst_Block {
+    u16 length, capacity;
+    Inst_Block *next;
+
+    Jump_To *jump_to; // refers to label at start of block, if any
+    Jump_From *jump_from; // refers to INST_JMP at end of block, if any
+
+    Inst insts[];
+};
+
+struct Link_List {
+    u32 length;
+    Link_List *next;
+    struct {
+        Jump_From *from;
+        Jump_To *to;
+    } links[LINK_LIST_BLOCK_CAPACITY];
+};
+
+
+typedef struct Code_Builder {
+    Arena *arena;
+    u64 next_key_index;
+    Inst_Block *insts_start, *insts_head;
+    Link_List *link_list_start, *link_list_head;
+} Code_Builder;
+
+Code_Builder *code_builder_new(Arena *arena) {
+    Code_Builder *builder = arena_new(arena, Code_Builder);
+    builder->arena = arena;
+    return builder;
+}
+
+void code_builder_start_new_inst_block(Code_Builder *builder, u16 capacity) {
+    Inst_Block *new = (Inst_Block*) arena_alloc(builder->arena, sizeof(Inst_Block) + capacity*sizeof(Inst));
+    new->capacity = capacity;
+    builder->insts_head = builder->insts_start == null? (builder->insts_start = new) : (builder->insts_head->next = new);
+}
+
+void code_builder_add_inst(Code_Builder *builder, Inst inst) {
+    if (builder->insts_head == null || builder->insts_head->length >= builder->insts_head->capacity) {
+        code_builder_start_new_inst_block(builder, DEFAULT_INST_BLOCK_CAPACITY);
+    }
+
+    builder->insts_head->insts[builder->insts_head->length] = inst;
+    builder->insts_head->length += 1;
+}
+
+
+Key *new_key(Code_Builder *builder, int kind, u32 size) {
+    if (kind == KEY_INTEGER) {
+        assert(size == 1 || size == 2 || size == 4 || size == 8);
+    } else if (kind == KEY_FLOAT) {
+        assert(size == 4 || size == 8);
+    }
+
+    Key *key = arena_new(builder->arena, Key);
+    key->index = builder->next_key_index;
+    builder->next_key_index += 1;
+    key->size = size;
+    key->kind = kind;
+    builder->next_key_index;
+    return key;
+}
+
+Key *new_key_with_value(Code_Builder *builder, int kind, u32 size, void *value) {
+    Key *key = new_key(builder, kind, size);
+
+    Inst inst = {
+        INST_MOV,
+        { PLACE_KEY, .size = size, .key = key },
+    };
+
+    inst.imm_size = (u8) size;
+    switch (size) {
+        case 1: inst.imm = (u64) *((u8*)  value); break;
+        case 2: inst.imm = (u64) *((u16*) value); break;
+        case 4: inst.imm = (u64) *((u32*) value); break;
+        case 8: inst.imm = (u64) *((u64*) value); break;
+        default: {
+            inst.imm_size = INST_IMM_USE_POINTER;
+            inst.imm_pointer = (Big_Imm*) arena_alloc(builder->arena, sizeof(u32) + size);
+            inst.imm_pointer->size = size;
+            mem_copy(value, inst.imm_pointer->data, size);
+        } break;
+    }
+
+    code_builder_add_inst(builder, inst);
+
+    return key;
+}
+
+
+#define GEN_NEW_INT_FUNCTION(name, type) \
+Key *name(Code_Builder *builder, type value) { \
+    return new_key_with_value(builder, KEY_INTEGER, sizeof(type), &value); \
+}
+GEN_NEW_INT_FUNCTION(new_i8,  i8)
+GEN_NEW_INT_FUNCTION(new_i16, i16)
+GEN_NEW_INT_FUNCTION(new_i32, i32)
+GEN_NEW_INT_FUNCTION(new_i64, i64)
+GEN_NEW_INT_FUNCTION(new_u8,  u8)
+GEN_NEW_INT_FUNCTION(new_u16, u16)
+GEN_NEW_INT_FUNCTION(new_u32, u32)
+GEN_NEW_INT_FUNCTION(new_u64, u64)
+#undef GEN_NEW_INT_FUNCTION
+
+Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
+    Jump_To *result = arena_new(builder->arena, Jump_To);
+    result->debug_name = debug_name;
+
+    if (builder->insts_head == null || builder->insts_head->length > 0 || builder->insts_head->jump_to != null) {
+        code_builder_start_new_inst_block(builder, DEFAULT_INST_BLOCK_CAPACITY);
+    }
+    assert(builder->insts_head->jump_to == null);
+    builder->insts_head->jump_to = result;
+    result->block = builder->insts_head;
+
+    return result;
+}
+
+Jump_From *add_jump(Code_Builder *builder, Condition condition) {
+    Jump_From *result = arena_new(builder->arena, Jump_From);
+
+    if (builder->insts_head == null || builder->insts_head->jump_from != null) {
+        code_builder_start_new_inst_block(builder, 1); // We have to start a new block after the jump we insert!
+    }
+
+    Inst inst = { JMP_FOR_CONDITION[condition] };
+    code_builder_add_inst(builder, inst);
+
+    assert(builder->insts_head->jump_from == null);
+    builder->insts_head->jump_from = result;
+    result->block = builder->insts_head;
+    
+    return result;
+}
+
+void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
+    assert(from->jump_to == null);
+    from->jump_to = to;
+
+    if (builder->link_list_start == null) {
+        builder->link_list_start = arena_new(builder->arena, Link_List);
+        builder->link_list_head = builder->link_list_start;
+    }
+
+    if (builder->link_list_head->length >= LINK_LIST_BLOCK_CAPACITY) {
+        Link_List *new = arena_new(builder->arena, Link_List);
+        builder->link_list_head->next = new;
+        builder->link_list_head = new;
+    }
+
+    builder->link_list_head->links[builder->link_list_head->length].from = from;
+    builder->link_list_head->links[builder->link_list_head->length].to = to;
+    builder->link_list_head->length += 1;
+}
+
+
+enum {
+    BINARY_ADD,
+    BINARY_SUB,
+    BINARY_MUL,
+    BINARY_DIV,
+    BINARY_AND,
+    BINARY_OR,
+    BINARY_XOR,
+    BINARY_CMP,
+    BINARY_SHL,
+    BINARY_SHR,
+    BINARY_SAR,
+};
+
+void binary(Code_Builder *builder, int binary, Key *left, Key *right) {
+    assert(left->size == right->size);
+    assert(left->kind == right->kind);
+    int key_kind = left->kind;
+    u32 size = left->size;
+
+    Inst_Kind inst_kind;
+
+    if (key_kind == KEY_INTEGER) {
+        switch (binary) {
+            case BINARY_ADD: inst_kind = INST_ADD; break;
+            case BINARY_SUB: inst_kind = INST_SUB; break;
+            case BINARY_MUL: inst_kind = INST_MUL; break;
+            case BINARY_DIV: inst_kind = INST_DIV; break;
+            case BINARY_AND: inst_kind = INST_AND; break;
+            case BINARY_OR:  inst_kind = INST_OR;  break;
+            case BINARY_XOR: inst_kind = INST_XOR; break;
+            case BINARY_CMP: inst_kind = INST_CMP; break;
+            case BINARY_SHL: inst_kind = INST_SHL; break;
+            case BINARY_SHR: inst_kind = INST_SHR; break;
+            case BINARY_SAR: inst_kind = INST_SAR; break;
+            default: assert(false);
+        }
+    } else if (key_kind == KEY_FLOAT) {
+        unimplemented();
+    } else {
+        assert(false);
+    }
+
+    Inst inst = { inst_kind, { PLACE_KEY, size, .key = left }, { PLACE_KEY, size, .key = right } };
+    code_builder_add_inst(builder, inst);
+}
+
+enum {
+    UNARY_NEG,
+    UNARY_NOT,
+    UNARY_INC,
+    UNARY_DEC,
+};
+
+void unary(Code_Builder *builder, int unary, Key *key) {
+    Inst_Kind inst_kind;
+
+    if (key->kind == KEY_INTEGER) {
+        switch (unary) {
+            case UNARY_NEG: inst_kind = INST_NEG; break;
+            case UNARY_NOT: inst_kind = INST_NOT; break;
+            case UNARY_INC: inst_kind = INST_INC; break;
+            case UNARY_DEC: inst_kind = INST_DEC; break;
+            default: assert(false);
+        }
+    } else if (key->kind == KEY_FLOAT) {
+        unimplemented();
+    } else {
+        assert(false);
+    }
+
+    Inst inst = { inst_kind, { PLACE_KEY, key->size, .key = key } };
+    code_builder_add_inst(builder, inst);
+}
+
+
 
 
 typedef enum Encoding_Mode {
@@ -337,6 +651,29 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
     },
 
+    [INST_INC] = {
+        [ENCODE_R1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_R2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 0 },
+        [ENCODE_R4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
+
+        [ENCODE_M1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_M2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 0 },
+        [ENCODE_M4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_M8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
+    },
+    [INST_DEC] = {
+        [ENCODE_R1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_R2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 1 },
+        [ENCODE_R4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 1 },
+
+        [ENCODE_M1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_M2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 1 },
+        [ENCODE_M4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_M8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 1 },
+    },
+
     [INST_MUL] = {
         [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
         [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4 },
@@ -427,7 +764,7 @@ u8 REG_INDEX_MAP[REG_COUNT] = {
     [R15] = 15,
 };
 
-Encoded_Inst encode_inst(Inst inst) {
+Encoded_Inst encode_inst(Inst *inst) {
     Encoding_Mode encoding_mode = ENCODING_MODE_INVALID;
     {
         enum {
@@ -439,36 +776,36 @@ Encoded_Inst encode_inst(Inst inst) {
 
         int size_offset;
 
-        switch (inst.a.size) {
-            case 0: assert(inst.a.kind == PLACE_NONE);
+        switch (inst->a.size) {
+            case 0: assert(inst->a.kind == PLACE_NONE);
             case 1: size_offset = 0; break;
             case 2: size_offset = 1; break;
             case 4: size_offset = 2; break;
             case 8: size_offset = 3; break;
             default: assert(false);
         }
-        switch (inst.a.kind) {
+        switch (inst->a.kind) {
             case PLACE_NONE: a_mode = NONE; break;
-            case PLACE_REG: switch (reg_kind(inst.a.reg)) {
+            case PLACE_REG: switch (reg_kind(inst->a.reg)) {
                 case REG_KIND_GPR: a_mode = R1 + size_offset; break;
                 case REG_KIND_XMM: a_mode = X1 + size_offset; break;
                 default: assert(false);
             } break;
             case PLACE_MEM:  a_mode = M1 + size_offset; break;
-            default: assert(inst.a.kind == PLACE_NONE);
+            default: assert(inst->a.kind == PLACE_NONE);
         }
 
-        switch (inst.b.size) {
-            case 0: assert(inst.b.kind == PLACE_NONE);
+        switch (inst->b.size) {
+            case 0: assert(inst->b.kind == PLACE_NONE);
             case 1: size_offset = 0; break;
             case 2: size_offset = 1; break;
             case 4: size_offset = 2; break;
             case 8: size_offset = 3; break;
-            default: assert(inst.b.kind == PLACE_NONE);
+            default: assert(inst->b.kind == PLACE_NONE);
         }
-        switch (inst.b.kind) {
+        switch (inst->b.kind) {
             case PLACE_NONE: b_mode = NONE; break;
-            case PLACE_REG: switch (reg_kind(inst.b.reg)) {
+            case PLACE_REG: switch (reg_kind(inst->b.reg)) {
                 case REG_KIND_GPR: b_mode = R1 + size_offset; break;
                 case REG_KIND_XMM: b_mode = X1 + size_offset; break;
                 default: assert(false);
@@ -478,7 +815,7 @@ Encoded_Inst encode_inst(Inst inst) {
         }
 
         #define ENC(x, y, s) ((x << 0) | (y << 4) | (s << 8))
-        switch (ENC(a_mode, b_mode, inst.immediate_size)) {
+        switch (ENC(a_mode, b_mode, inst->imm_size)) {
             case ENC(0,  0,  0): encoding_mode = ENCODE_NO_PARAMS; break;
 
             case ENC(0,  0,  1): encoding_mode = ENCODE_I1; break;
@@ -527,7 +864,7 @@ Encoded_Inst encode_inst(Inst inst) {
         #undef ENC
     }
 
-    Encoding encoding = ENCODING_TABLE[inst.kind][encoding_mode];
+    Encoding encoding = ENCODING_TABLE[inst->kind][encoding_mode];
     assert(encoding.exists == 1);
 
     enum {
@@ -558,8 +895,8 @@ Encoded_Inst encode_inst(Inst inst) {
     bool use_modrm = false, use_sib = false;
     u8 opcode = encoding.opcode;
 
-    u8 extra_immediate_size = 0;
-    u32 extra_immediate = 0;
+    u8 extra_imm_size = 0;
+    u32 extra_imm = 0;
 
     {
         if (encoding.flags & ENCODING_REX_W) {
@@ -570,46 +907,46 @@ Encoded_Inst encode_inst(Inst inst) {
         encode_in_reg = ENCODE_NEITHER,
         encode_in_rm  = ENCODE_NEITHER;
 
-        switch (inst.a.kind) {
+        switch (inst->a.kind) {
             case PLACE_NONE: {
-                assert(inst.b.kind == PLACE_NONE);
+                assert(inst->b.kind == PLACE_NONE);
             } break;
             case PLACE_REG: {
                 encode_in_reg = ENCODE_A;
-                encode_in_rm  = inst.b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
+                encode_in_rm  = inst->b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
             } break;
             case PLACE_MEM: {
                 encode_in_rm  = ENCODE_A;
-                assert(inst.b.kind != PLACE_MEM);
-                encode_in_reg = inst.b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
+                assert(inst->b.kind != PLACE_MEM);
+                encode_in_reg = inst->b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
             } break;
         }
 
         if (encoding.flags & ENCODING_MODRM_FLAG) {
             assert(!(encoding.flags & ENCODING_REG_IN_OPCODE));
-            assert(inst.a.kind != PLACE_NONE && inst.b.kind == PLACE_NONE);
+            assert(inst->a.kind != PLACE_NONE && inst->b.kind == PLACE_NONE);
             assert((encoding.modrm_flag & 7) == encoding.modrm_flag);
             modrm |= (encoding.modrm_flag & 7) << 3;
 
             encode_in_reg = ENCODE_NEITHER;
-            encode_in_rm = inst.a.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_A;
+            encode_in_rm = inst->a.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_A;
             use_modrm = true;
         }
 
         if (encoding.flags & ENCODING_REG_IN_OPCODE) {
-            assert(inst.a.kind == PLACE_REG && inst.b.kind == PLACE_NONE);
+            assert(inst->a.kind == PLACE_REG && inst->b.kind == PLACE_NONE);
 
             encode_in_reg = ENCODE_NEITHER;
             encode_in_rm  = ENCODE_NEITHER;
 
-            u8 index = REG_INDEX_MAP[inst.a.reg];
+            u8 index = REG_INDEX_MAP[inst->a.reg];
             opcode |= index & 7;
             if (index & 8) rex |= REX_B;
         }
 
         if (encode_in_reg != ENCODE_NEITHER) {
             use_modrm = true;
-            Place *place = encode_in_reg == ENCODE_A? &inst.a : &inst.b;
+            Place *place = encode_in_reg == ENCODE_A? &inst->a : &inst->b;
             assert(place->kind == PLACE_REG);
 
             u8 index = REG_INDEX_MAP[place->reg];
@@ -619,7 +956,7 @@ Encoded_Inst encode_inst(Inst inst) {
 
         if (encode_in_rm != ENCODE_NEITHER) {
             use_modrm = true;
-            Place *place = encode_in_rm == ENCODE_A? &inst.a : &inst.b;
+            Place *place = encode_in_rm == ENCODE_A? &inst->a : &inst->b;
 
             if (place->kind == PLACE_REG) {
                 modrm |= MODRM_MOD_REG;
@@ -632,12 +969,12 @@ Encoded_Inst encode_inst(Inst inst) {
                 assert(address.index == REG_NONE || reg_kind(address.index) == REG_KIND_GPR);
                 assert(address.index != RSP && address.index != RSP && address.base != RBP);
 
-                extra_immediate = address.offset;
+                extra_imm = address.offset;
 
                 if (address.base == RIP) {
                     assert(address.index == REG_NONE);
                     use_sib = false;
-                    extra_immediate_size = 4;
+                    extra_imm_size = 4;
                     modrm |= 0x05;
                 } else {
                     use_sib = address.base == RSP || address.index != REG_NONE;
@@ -671,13 +1008,13 @@ Encoded_Inst encode_inst(Inst inst) {
                     }
 
                     if (address.offset == 0) {
-                        extra_immediate_size = 0;
+                        extra_imm_size = 0;
                         modrm |= MODRM_MOD_MEM;
                     } else if (address.offset >= I8_MIN && address.offset <= I8_MAX) {
-                        extra_immediate_size = 1;
+                        extra_imm_size = 1;
                         modrm |= MODRM_MOD_MEM_PLUS_I8;
                     } else {
-                        extra_immediate_size = 4;
+                        extra_imm_size = 4;
                         modrm |= MODRM_MOD_MEM_PLUS_I32;
                     }
                 }
@@ -687,8 +1024,8 @@ Encoded_Inst encode_inst(Inst inst) {
         }
 
         // Avoid encoding AH, CH, DH and BH
-        if ((inst.a.kind == PLACE_REG && inst.a.size == 1 && inst.a.reg >= RSP && inst.a.reg <= RDI) ||
-            (inst.b.kind == PLACE_REG && inst.b.size == 1 && inst.b.reg >= RSP && inst.b.reg <= RDI)) {
+        if ((inst->a.kind == PLACE_REG && inst->a.size == 1 && inst->a.reg >= RSP && inst->a.reg <= RDI) ||
+            (inst->b.kind == PLACE_REG && inst->b.size == 1 && inst->b.reg >= RSP && inst->b.reg <= RDI)) {
             rex |= REX_BASE;
         }
     }
@@ -716,17 +1053,17 @@ Encoded_Inst encode_inst(Inst inst) {
         }
     }
 
-    if (extra_immediate_size > 0) {
-        u64 imm_bytes = extra_immediate;
-        for (u8 i = 0; i < extra_immediate_size; i += 1) {
+    if (extra_imm_size > 0) {
+        u64 imm_bytes = extra_imm;
+        for (u8 i = 0; i < extra_imm_size; i += 1) {
             result.bytes[result.length++] = imm_bytes & 0xff;
             imm_bytes >>= 8;
         }
     }
 
-    if (inst.immediate_size > 0) {
-        u64 imm_bytes = inst.immediate;
-        for (u8 i = 0; i < inst.immediate_size; i += 1) {
+    if (inst->imm_size > 0) {
+        u64 imm_bytes = inst->imm;
+        for (u8 i = 0; i < inst->imm_size; i += 1) {
             result.bytes[result.length++] = imm_bytes & 0xff;
             imm_bytes >>= 8;
         }
@@ -780,6 +1117,8 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_SHL]  = "shl",
     [INST_SHR]  = "shr",
     [INST_SAR]  = "sar",
+    [INST_INC]  = "inc",
+    [INST_DEC]  = "dec",
     [INST_MUL]  = "mul",
     [INST_IMUL] = "imul",
     [INST_DIV]  = "div",
@@ -845,6 +1184,8 @@ void print_reg(Reg reg, u8 size) {
 void print_place(Place *place) {
     if (place->kind == PLACE_NONE) {
         
+    } else if (place->kind == PLACE_KEY) {
+        printf("$%u", place->key->index);
     } else if (place->kind == PLACE_REG) {
         print_reg(place->reg, place->size);
     } else if (place->kind == PLACE_MEM) {
@@ -880,6 +1221,7 @@ void print_place(Place *place) {
 
 void print_inst(Inst *inst) {
     printf("%s", INST_NAMES[inst->kind]);
+
     if (inst->a.kind != PLACE_NONE) {
         printf(" ");
         print_place(&inst->a);
@@ -888,12 +1230,20 @@ void print_inst(Inst *inst) {
             print_place(&inst->b);
         }
     }
-    if (inst->immediate_size != 0) {
+
+    if (inst->imm_size == 0) {
+        // Do nothing
+        printf("\n");
+    } else if (inst->imm_size == INST_IMM_USE_POINTER) {
+        printf("{ %u bytes }\n", (u64) inst->imm_pointer->size);
+    } else if (inst->imm_size == 1 || inst->imm_size == 2 || inst->imm_size == 4 || inst->imm_size == 8) {
         printf(inst->a.kind == PLACE_NONE? " " : ", ");
-        u64 size_mask = 0xffffffffffffffff >> ((8-inst->immediate_size)*8);
-        printf("%x", inst->immediate & size_mask);
+        u64 size_mask = 0xffffffffffffffff >> ((8-inst->imm_size)*8);
+        printf("%x\n", inst->imm & size_mask);
+    } else {
+        printf("\n");
+        assert(false);
     }
-    printf("\n");
 }
 
 void print_encoded_inst(Encoded_Inst encoded) {
@@ -903,16 +1253,51 @@ void print_encoded_inst(Encoded_Inst encoded) {
     printf("\n");
 }
 
+void dump_instructions(Code_Builder *builder) {
+    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+        if (block->jump_to != null) {
+            printf("%s:\n", block->jump_to->debug_name);
+        }
+
+        u16 print_length = block->length;
+        if (block->jump_from != null) {
+            print_length -= 1;
+        }
+
+        for (u16 i = 0; i < print_length; i += 1) {
+            printf("    ");
+            print_inst(&block->insts[i]);
+        }
+
+        if (block->jump_from != null) {
+            Inst *jmp_inst = &block->insts[block->length - 1];
+            assert(jmp_inst->kind == INST_JMP || (jmp_inst->kind >= INST_JCC_FIRST && jmp_inst->kind <= INST_JCC_LAST));
+            printf("    %s ", INST_NAMES[jmp_inst->kind]);
+            if (block->jump_from->jump_to != null) {
+                printf(block->jump_from->jump_to->debug_name);
+            } else {
+                printf("<no target given>");
+            }
+            printf("\n");
+        }
+    }
+}
+
 
 
 void main() {
-    for (Inst_Kind k = INST_SETE; k <= INST_SETGE; k += 1) {
-        Inst a = { k, { PLACE_REG, 1, .reg = RAX } };
-        //print_inst(&a);
-        print_encoded_inst(encode_inst(a));
+    Arena arena = {0};
+    Code_Builder *code_builder = code_builder_new(&arena);
 
-        Inst b = { k, { PLACE_MEM, 1, .address = { R12, RDI, 2, -123 } } };
-        //print_inst(&b);
-        print_encoded_inst(encode_inst(b));
-    }
+    Key *result = new_i32(code_builder, 3);
+    Key *counter = new_i32(code_builder, 4);
+    Jump_To *loop_start = add_label(code_builder, "start");
+    binary(code_builder, BINARY_ADD, result, result);
+    unary(code_builder, UNARY_DEC, counter);
+    Key *zero = new_i32(code_builder, 0);
+    binary(code_builder, BINARY_CMP, counter, zero);
+    Jump_From *loop_end = add_jump(code_builder, CONDITION_A);
+    link_jump(code_builder, loop_end, loop_start);
+
+    dump_instructions(code_builder);
 }
