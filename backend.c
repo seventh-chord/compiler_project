@@ -1,8 +1,5 @@
 
-// TODO sse instructions, which get somewhat funky
-
 #include "common.c"
-
 
 typedef enum Reg {
     REG_NONE = 0,
@@ -58,14 +55,57 @@ typedef struct Place {
     };
 } Place;
 
-
 typedef enum Inst_Kind {
+    INST_CALL,
+    INST_JMP,
+    INST_RET,
+    INST_INT3,
+    INST_NOP,
+    
+    INST_MOV,
     INST_ADD,
-
+    INST_SUB,
+    INST_AND,
+    INST_OR,
+    INST_XOR,
+    INST_CMP,
+    INST_SHL,
+    INST_SHR,
+    INST_SAR,
     INST_MUL,
     INST_IMUL,
     INST_DIV,
     INST_IDIV,
+    INST_NEG,
+    INST_NOT,
+
+    INST_JE,  // ZF = 1
+    INST_JNE, // ZF = 0
+    INST_JP,  // PF = 1
+    INST_JNP, // PF = 0
+    INST_JA,  // CF = 0 && ZF = 0
+    INST_JAE, // CF = 0
+    INST_JB,  // CF = 1
+    INST_JBE, // CF = 0 || ZF = 0
+    INST_JL,  // SF != OF
+    INST_JLE, // ZF = 1 || ZF != OF
+    INST_JG,  // ZF = 0 && ZF == OF
+    INST_JGE, // SF == OF
+
+    INST_SETE,  // ZF = 1
+    INST_SETNE, // ZF = 0
+    INST_SETP,  // PF = 1
+    INST_SETNP, // PF = 0
+    INST_SETA,  // CF = 0 && ZF = 0
+    INST_SETAE, // CF = 0
+    INST_SETB,  // CF = 1
+    INST_SETBE, // CF = 0 || ZF = 0
+    INST_SETL,  // SF != OF
+    INST_SETLE, // ZF = 1 || ZF != OF
+    INST_SETG,  // ZF = 0 && ZF == OF
+    INST_SETGE, // SF == OF
+    
+    // TODO SSE
 
     INST_COUNT,
 } Inst_Kind;
@@ -88,17 +128,21 @@ typedef enum Encoding_Mode {
 
     ENCODING_MODE_INVALID = 0,
 
+    ENCODE_NO_PARAMS,
+
+    ENCODE_I1, ENCODE_I4,
+    ENCODE_R1, ENCODE_R2, ENCODE_R4, ENCODE_R8,
+    ENCODE_M1, ENCODE_M2, ENCODE_M4, ENCODE_M8,
+
     ENCODE_R1_I1, ENCODE_R2_I1, ENCODE_R4_I1, ENCODE_R8_I1,
-    ENCODE_R2_I2,
-    ENCODE_R4_I4, ENCODE_R8_I4,
-    ENCODE_R8_I8,
+    ENCODE_R2_I2, ENCODE_R4_I4, ENCODE_R8_I4, ENCODE_R8_I8,
+
+    ENCODE_M1_I1, ENCODE_M2_I1, ENCODE_M4_I1, ENCODE_M8_I1,
+    ENCODE_M2_I2, ENCODE_M4_I4, ENCODE_M8_I4,
 
     ENCODE_R1_R1, ENCODE_R2_R2, ENCODE_R4_R4, ENCODE_R8_R8,
     ENCODE_R1_M1, ENCODE_R2_M2, ENCODE_R4_M4, ENCODE_R8_M8,
     ENCODE_M1_R1, ENCODE_M2_R2, ENCODE_M4_R4, ENCODE_M8_R8,
-
-    ENCODE_R1, ENCODE_R2, ENCODE_R4, ENCODE_R8,
-    ENCODE_M1, ENCODE_M2, ENCODE_M4, ENCODE_M8,
 
     ENCODING_MODE_COUNT,
 } Encoding_Mode;
@@ -124,29 +168,173 @@ typedef struct Encoded_Inst {
 
 
 Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
-    [INST_ADD] = {
-        [ENCODE_R1_I1] = { 1, 0x80, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_R2_I1] = { 1, 0x83, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = 0 },
-        [ENCODE_R4_I1] = { 1, 0x83, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_R8_I1] = { 1, 0x83, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = 0 },
-        [ENCODE_R2_I2] = { 1, 0x81, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = 0 },
-        [ENCODE_R4_I4] = { 1, 0x81, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_R8_I4] = { 1, 0x81, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = 0 },
+    [INST_CALL] = {
+        // There are I2, R2 and M2 encodings, but those don't seem to work on x64. Also, they are 
+        // mostly useless anyways
+        [ENCODE_I4] = { 1, 0xe8 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG, .modrm_flag = 2 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG, .modrm_flag = 2 },
+    },
+    [INST_JMP] = {
+        [ENCODE_I1] = { 1, 0xeb },
+        [ENCODE_I4] = { 1, 0xe9 },
+        // There are M and R variants too, we just need to add them to the table
+    },
 
-        [ENCODE_R1_M1] = { 1, 0x02 },
-        [ENCODE_R2_M2] = { 1, 0x03, ENCODING_WORD_OPERANDS },
-        [ENCODE_R4_M4] = { 1, 0x03 },
-        [ENCODE_R8_M8] = { 1, 0x03, ENCODING_REX_W },
+    [INST_INT3] = { [ENCODE_NO_PARAMS] = { 1, 0xcc } },
+    [INST_RET]  = { [ENCODE_NO_PARAMS] = { 1, 0xc3 } },
+    [INST_NOP]  = { [ENCODE_NO_PARAMS] = { 1, 0x90 } },
 
-        [ENCODE_M1_R1] = { 1, 0x00 },
-        [ENCODE_M2_R2] = { 1, 0x01, ENCODING_WORD_OPERANDS },
-        [ENCODE_M4_R4] = { 1, 0x01 },
-        [ENCODE_M8_R8] = { 1, 0x01, ENCODING_REX_W },
+    [INST_JE]  = { [ENCODE_I1] = { 1, 0x74 }, [ENCODE_I4] = { 1, 0x84, ENCODING_SECONDARY } },
+    [INST_JNE] = { [ENCODE_I1] = { 1, 0x75 }, [ENCODE_I4] = { 1, 0x85, ENCODING_SECONDARY } },
+    [INST_JP]  = { [ENCODE_I1] = { 1, 0x7a }, [ENCODE_I4] = { 1, 0x8a, ENCODING_SECONDARY } },
+    [INST_JNP] = { [ENCODE_I1] = { 1, 0x7b }, [ENCODE_I4] = { 1, 0x8b, ENCODING_SECONDARY } },
+    [INST_JA]  = { [ENCODE_I1] = { 1, 0x77 }, [ENCODE_I4] = { 1, 0x87, ENCODING_SECONDARY } },
+    [INST_JAE] = { [ENCODE_I1] = { 1, 0x73 }, [ENCODE_I4] = { 1, 0x83, ENCODING_SECONDARY } },
+    [INST_JB]  = { [ENCODE_I1] = { 1, 0x72 }, [ENCODE_I4] = { 1, 0x82, ENCODING_SECONDARY } },
+    [INST_JBE] = { [ENCODE_I1] = { 1, 0x76 }, [ENCODE_I4] = { 1, 0x86, ENCODING_SECONDARY } },
+    [INST_JG]  = { [ENCODE_I1] = { 1, 0x7f }, [ENCODE_I4] = { 1, 0x8f, ENCODING_SECONDARY } },
+    [INST_JGE] = { [ENCODE_I1] = { 1, 0x7d }, [ENCODE_I4] = { 1, 0x8d, ENCODING_SECONDARY } },
+    [INST_JL]  = { [ENCODE_I1] = { 1, 0x7c }, [ENCODE_I4] = { 1, 0x8c, ENCODING_SECONDARY } },
+    [INST_JLE] = { [ENCODE_I1] = { 1, 0x7e }, [ENCODE_I4] = { 1, 0x8e, ENCODING_SECONDARY } },
 
-        [ENCODE_R1_R1] = { 1, 0x02 },
-        [ENCODE_R2_R2] = { 1, 0x03, ENCODING_WORD_OPERANDS },
-        [ENCODE_R4_R4] = { 1, 0x03 },
-        [ENCODE_R8_R8] = { 1, 0x03, ENCODING_REX_W },
+    [INST_SETE]  = { [ENCODE_R1] = { 1, 0x94, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x94, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETNE] = { [ENCODE_R1] = { 1, 0x95, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x95, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETP]  = { [ENCODE_R1] = { 1, 0x9a, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9a, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETNP] = { [ENCODE_R1] = { 1, 0x9b, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9b, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETA]  = { [ENCODE_R1] = { 1, 0x97, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x97, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETAE] = { [ENCODE_R1] = { 1, 0x93, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x93, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETB]  = { [ENCODE_R1] = { 1, 0x92, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x92, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETBE] = { [ENCODE_R1] = { 1, 0x96, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x96, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETG]  = { [ENCODE_R1] = { 1, 0x9f, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9f, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETGE] = { [ENCODE_R1] = { 1, 0x9d, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9d, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETL]  = { [ENCODE_R1] = { 1, 0x9c, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9c, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETLE] = { [ENCODE_R1] = { 1, 0x9e, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9e, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+
+    [INST_MOV] = {
+        [ENCODE_R1_I1] = { 1, 0xb0, ENCODING_REG_IN_OPCODE },
+        [ENCODE_R2_I2] = { 1, 0xb8, ENCODING_WORD_OPERANDS | ENCODING_REG_IN_OPCODE },
+        [ENCODE_R4_I4] = { 1, 0xb8, ENCODING_REG_IN_OPCODE },
+        [ENCODE_R8_I8] = { 1, 0xb8, ENCODING_REX_W | ENCODING_REG_IN_OPCODE },
+
+        [ENCODE_M1_I1] = { 1, 0xc6, ENCODING_MODRM_FLAG, .modrm_flag = 0 },
+        [ENCODE_M2_I2] = { 1, 0xc7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 0 },
+        [ENCODE_M4_I4] = { 1, 0xc7, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_M8_I4] = { 1, 0xc7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
+
+        [ENCODE_R1_R1] = { 1, 0x88 },
+        [ENCODE_R2_R2] = { 1, 0x89, ENCODING_WORD_OPERANDS },
+        [ENCODE_R4_R4] = { 1, 0x89 },
+        [ENCODE_R8_R8] = { 1, 0x89, ENCODING_REX_W },
+
+        [ENCODE_M1_R1] = { 1, 0x88 },
+        [ENCODE_M2_R2] = { 1, 0x89, ENCODING_WORD_OPERANDS },
+        [ENCODE_M4_R4] = { 1, 0x89 },
+        [ENCODE_M8_R8] = { 1, 0x89, ENCODING_REX_W },
+
+        [ENCODE_R1_M1] = { 1, 0x8a },
+        [ENCODE_R2_M2] = { 1, 0x8b, ENCODING_WORD_OPERANDS },
+        [ENCODE_R4_M4] = { 1, 0x8b },
+        [ENCODE_R8_M8] = { 1, 0x8b, ENCODING_REX_W },
+    },
+
+    #define INST_INTEGER(inst, imm_flag, op_a, op_b, op_c, op_d) \
+    [inst] = { \
+        [ENCODE_R1_I1] = { 1, 0x80, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_R2_I1] = { 1, 0x83, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_R4_I1] = { 1, 0x83, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_R8_I1] = { 1, 0x83, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_R2_I2] = { 1, 0x81, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_R4_I4] = { 1, 0x81, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_R8_I4] = { 1, 0x81, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_M1_I1] = { 1, 0x80, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_M2_I1] = { 1, 0x83, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_M4_I1] = { 1, 0x83, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_M8_I1] = { 1, 0x83, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_M2_I2] = { 1, 0x81, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_M4_I4] = { 1, 0x81, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_M8_I4] = { 1, 0x81, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+ \
+        [ENCODE_R1_M1] = { 1, op_c }, \
+        [ENCODE_R2_M2] = { 1, op_d, ENCODING_WORD_OPERANDS }, \
+        [ENCODE_R4_M4] = { 1, op_d }, \
+        [ENCODE_R8_M8] = { 1, op_d, ENCODING_REX_W }, \
+ \
+        [ENCODE_M1_R1] = { 1, op_a }, \
+        [ENCODE_M2_R2] = { 1, op_b, ENCODING_WORD_OPERANDS }, \
+        [ENCODE_M4_R4] = { 1, op_b }, \
+        [ENCODE_M8_R8] = { 1, op_b, ENCODING_REX_W }, \
+ \
+        [ENCODE_R1_R1] = { 1, op_c }, \
+        [ENCODE_R2_R2] = { 1, op_d, ENCODING_WORD_OPERANDS }, \
+        [ENCODE_R4_R4] = { 1, op_d }, \
+        [ENCODE_R8_R8] = { 1, op_d, ENCODING_REX_W }, \
+    },
+
+    INST_INTEGER(INST_ADD, 0, 0x00, 0x01, 0x02, 0x03)
+    INST_INTEGER(INST_OR,  1, 0x08, 0x09, 0x0a, 0x0b)
+    // ADC and SBB slot in here
+    INST_INTEGER(INST_AND, 4, 0x20, 0x21, 0x22, 0x23)
+    INST_INTEGER(INST_SUB, 5, 0x28, 0x29, 0x2a, 0x2b)
+    INST_INTEGER(INST_XOR, 6, 0x30, 0x31, 0x32, 0x33)
+    INST_INTEGER(INST_CMP, 7, 0x38, 0x39, 0x3a, 0x3b)
+    #undef INST_INTEGER
+
+    [INST_SHR] = {
+        [ENCODE_R1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_R2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_R4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_R8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5},
+        [ENCODE_M1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_M4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5},
+
+        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5},
+    },
+    [INST_SAR] = {
+        [ENCODE_R1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_R4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
+        [ENCODE_M1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_M4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
+
+        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
+        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
+    },
+    [INST_SHL] = {
+        [ENCODE_R1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_R4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
+        [ENCODE_M1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_M4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
+
+        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
+        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
     },
 
     [INST_MUL] = {
@@ -198,6 +386,26 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
         [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7 },
     },
+    [INST_NEG] = {
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 3 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 3 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 3 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 3 },
+    },
+    [INST_NOT] = {
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 2 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 2 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 2 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 2 },
+    },
 };
 
 u8 REG_INDEX_MAP[REG_COUNT] = {
@@ -219,7 +427,7 @@ u8 REG_INDEX_MAP[REG_COUNT] = {
     [R15] = 15,
 };
 
-Encoded_Inst encode(Inst inst) {
+Encoded_Inst encode_inst(Inst inst) {
     Encoding_Mode encoding_mode = ENCODING_MODE_INVALID;
     {
         enum {
@@ -232,6 +440,7 @@ Encoded_Inst encode(Inst inst) {
         int size_offset;
 
         switch (inst.a.size) {
+            case 0: assert(inst.a.kind == PLACE_NONE);
             case 1: size_offset = 0; break;
             case 2: size_offset = 1; break;
             case 4: size_offset = 2; break;
@@ -250,6 +459,7 @@ Encoded_Inst encode(Inst inst) {
         }
 
         switch (inst.b.size) {
+            case 0: assert(inst.b.kind == PLACE_NONE);
             case 1: size_offset = 0; break;
             case 2: size_offset = 1; break;
             case 4: size_offset = 2; break;
@@ -269,6 +479,11 @@ Encoded_Inst encode(Inst inst) {
 
         #define ENC(x, y, s) ((x << 0) | (y << 4) | (s << 8))
         switch (ENC(a_mode, b_mode, inst.immediate_size)) {
+            case ENC(0,  0,  0): encoding_mode = ENCODE_NO_PARAMS; break;
+
+            case ENC(0,  0,  1): encoding_mode = ENCODE_I1; break;
+            case ENC(0,  0,  4): encoding_mode = ENCODE_I4; break;
+
             case ENC(R1, 0,  1): encoding_mode = ENCODE_R1_I1; break;
             case ENC(R2, 0,  1): encoding_mode = ENCODE_R2_I1; break;
             case ENC(R4, 0,  1): encoding_mode = ENCODE_R4_I1; break;
@@ -277,6 +492,14 @@ Encoded_Inst encode(Inst inst) {
             case ENC(R4, 0,  4): encoding_mode = ENCODE_R4_I4; break;
             case ENC(R8, 0,  4): encoding_mode = ENCODE_R8_I4; break;
             case ENC(R8, 0,  8): encoding_mode = ENCODE_R8_I8; break;
+
+            case ENC(M1, 0,  1): encoding_mode = ENCODE_M1_I1; break;
+            case ENC(M2, 0,  1): encoding_mode = ENCODE_M2_I1; break;
+            case ENC(M4, 0,  1): encoding_mode = ENCODE_M4_I1; break;
+            case ENC(M8, 0,  1): encoding_mode = ENCODE_M8_I1; break;
+            case ENC(M2, 0,  2): encoding_mode = ENCODE_M2_I2; break;
+            case ENC(M4, 0,  4): encoding_mode = ENCODE_M4_I4; break;
+            case ENC(M8, 0,  4): encoding_mode = ENCODE_M8_I4; break;
 
             case ENC(R1, 0,  0): encoding_mode = ENCODE_R1; break;
             case ENC(R2, 0,  0): encoding_mode = ENCODE_R2; break;
@@ -348,7 +571,9 @@ Encoded_Inst encode(Inst inst) {
         encode_in_rm  = ENCODE_NEITHER;
 
         switch (inst.a.kind) {
-            case PLACE_NONE: assert(false);
+            case PLACE_NONE: {
+                assert(inst.b.kind == PLACE_NONE);
+            } break;
             case PLACE_REG: {
                 encode_in_reg = ENCODE_A;
                 encode_in_rm  = inst.b.kind == PLACE_NONE? ENCODE_NEITHER : ENCODE_B;
@@ -373,6 +598,9 @@ Encoded_Inst encode(Inst inst) {
 
         if (encoding.flags & ENCODING_REG_IN_OPCODE) {
             assert(inst.a.kind == PLACE_REG && inst.b.kind == PLACE_NONE);
+
+            encode_in_reg = ENCODE_NEITHER;
+            encode_in_rm  = ENCODE_NEITHER;
 
             u8 index = REG_INDEX_MAP[inst.a.reg];
             opcode |= index & 7;
@@ -510,12 +738,54 @@ Encoded_Inst encode(Inst inst) {
 
 
 u8 *INST_NAMES[INST_COUNT] = {
-    [INST_ADD] = "add",
+    [INST_CALL] = "call",
+    [INST_JMP]  = "jmp",
+    [INST_RET]  = "ret",
+    [INST_INT3] = "int 3",
+    [INST_NOP]  = "nop",
 
+    [INST_JE]   = "je",
+    [INST_JNE]  = "jne",
+    [INST_JP]   = "jp",
+    [INST_JNP]  = "jnp",
+    [INST_JA]   = "ja",
+    [INST_JAE]  = "jae",
+    [INST_JB]   = "jb",
+    [INST_JBE]  = "jbe",
+    [INST_JL]   = "jl",
+    [INST_JLE]  = "jle",
+    [INST_JG]   = "jg",
+    [INST_JGE]  = "jge",
+
+    [INST_SETE]   = "sete",
+    [INST_SETNE]  = "setne",
+    [INST_SETP]   = "setp",
+    [INST_SETNP]  = "setnp",
+    [INST_SETA]   = "seta",
+    [INST_SETAE]  = "setae",
+    [INST_SETB]   = "setb",
+    [INST_SETBE]  = "setbe",
+    [INST_SETL]   = "setl",
+    [INST_SETLE]  = "setle",
+    [INST_SETG]   = "setg",
+    [INST_SETGE]  = "setge",
+
+    [INST_MOV]  = "mov",
+    [INST_ADD]  = "add",
+    [INST_SUB]  = "sub",
+    [INST_AND]  = "and",
+    [INST_OR]   = "or",
+    [INST_XOR]  = "xor",
+    [INST_CMP]  = "cmp",
+    [INST_SHL]  = "shl",
+    [INST_SHR]  = "shr",
+    [INST_SAR]  = "sar",
     [INST_MUL]  = "mul",
     [INST_IMUL] = "imul",
     [INST_DIV]  = "div",
     [INST_IDIV] = "idiv",
+    [INST_NEG]  = "neg",
+    [INST_NOT]  = "not",
 };
 
 u8 *REG_NAMES[REG_COUNT][4] = {
@@ -619,7 +889,7 @@ void print_inst(Inst *inst) {
         }
     }
     if (inst->immediate_size != 0) {
-        if (inst->a.kind != PLACE_NONE) printf(", ");
+        printf(inst->a.kind == PLACE_NONE? " " : ", ");
         u64 size_mask = 0xffffffffffffffff >> ((8-inst->immediate_size)*8);
         printf("%x", inst->immediate & size_mask);
     }
@@ -636,8 +906,13 @@ void print_encoded_inst(Encoded_Inst encoded) {
 
 
 void main() {
-    Inst i = { INST_IMUL, { PLACE_REG, 2, .reg = R12 }, { PLACE_MEM, 2, .address = { RCX, R13, 4, 9 } } };
+    for (Inst_Kind k = INST_SETE; k <= INST_SETGE; k += 1) {
+        Inst a = { k, { PLACE_REG, 1, .reg = RAX } };
+        //print_inst(&a);
+        print_encoded_inst(encode_inst(a));
 
-    //print_inst(&i);
-    print_encoded_inst(encode(i));
+        Inst b = { k, { PLACE_MEM, 1, .address = { R12, RDI, 2, -123 } } };
+        //print_inst(&b);
+        print_encoded_inst(encode_inst(b));
+    }
 }
