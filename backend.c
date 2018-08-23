@@ -55,7 +55,7 @@ typedef struct Address {
 
 
 enum Key_Flags {
-    KEY_FLAG_ONLY_SET_ONCE = 0x01,
+    KEY_FLAG_ONLY_SET_ONCE = 1 << 0,
 };
 
 typedef struct Key {
@@ -65,7 +65,7 @@ typedef struct Key {
     u32 size;
     enum { KEY_INTEGER, KEY_FLOAT, KEY_COMPOUND } kind;
 
-    u16 lifetime_start, lifetime_end; // inst block indices
+    u16 lifetime_start, lifetime_end; // inst indices
 
     Imm constant_value; // Used when 'KEY_FLAG_ONLY_SET_ONCE'
 } Key;
@@ -97,6 +97,7 @@ typedef enum Inst_Kind {
     INST_NOP,
     
     INST_MOV,
+    INST_XCHG,
     INST_ADD,
     INST_SUB,
     INST_AND,
@@ -148,10 +149,67 @@ typedef enum Inst_Kind {
     INST_COUNT,
 } Inst_Kind;
 
+u8 *INST_NAMES[INST_COUNT] = {
+    [INST_CALL] = "call",
+    [INST_JMP]  = "jmp",
+    [INST_RET]  = "ret",
+    [INST_INT3] = "int 3",
+    [INST_NOP]  = "nop",
+
+    [INST_JE]   = "je",
+    [INST_JNE]  = "jne",
+    [INST_JP]   = "jp",
+    [INST_JNP]  = "jnp",
+    [INST_JA]   = "ja",
+    [INST_JAE]  = "jae",
+    [INST_JB]   = "jb",
+    [INST_JBE]  = "jbe",
+    [INST_JL]   = "jl",
+    [INST_JLE]  = "jle",
+    [INST_JG]   = "jg",
+    [INST_JGE]  = "jge",
+
+    [INST_SETE]   = "sete",
+    [INST_SETNE]  = "setne",
+    [INST_SETP]   = "setp",
+    [INST_SETNP]  = "setnp",
+    [INST_SETA]   = "seta",
+    [INST_SETAE]  = "setae",
+    [INST_SETB]   = "setb",
+    [INST_SETBE]  = "setbe",
+    [INST_SETL]   = "setl",
+    [INST_SETLE]  = "setle",
+    [INST_SETG]   = "setg",
+    [INST_SETGE]  = "setge",
+
+    [INST_MOV]  = "mov",
+    [INST_XCHG] = "xchg",
+    [INST_ADD]  = "add",
+    [INST_SUB]  = "sub",
+    [INST_AND]  = "and",
+    [INST_OR]   = "or",
+    [INST_XOR]  = "xor",
+    [INST_CMP]  = "cmp",
+    [INST_SHL]  = "shl",
+    [INST_SHR]  = "shr",
+    [INST_SAR]  = "sar",
+    [INST_INC]  = "inc",
+    [INST_DEC]  = "dec",
+    [INST_MUL]  = "mul",
+    [INST_IMUL] = "imul",
+    [INST_DIV]  = "div",
+    [INST_IDIV] = "idiv",
+    [INST_NEG]  = "neg",
+    [INST_NOT]  = "not",
+};
+
+
 typedef struct Inst {
     Inst_Kind kind;
     Place places[2];
     Imm imm;
+
+    u16 index;
 } Inst;
 
 
@@ -196,6 +254,8 @@ typedef struct Inst_Block Inst_Block;
 typedef struct Jump_To {
     u8 *debug_name;
     Inst_Block *block;
+
+    u64 relative_bytecode_pos;
 } Jump_To;
 
 typedef struct Jump_From {
@@ -206,7 +266,6 @@ typedef struct Jump_From {
 
 enum { DEFAULT_INST_BLOCK_CAPACITY = 16 };
 struct Inst_Block {
-    u16 index;
     u16 length, capacity;
     Inst_Block *next;
 
@@ -231,7 +290,7 @@ struct Link_List {
 typedef struct Code_Builder {
     Arena *arena;
     u64 next_key_index;
-    u16 next_block_index;
+    u16 next_inst_index;
     Inst_Block *insts_start, *insts_head;
     Link_List *link_list_start, *link_list_head;
 } Code_Builder;
@@ -244,11 +303,7 @@ Code_Builder *code_builder_new(Arena *arena) {
 
 void code_builder_start_new_inst_block(Code_Builder *builder, u16 capacity) {
     Inst_Block *new = (Inst_Block*) arena_alloc(builder->arena, sizeof(Inst_Block) + capacity*sizeof(Inst));
-
-    builder->next_block_index += 1;
-    new->index = builder->next_block_index;
     new->capacity = capacity;
-
     builder->insts_head = builder->insts_start == null? (builder->insts_start = new) : (builder->insts_head->next = new);
 }
 
@@ -261,8 +316,42 @@ void code_builder_add_inst(Code_Builder *builder, Inst inst) {
         code_builder_start_new_inst_block(builder, DEFAULT_INST_BLOCK_CAPACITY);
     }
 
+    assert(builder->next_inst_index + 1 > builder->next_inst_index);
+    builder->next_inst_index += 1;
+    inst.index = builder->next_inst_index;
+
     builder->insts_head->insts[builder->insts_head->length] = inst;
     builder->insts_head->length += 1;
+}
+
+void code_builder_insert_inst(Code_Builder *builder, Inst_Block *block, u16 index, bool after, Inst inst) {
+    assert(index < block->length);
+    inst.index = block->insts[index].index;
+
+    bool spill_into_next = false;
+    if (block->length >= block->capacity) {
+        u16 capacity = DEFAULT_INST_BLOCK_CAPACITY;
+        Inst_Block *new = (Inst_Block*) arena_alloc(builder->arena, sizeof(Inst_Block) + capacity*sizeof(Inst));
+        new->capacity = capacity;
+        new->next = block->next;
+        block->next = new;
+
+        spill_into_next = true;
+    }
+
+    u16 slot = after? index + 1 : index;
+
+    if (spill_into_next) {
+        block->next->length += 1;
+        assert(block->next->length == 1);
+        block->next->insts[0] = block->insts[block->length - 1];
+    } else {
+        block->length += 1;
+    }
+    for (u16 i = block->length - 1; i > slot; i -= 1) {
+        block->insts[i] = block->insts[i - 1];
+    }
+    block->insts[slot] = inst;
 }
 
 
@@ -325,6 +414,7 @@ GEN_NEW_INT_FUNCTION(new_u64, u64)
 
 Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
     Jump_To *result = arena_new(builder->arena, Jump_To);
+    result->relative_bytecode_pos = U64_MAX;
     result->debug_name = debug_name;
 
     if (builder->insts_head == null || builder->insts_head->length > 0 || builder->insts_head->jump_to != null) {
@@ -376,6 +466,7 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
 
 
 enum {
+    BINARY_MOV,
     BINARY_ADD,
     BINARY_SUB,
     BINARY_MUL,
@@ -401,6 +492,7 @@ void binary(Code_Builder *builder, int binary, Key *left, Key *right) {
 
     if (key_kind == KEY_INTEGER) {
         switch (binary) {
+            case BINARY_MOV: inst_kind = INST_MOV; break;
             case BINARY_ADD: inst_kind = INST_ADD; break;
             case BINARY_SUB: inst_kind = INST_SUB; break;
             case BINARY_MUL: inst_kind = INST_MUL; break;
@@ -457,7 +549,23 @@ void unary(Code_Builder *builder, int unary, Key *key) {
 
 typedef Key *Register_Map[REG_COUNT];
 
-Reg find_reg_for_key(Key *key, Register_Map *map) {
+Reg find_free_reg(Register_Map *map, Reg_Kind reg_kind) {
+    Reg range_start, range_end;
+    switch (reg_kind) {
+        case REG_KIND_GPR: range_start = RAX; range_end = R15; break;
+        case REG_KIND_XMM: range_start = XMM0; range_end = XMM15; break;
+        default: assert(false);
+    }
+
+    for (Reg reg = range_start; reg <= range_end; reg += 1) {
+        if ((*map)[reg] == null) return reg;
+    }
+
+    unimplemented(); // TODO We have do flush some registers
+    return REG_NONE;
+}
+
+Reg find_reg_for_key(Register_Map *map, Key *key) {
     Reg_Kind reg_kind = REG_KIND_GPR; // TODO
 
     Reg range_start, range_end;
@@ -486,33 +594,38 @@ void assign_registers(Code_Builder *builder) {
     Register_Map usage_map = {0};
 
     for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
-        u16 block_index = block->index;
-
         for (u16 i = 0; i < block->length; i += 1) {
+            Inst *inst = &block->insts[i];
+
             for (u8 j = 0; j < 2; j += 1) {
-                if (block->insts[i].places[j].kind == PLACE_KEY) {
-                    Key *key = block->insts[i].places[j].key;
-                    if (key->lifetime_start == 0)        key->lifetime_start = block_index;
-                    if (block_index > key->lifetime_end) key->lifetime_end   = block_index;
+                if (inst->places[j].kind == PLACE_KEY) {
+                    Key *key = inst->places[j].key;
+                    if (inst->index < key->lifetime_start) key->lifetime_start = inst->index;
+                    if (inst->index > key->lifetime_end)   key->lifetime_end   = inst->index;
                 }
             }
         }
     }
 
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
-        for (Reg reg = 0; reg < REG_COUNT; reg += 1) {
-            Key *key = usage_map[reg];
-            if (key != null) {
-                assert(key->lifetime_start <= block->index);
-                if (key->lifetime_end < block->index) {
-                    usage_map[reg] = null;
-                }
-            }
-        }
+    u32 skip_insts = 0;
 
+    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
+            if (skip_insts > 0) {
+                skip_insts -= 1;
+                continue;
+            }
+
             Inst *inst = &block->insts[i];
             bool remove_inst = false;
+
+            for (Reg reg = 0; reg < REG_COUNT; reg += 1) {
+                Key *key = usage_map[reg];
+                if (key != null) {
+                    assert(key->lifetime_start <= inst->index);
+                    if (key->lifetime_end < inst->index) usage_map[reg] = null;
+                }
+            }
 
             if (inst->places[0].kind == PLACE_KEY) {
                 Key *key = inst->places[0].key;
@@ -522,7 +635,7 @@ void assign_registers(Code_Builder *builder) {
                     assert(inst->kind == INST_MOV);
                     remove_inst = true;
                 } else {
-                    Reg reg = find_reg_for_key(key, &usage_map);
+                    Reg reg = find_reg_for_key(&usage_map, key);
                     inst->places[0].kind = PLACE_REG;
                     inst->places[0].reg = reg;
                 }
@@ -536,7 +649,7 @@ void assign_registers(Code_Builder *builder) {
                     inst->places[1].kind = PLACE_NONE;
                     inst->imm = key->constant_value;
                 } else {
-                    Reg reg = find_reg_for_key(key, &usage_map);
+                    Reg reg = find_reg_for_key(&usage_map, key);
                     inst->places[1].kind = PLACE_REG;
                     inst->places[1].reg = reg;
                 }
@@ -548,6 +661,70 @@ void assign_registers(Code_Builder *builder) {
                 }
                 i -= 1;
                 block->length -= 1;
+                continue;
+            }
+
+
+            Reg force_into_reg = REG_NONE;
+            u8 force_place;
+
+            if (inst->kind == INST_MUL || inst->kind == INST_DIV || inst->kind == INST_IMUL || inst->kind == INST_IDIV) {
+                force_into_reg = RAX;
+                force_place = 0;
+            } else if (inst->kind == INST_SHL || inst->kind == INST_SHR || inst->kind == INST_SAR) {
+                force_into_reg = RCX;
+                force_place = 1;
+            }
+
+            if (force_into_reg != REG_NONE) {
+                Place current_place = inst->places[force_place];
+                Place other_place = inst->places[force_place == 0? 1 : 0];
+                
+                // Remove the other register, because it is implied in the instruction
+                if (force_place == 0) inst->places[0] = inst->places[1];
+                inst->places[1].kind = PLACE_NONE;
+
+                // Add instructions to get things into the right place
+                if (current_place.kind == PLACE_REG && current_place.reg == force_into_reg) {
+                    // Don't do anything
+                } else if (other_place.kind == PLACE_REG && other_place.reg == force_into_reg) {
+                    Reg temp_reg = find_free_reg(&usage_map, reg_kind(force_into_reg));
+                    Place temp_place = { PLACE_REG, current_place.size, .reg = temp_reg };
+                    inst->places[0] = temp_place;
+
+                    Inst extra[4] = {
+                        { INST_MOV, { temp_place, other_place } },
+                        { INST_MOV, { other_place, current_place } },
+                        { INST_MOV, { current_place, other_place } },
+                        { INST_MOV, { other_place, temp_place } },
+                    };
+
+                    code_builder_insert_inst(builder, block, i, true, extra[3]);
+                    code_builder_insert_inst(builder, block, i, true, extra[2]);
+                    code_builder_insert_inst(builder, block, i, false, extra[1]);
+                    code_builder_insert_inst(builder, block, i, false, extra[0]);
+                    skip_insts += 4;
+                } else if (usage_map[force_into_reg] != null) {
+                    assert(false); // TODO Test!
+
+                    Reg temp_reg = find_free_reg(&usage_map, reg_kind(force_into_reg));
+
+                    Inst extra[4] = {
+                        { INST_MOV, { { PLACE_REG, 8, .reg = temp_reg }, { PLACE_REG, 8, .reg = force_into_reg } } },
+                        { INST_MOV, { { PLACE_REG, current_place.size, .reg = force_into_reg },  current_place } },
+                        { INST_MOV, { current_place, { PLACE_REG, current_place.size, .reg = force_into_reg } } },
+                        { INST_MOV, { { PLACE_REG, 8, .reg = force_into_reg },  { PLACE_REG, 8, .reg = temp_reg } } },
+                    };
+
+                    code_builder_insert_inst(builder, block, i, true, extra[3]);
+                    code_builder_insert_inst(builder, block, i, true, extra[2]);
+                    code_builder_insert_inst(builder, block, i, false, extra[1]);
+                    code_builder_insert_inst(builder, block, i, false, extra[0]);
+                    skip_insts += 4;
+                } else {
+                    assert(false); // TODO Test!
+                    unimplemented(); // TODO some crazy move mess
+                }
             }
         }
 
@@ -588,6 +765,47 @@ typedef enum Encoding_Mode {
     ENCODING_MODE_COUNT,
 } Encoding_Mode;
 
+u8 *ENCODING_MODE_NAMES[ENCODING_MODE_COUNT] = {
+    [ENCODE_NO_PARAMS] = "",
+    [ENCODE_I1]     = " imm8",
+    [ENCODE_I4]     = " imm32",
+    [ENCODE_R1]     = " reg8",
+    [ENCODE_R2]     = " reg16",
+    [ENCODE_R4]     = " reg32",
+    [ENCODE_R8]     = " reg64",
+    [ENCODE_M1]     = " mem8",
+    [ENCODE_M2]     = " mem16",
+    [ENCODE_M4]     = " mem32",
+    [ENCODE_M8]     = " mem64",
+    [ENCODE_R1_I1]  = " reg8, imm8",
+    [ENCODE_R2_I1]  = " reg16, imm8",
+    [ENCODE_R4_I1]  = " reg32, imm8",
+    [ENCODE_R8_I1]  = " reg64, imm8",
+    [ENCODE_R2_I2]  = " reg16, imm16",
+    [ENCODE_R4_I4]  = " reg32, imm32",
+    [ENCODE_R8_I4]  = " reg64, imm32",
+    [ENCODE_R8_I8]  = " reg64, imm64",
+    [ENCODE_M1_I1]  = " mem8, imm8",
+    [ENCODE_M2_I1]  = " reg16, imm8",
+    [ENCODE_M4_I1]  = " reg32, imm8",
+    [ENCODE_M8_I1]  = " reg64, imm8",
+    [ENCODE_M2_I2]  = " reg16, imm16",
+    [ENCODE_M4_I4]  = " reg32, imm32",
+    [ENCODE_M8_I4]  = " reg64, imm32",
+    [ENCODE_R1_R1]  = " reg8, reg8",
+    [ENCODE_R2_R2]  = " reg16, reg16",
+    [ENCODE_R4_R4]  = " reg32, reg32",
+    [ENCODE_R8_R8]  = " reg64, reg64",
+    [ENCODE_R1_M1]  = " reg8, mem8",
+    [ENCODE_R2_M2]  = " reg16, mem16",
+    [ENCODE_R4_M4]  = " reg32, mem32",
+    [ENCODE_R8_M8]  = " reg64, mem64",
+    [ENCODE_M1_R1]  = " mem8, reg8",
+    [ENCODE_M2_R2]  = " mem16, reg16",
+    [ENCODE_M4_R4]  = " mem32, reg32",
+    [ENCODE_M8_R8]  = " mem64, reg64",
+};
+
 
 #define ENCODING_WORD_OPERANDS    0x01 // prefixes 0x66
 #define ENCODING_REX_W            0x02
@@ -607,6 +825,14 @@ typedef struct Encoded_Inst {
     u8 bytes[15]; // NB x64 instructions can be at most 15 bytes long
 } Encoded_Inst;
 
+
+enum {
+    // These are the absolute maxima for x64. Min length is for a jump to an immediate 8-bit offset,
+    // max length is for an indirect jump to a modrm+sib+32-bit offset memory address, which requires
+    // a rex prefix to encode.
+    ENCODING_JMP_MAX_LENGTH = 8,
+    ENCODING_JMP_MIN_LENGTH = 2,
+};
 
 Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_CALL] = {
@@ -677,6 +903,13 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         [ENCODE_R2_M2] = { 1, 0x8b, ENCODING_WORD_OPERANDS },
         [ENCODE_R4_M4] = { 1, 0x8b },
         [ENCODE_R8_M8] = { 1, 0x8b, ENCODING_REX_W },
+    },
+
+    [INST_XCHG] = {
+        [ENCODE_R1_R1] = { 1, 0x86 },
+        [ENCODE_R2_R2] = { 1, 0x87, ENCODING_WORD_OPERANDS },
+        [ENCODE_R4_R4] = { 1, 0x87 },
+        [ENCODE_R8_R8] = { 1, 0x87, ENCODING_REX_W },
     },
 
     #define INST_INTEGER(inst, imm_flag, op_a, op_b, op_c, op_d) \
@@ -892,14 +1125,21 @@ u8 REG_INDEX_MAP[REG_COUNT] = {
 };
 
 Encoded_Inst encode_inst(Inst *inst) {
-    Encoding_Mode encoding_mode = ENCODING_MODE_INVALID;
+    Encoding encoding;
     {
         enum {
             NONE = 0,
             R1, R2, R4, R8,
-            X1, X2, X4, X8,
+            X4, X8,
             M1, M2, M4, M8,
+            MODE_COUNT,
         } place_modes[2];
+
+        u8 *MODE_NAMES[MODE_COUNT] = {
+            [R1] = "reg8", [R2] = "reg16", [R4] = "reg32", [R8] = "reg64",
+            [X4] = "xmm32", [X8] = "xmm64",
+            [M1] = "mem8", [M2] = "mem16", [M4] = "mem32", [M8] = "mem64",
+        };
 
         int size_offset;
 
@@ -917,13 +1157,15 @@ Encoded_Inst encode_inst(Inst *inst) {
                 case PLACE_NONE: place_modes[i] = NONE; break;
                 case PLACE_REG: switch (reg_kind(inst->places[i].reg)) {
                     case REG_KIND_GPR: place_modes[i] = R1 + size_offset; break;
-                    case REG_KIND_XMM: place_modes[i] = X1 + size_offset; break;
+                    case REG_KIND_XMM: place_modes[i] = X4 + (size_offset - 2); assert(size_offset >= 2); break;
                     default: assert(false);
                 } break;
                 case PLACE_MEM:  place_modes[i] = M1 + size_offset; break;
                 default: assert(inst->places[i].kind == PLACE_NONE);
             }
         }
+
+        Encoding_Mode encoding_mode = ENCODING_MODE_INVALID;
 
         #define ENC(x, y, s) ((x << 0) | (y << 4) | (s << 8))
         switch (ENC(place_modes[0], place_modes[1], inst->imm.size)) {
@@ -973,10 +1215,31 @@ Encoded_Inst encode_inst(Inst *inst) {
             default: assert(false);
         }
         #undef ENC
-    }
 
-    Encoding encoding = ENCODING_TABLE[inst->kind][encoding_mode];
-    assert(encoding.exists == 1);
+        encoding = ENCODING_TABLE[inst->kind][encoding_mode];
+        if (encoding_mode == ENCODING_MODE_INVALID || encoding.exists != 1) {
+            printf("No encoding for '%s", INST_NAMES[inst->kind]);
+            if (MODE_NAMES[place_modes[0]] != null) {
+                printf(" %s", MODE_NAMES[place_modes[0]]);
+                if (MODE_NAMES[place_modes[1]] != null) {
+                    printf(", %s", MODE_NAMES[place_modes[1]]);
+                }
+                if (inst->imm.size > 0) printf(", imm%u", (u64) inst->imm.size);
+            } else {
+                if (inst->imm.size > 0) printf(" imm%u", (u64) inst->imm.size);
+            }
+            printf("'\n");
+
+            printf("Available encodings:\n");
+            for (int i = 0; i < ENCODING_MODE_COUNT; i += 1) {
+                if (ENCODING_TABLE[inst->kind][i].exists) {
+                    printf("    '%s%s'\n", INST_NAMES[inst->kind], ENCODING_MODE_NAMES[i]);
+                }
+            }
+
+            panic("Attempted to encode invalid x64 instruction\n");
+        }
+    }
 
     enum {
         REX_BASE = 0x40,
@@ -1188,59 +1451,43 @@ Encoded_Inst encode_inst(Inst *inst) {
     return result;
 }
 
+void encode_insts(Code_Builder *builder) {
+    u64 bytecode_length = 0;
 
-u8 *INST_NAMES[INST_COUNT] = {
-    [INST_CALL] = "call",
-    [INST_JMP]  = "jmp",
-    [INST_RET]  = "ret",
-    [INST_INT3] = "int 3",
-    [INST_NOP]  = "nop",
+    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+        if (block->jump_to != null) block->jump_to->relative_bytecode_pos = bytecode_length;
 
-    [INST_JE]   = "je",
-    [INST_JNE]  = "jne",
-    [INST_JP]   = "jp",
-    [INST_JNP]  = "jnp",
-    [INST_JA]   = "ja",
-    [INST_JAE]  = "jae",
-    [INST_JB]   = "jb",
-    [INST_JBE]  = "jbe",
-    [INST_JL]   = "jl",
-    [INST_JLE]  = "jle",
-    [INST_JG]   = "jg",
-    [INST_JGE]  = "jge",
+        u16 l = block->jump_from == null? block->length : block->length - 1;
+        for (u16 i = 0; i < l; i += 1) {
+            Encoded_Inst encoded = encode_inst(&block->insts[i]);
+            bytecode_length += (u64) encoded.length;
+        }
 
-    [INST_SETE]   = "sete",
-    [INST_SETNE]  = "setne",
-    [INST_SETP]   = "setp",
-    [INST_SETNP]  = "setnp",
-    [INST_SETA]   = "seta",
-    [INST_SETAE]  = "setae",
-    [INST_SETB]   = "setb",
-    [INST_SETBE]  = "setbe",
-    [INST_SETL]   = "setl",
-    [INST_SETLE]  = "setle",
-    [INST_SETG]   = "setg",
-    [INST_SETGE]  = "setge",
+        if (block->jump_from != null) {
+            assert(block->jump_from->jump_to != null);
+            u64 target_pos = block->jump_from->jump_to->relative_bytecode_pos;
 
-    [INST_MOV]  = "mov",
-    [INST_ADD]  = "add",
-    [INST_SUB]  = "sub",
-    [INST_AND]  = "and",
-    [INST_OR]   = "or",
-    [INST_XOR]  = "xor",
-    [INST_CMP]  = "cmp",
-    [INST_SHL]  = "shl",
-    [INST_SHR]  = "shr",
-    [INST_SAR]  = "sar",
-    [INST_INC]  = "inc",
-    [INST_DEC]  = "dec",
-    [INST_MUL]  = "mul",
-    [INST_IMUL] = "imul",
-    [INST_DIV]  = "div",
-    [INST_IDIV] = "idiv",
-    [INST_NEG]  = "neg",
-    [INST_NOT]  = "not",
-};
+            Inst *inst = &block->insts[block->length - 1];
+
+            if (target_pos == U64_MAX) {
+                unimplemented(); // TODO backwards jumps require us to iterate with a speculative encoded size range
+            } else {
+                i64 offset = target_pos - bytecode_length;
+                if (offset - 2 >= I8_MIN && offset - 2 <= I8_MAX && false) {
+                    inst->imm = (Imm) { .size = 1, .value = offset };
+                } else {
+                    assert(offset - 4 >= I32_MIN && offset - 4 <= I32_MAX);
+                    inst->imm = (Imm) { .size = 4, .value = offset };
+                }
+
+                Encoded_Inst encoded = encode_inst(inst);
+                bytecode_length += (u64) encoded.length;
+            }
+        }
+    }
+
+    printf("Encoded %u bytes of machinecode\n", bytecode_length);
+}
 
 u8 *REG_NAMES[REG_COUNT][4] = {
     [RAX] = { "al",   "ax",   "eax",  "rax" },
@@ -1358,7 +1605,7 @@ void print_inst(Inst *inst) {
     } else if (inst->imm.size == 1 || inst->imm.size == 2 || inst->imm.size == 4 || inst->imm.size == 8) {
         printf(inst->places[0].kind == PLACE_NONE? " " : ", ");
         u64 size_mask = 0xffffffffffffffff >> ((8-inst->imm.size)*8);
-        printf("%x\n", inst->imm.value & size_mask);
+        printf("%i\n", inst->imm.value & size_mask);
     } else {
         printf("\n");
         assert(false);
@@ -1404,26 +1651,47 @@ void dump_instructions(Code_Builder *builder) {
 
 
 
+void fibonachi(Code_Builder *code_builder, i32 iterations) {
+    Key *m = new_i32(code_builder, 1);
+    Key *n = new_i32(code_builder, 1);
+
+    Key *counter = new_i32(code_builder, 0);
+    Jump_To *loop_start = add_label(code_builder, "start");
+
+    Key *old_m = new_i32(code_builder, 0);
+    binary(code_builder, BINARY_MOV, old_m, m);
+    binary(code_builder, BINARY_ADD, m, n);
+    binary(code_builder, BINARY_MOV, n, old_m);
+
+    unary(code_builder, UNARY_INC, counter);
+    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, iterations));
+    Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
+    link_jump(code_builder, loop_end, loop_start);
+}
+
+void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
+    Key *a = new_i32(code_builder, 2);
+    Key *b = new_i32(code_builder, 2);
+
+    Key *counter = new_i32(code_builder, 0);
+    Jump_To *loop_start = add_label(code_builder, "start");
+
+    binary(code_builder, BINARY_MUL, a, b);
+    binary(code_builder, BINARY_MUL, b, a);
+
+    unary(code_builder, UNARY_INC, counter);
+    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, iterations));
+    Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
+    link_jump(code_builder, loop_end, loop_start);
+}
+
+
 void main() {
     Arena arena = {0};
     Code_Builder *code_builder = code_builder_new(&arena);
 
-    Key *sum = new_i32(code_builder, 3);
-
-    Key *counter = new_i32(code_builder, 4);
-    Jump_To *loop_start = add_label(code_builder, "start");
-    {
-        Key *increment = new_i32(code_builder, 7);
-        binary(code_builder, BINARY_SUB, increment, counter);
-        binary(code_builder, BINARY_ADD, sum, increment);
-    }
-    unary(code_builder, UNARY_DEC, counter);
-    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, 0));
-    Jump_From *loop_end = add_jump(code_builder, CONDITION_A);
-    link_jump(code_builder, loop_end, loop_start);
-
-    Key *result = new_i32(code_builder, 24);
-    binary(code_builder, BINARY_SUB, result, sum);
+    //fibonachi(code_builder, 10);
+    not_fibonachi(code_builder, 4);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
@@ -1432,4 +1700,6 @@ void main() {
 
     printf("\n; output\n");
     dump_instructions(code_builder);
+
+    encode_insts(code_builder);
 }

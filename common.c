@@ -16,19 +16,19 @@
 #define f32 float
 #define f64 double
 
-#define U8_MAX 0xff
-#define U16_MAX 0xffff
-#define U32_MAX 0xffffffff
-#define U64_MAX 0xffffffffffffffff
+const u8 U8_MAX = 0xff;
+const u16 U16_MAX = 0xffff;
+const u32 U32_MAX = 0xffffffff;
+const u64 U64_MAX = 0xffffffffffffffff;
 
-#define I8_MAX 127
-#define I8_MIN -128
-#define I16_MAX 32767
-#define I16_MIN -32768
-#define I32_MAX 2147483647ull
-#define I32_MIN -2147483648ll
-#define I64_MAX 9223372036854775807ull
-#define I64_MIN -9223372036854775808ll
+const i8 I8_MAX = 127;
+const i8 I8_MIN = -128;
+const i16 I16_MAX = 32767;
+const i16 I16_MIN = -32768;
+const i32 I32_MAX = 2147483647ull;
+const i32 I32_MIN = -2147483648ll;
+const i64 I64_MAX = 9223372036854775807ull;
+const i64 I64_MIN = -9223372036854775808ll;
 
 #define max(a, b)  ((a) > (b)? (a) : (b))
 #define min(a, b)  ((a) > (b)? (b) : (a))
