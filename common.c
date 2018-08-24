@@ -86,9 +86,27 @@ IO_Result delete_file(u8 *file_name);
 
     // NB bytes must be u32 on win32
     WINAPI_PRE void* WINAPI_POST HeapAlloc(Handle heap, u32 flags, u64 bytes);
-    WINAPI_PRE void* WINAPI_POST HeapReAlloc(Handle heap, u32 flags, void* memory, u64 bytes);
-    WINAPI_PRE bool  WINAPI_POST HeapFree(Handle heap, u32 flags, void* memory);
+    WINAPI_PRE void* WINAPI_POST HeapReAlloc(Handle heap, u32 flags, void *memory, u64 bytes);
+    WINAPI_PRE bool  WINAPI_POST HeapFree(Handle heap, u32 flags, void *memory);
     WINAPI_PRE Handle WINAPI_POST GetProcessHeap();
+
+
+    WINAPI_PRE void* WINAPI_POST VirtualAlloc(void *address, u64 size, u32 type, u32 protect);
+    #define MEM_COMMIT     0x00001000
+    #define MEM_RESERVE    0x00002000
+
+    WINAPI_PRE bool WINAPI_POST VirtualFree(void *address, u64 size, u32 type);
+    #define MEM_RELEASE    0x00008000
+
+    WINAPI_PRE bool WINAPI_POST VirtualProtect(void *address, u64 size, u32 new, u32 *old);
+    #define PAGE_EXECUTE            0x10
+    #define PAGE_EXECUTE_READ       0x20
+    #define PAGE_EXECUTE_READWRITE  0x40
+    #define PAGE_EXECUTE_WRITECOPY  0x80
+    #define PAGE_NOACCESS           0x01
+    #define PAGE_READONLY           0x02
+    #define PAGE_READWRITE          0x04
+    #define PAGE_WRITECOPY          0x08
 
 
     WINAPI_PRE Handle WINAPI_POST GetStdHandle(u32 key);

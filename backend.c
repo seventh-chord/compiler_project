@@ -465,6 +465,11 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
 }
 
 
+void end_function(Code_Builder *builder) {
+    code_builder_add_inst(builder, (Inst) { INST_RET });
+}
+
+
 enum {
     BINARY_MOV,
     BINARY_ADD,
@@ -889,10 +894,10 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         [ENCODE_M4_I4] = { 1, 0xc7, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
         [ENCODE_M8_I4] = { 1, 0xc7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
 
-        [ENCODE_R1_R1] = { 1, 0x88 },
-        [ENCODE_R2_R2] = { 1, 0x89, ENCODING_WORD_OPERANDS },
-        [ENCODE_R4_R4] = { 1, 0x89 },
-        [ENCODE_R8_R8] = { 1, 0x89, ENCODING_REX_W },
+        [ENCODE_R1_R1] = { 1, 0x8a },
+        [ENCODE_R2_R2] = { 1, 0x8b, ENCODING_WORD_OPERANDS },
+        [ENCODE_R4_R4] = { 1, 0x8b },
+        [ENCODE_R8_R8] = { 1, 0x8b, ENCODING_REX_W },
 
         [ENCODE_M1_R1] = { 1, 0x88 },
         [ENCODE_M2_R2] = { 1, 0x89, ENCODING_WORD_OPERANDS },
@@ -1473,20 +1478,61 @@ void encode_insts(Code_Builder *builder) {
                 unimplemented(); // TODO backwards jumps require us to iterate with a speculative encoded size range
             } else {
                 i64 offset = target_pos - bytecode_length;
-                if (offset - 2 >= I8_MIN && offset - 2 <= I8_MAX && false) {
-                    inst->imm = (Imm) { .size = 1, .value = offset };
-                } else {
-                    assert(offset - 4 >= I32_MIN && offset - 4 <= I32_MAX);
-                    inst->imm = (Imm) { .size = 4, .value = offset };
-                }
 
+                inst->imm.size = 1;
+                inst->imm.value = offset;
                 Encoded_Inst encoded = encode_inst(inst);
-                bytecode_length += (u64) encoded.length;
+                assert(encoded.length == ENCODING_JMP_MIN_LENGTH);
+
+                if (offset - 2 >= I8_MIN && offset - 2 <= I8_MAX) {
+                    inst->imm.size = 1;
+                    inst->imm.value = offset - 2;
+
+                    assert(encoded.length == 2);
+                    bytecode_length += 2;
+                } else {
+                    inst->imm.size = 4;
+                    Encoded_Inst encoded = encode_inst(inst);
+                    assert(offset - encoded.length >= I32_MIN && offset - encoded.length <= I32_MAX);
+
+                    inst->imm.value = offset - encoded.length;
+
+                    bytecode_length += encoded.length;
+                }
             }
         }
     }
 
     printf("Encoded %u bytes of machinecode\n", bytecode_length);
+
+    // TODO Make this not use winapi
+    u8 *executable_memory = VirtualAlloc(null, bytecode_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (executable_memory == null) {
+        panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
+    }
+
+    u64 write_cursor = 0;
+    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+        for (u16 i = 0; i < block->length; i += 1) {
+            Encoded_Inst encoded = encode_inst(&block->insts[i]);
+            assert(write_cursor + encoded.length <= bytecode_length);
+
+            mem_copy(encoded.bytes, executable_memory + write_cursor, encoded.length);
+            write_cursor += (u64) encoded.length;
+        }
+    }
+    assert(write_cursor == bytecode_length);
+
+    u32 old_permissions;
+    if (!VirtualProtect(executable_memory, bytecode_length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
+        printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
+    }
+
+    u32 (*generated_function)() = (void*) executable_memory;
+    u32 result = (*generated_function)();
+    printf("Generated function returned %u\n", result);
+
+    VirtualFree(executable_memory, 0, MEM_RELEASE);
 }
 
 u8 *REG_NAMES[REG_COUNT][4] = {
@@ -1655,7 +1701,8 @@ void fibonachi(Code_Builder *code_builder, i32 iterations) {
     Key *m = new_i32(code_builder, 1);
     Key *n = new_i32(code_builder, 1);
 
-    Key *counter = new_i32(code_builder, 0);
+    Key *counter = new_i32(code_builder, iterations);
+    binary(code_builder, BINARY_SUB, counter, new_i32(code_builder, 2));
     Jump_To *loop_start = add_label(code_builder, "start");
 
     Key *old_m = new_i32(code_builder, 0);
@@ -1663,10 +1710,12 @@ void fibonachi(Code_Builder *code_builder, i32 iterations) {
     binary(code_builder, BINARY_ADD, m, n);
     binary(code_builder, BINARY_MOV, n, old_m);
 
-    unary(code_builder, UNARY_INC, counter);
-    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, iterations));
-    Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
+    unary(code_builder, UNARY_DEC, counter);
+    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, 0));
+    Jump_From *loop_end = add_jump(code_builder, CONDITION_G);
     link_jump(code_builder, loop_end, loop_start);
+
+    end_function(code_builder);
 }
 
 void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
@@ -1683,6 +1732,8 @@ void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
     binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, iterations));
     Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
     link_jump(code_builder, loop_end, loop_start);
+
+    end_function(code_builder);
 }
 
 
@@ -1690,8 +1741,8 @@ void main() {
     Arena arena = {0};
     Code_Builder *code_builder = code_builder_new(&arena);
 
-    //fibonachi(code_builder, 10);
-    not_fibonachi(code_builder, 4);
+    fibonachi(code_builder, 10);
+    //not_fibonachi(code_builder, 4);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
