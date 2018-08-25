@@ -358,7 +358,7 @@ void code_builder_insert_insts(
         Inst_Block *new_block = spill_count > 0? block->next : block;
 
         u16 old_end = old_block->length - 1;
-        u16 new_end = spill_count > 0? new_block->length : old_end + prefix_length + postfix_length;
+        u16 new_end = spill_count > 0? new_block->length - 1 : old_end + prefix_length + postfix_length;
  
         for (u16 i = index + 1; i < block->length; i += 1) {
             new_block->insts[new_end] = old_block->insts[old_end];
@@ -384,9 +384,9 @@ void code_builder_insert_insts(
     // Move the current instruction into the right place
     Inst_Block *new_inst_block = block;
     u16 new_inst_index = index + prefix_length;
-    if (new_inst_index > new_inst_block->length) {
-        new_inst_block = new_inst_block->next;
+    if (new_inst_index >= new_inst_block->length) {
         new_inst_index -= new_inst_block->length;
+        new_inst_block = new_inst_block->next;
     }
     new_inst_block->insts[new_inst_index] = block->insts[index];
 
@@ -396,9 +396,9 @@ void code_builder_insert_insts(
         u16 target_index = index;
 
         for (u32 i = 0; i < prefix_length; i += 1) {
-            if (target_index > target_block->length) {
+            if (target_index >= target_block->length) {
+                target_index -= target_block->length;
                 target_block = target_block->next;
-                target_index = 0;
             }
 
             target_block->insts[target_index] = prefixes[i];
@@ -413,9 +413,9 @@ void code_builder_insert_insts(
         u16 target_index = index + prefix_length + 1;
 
         for (u32 i = 0; i < postfix_length; i += 1) {
-            if (target_index > target_block->length) {
+            if (target_index >= target_block->length) {
+                target_index -= target_block->length;
                 target_block = target_block->next;
-                target_index = 0;
             }
 
             target_block->insts[target_index] = postfixes[i];
@@ -687,6 +687,8 @@ void assign_registers(Code_Builder *builder) {
         }
     }
 
+    Inst_Block **previous_block_slot = &builder->insts_start;
+
     u32 skip_insts = 0;
     for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
@@ -804,13 +806,16 @@ void assign_registers(Code_Builder *builder) {
                         Place imm_place = { PLACE_REG, inst->imm.size, .reg = RDX };
                         prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
                         inst->places[1] = imm_place;
-                    } else if (inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX) {
-                        u32 size = inst->places[1].size;
-                        Place a_place = { PLACE_REG, size, .reg = RAX };
-                        Place d_place = { PLACE_REG, size, .reg = RDX };
+                        inst->imm.size = 0;
+                    } else if (
+                        (inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX) &&
+                        !(inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX)
+                    ) {
+                        assert(a_flush_reg != REG_NONE);
 
-                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { d_place, a_place } };
-                        inst->places[1] = d_place;
+                        u32 size = inst->places[1].size;
+                        Place mul_place = { PLACE_REG, size, .reg = a_flush_reg };
+                        inst->places[1] = mul_place;
                     }
 
                     if (inst->places[0].kind != PLACE_REG || inst->places[0].reg != RAX) {
@@ -857,10 +862,12 @@ void assign_registers(Code_Builder *builder) {
             }
         }
 
-        if (block->length == 0) {
+        if (block->length == 0 && (block->jump_to == null || (block->next != null && block->next->jump_to == null))) {
             assert(block->jump_from == null);
-            unimplemented(); // TODO Unlink this block, if we can stick our label onto the next block
+            *previous_block_slot = block->next;
         }
+
+        previous_block_slot = &block->next;
     }
 }
 
@@ -1862,13 +1869,56 @@ void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
     end_function(code_builder);
 }
 
+void nasty_mul_test(Code_Builder *code_builder) {
+    Key *a = new_i32(code_builder, 1);
+    Key *c = new_i32(code_builder, 2);
+    Key *d = new_i32(code_builder, 3);
+    Key *b = new_i32(code_builder, 4);
+
+    //add_label(code_builder, "1");
+    binary(code_builder, BINARY_MUL, c, b);
+
+    //add_label(code_builder, "2");
+    binary(code_builder, BINARY_MUL, c, d);
+
+    //add_label(code_builder, "3");
+    binary(code_builder, BINARY_MUL, d, b);
+
+    //add_label(code_builder, "4");
+    binary(code_builder, BINARY_MUL, a, d);
+
+    //add_label(code_builder, "5");
+    binary(code_builder, BINARY_MUL, c, a);
+
+    //add_label(code_builder, "6");
+    binary(code_builder, BINARY_MUL, d, a);
+
+    //add_label(code_builder, "7");
+    binary(code_builder, BINARY_MUL, a, a);
+
+    //add_label(code_builder, "8");
+    binary(code_builder, BINARY_MUL, c, c);
+
+    //add_label(code_builder, "9");
+    binary(code_builder, BINARY_MUL, d, d);
+
+    add_label(code_builder, "ensure_regs_are_used");
+    binary(code_builder, BINARY_ADD, a, b);
+    binary(code_builder, BINARY_ADD, b, a);
+    binary(code_builder, BINARY_ADD, c, d);
+    binary(code_builder, BINARY_ADD, d, c);
+
+    end_function(code_builder);
+}
+
 
 void main() {
     Arena arena = {0};
     Code_Builder *code_builder = code_builder_new(&arena);
 
     //fibonachi(code_builder, 10);
-    not_fibonachi(code_builder, 3);
+    //not_fibonachi(code_builder, 3);
+    nasty_mul_test(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
