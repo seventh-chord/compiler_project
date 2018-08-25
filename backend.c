@@ -99,6 +99,13 @@ typedef enum Inst_Kind {
     INST_RET,
     INST_INT3,
     INST_NOP,
+
+    INST_CBW, // sign extend al into ah
+    INST_CWD, // sign extend ax into dx
+    INST_CDQ, // sign extend eax into edx
+    INST_CQO, // sign extend rax into rdx
+
+    INST_ZERO_AH,
     
     INST_MOV,
     INST_XCHG,
@@ -159,6 +166,13 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_RET]  = "ret",
     [INST_INT3] = "int 3",
     [INST_NOP]  = "nop",
+
+    [INST_CBW] = "cbw",
+    [INST_CWD] = "cwd",
+    [INST_CDQ] = "cdq",
+    [INST_CQO] = "cqo",
+
+    [INST_ZERO_AH] = "xor ah, ah",
 
     [INST_JE]   = "je",
     [INST_JNE]  = "jne",
@@ -731,49 +745,66 @@ void assign_regs(Code_Builder *builder) {
 
 
 
-            // Used to allocate registers
-            enum { MAX_FAKE_KEYS = 4 };
-            Key fake_keys[MAX_FAKE_KEYS] = {
-                { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                { .size = inst->places[0].size, .kind = KEY_INTEGER },
-            };
-            u32 fake_key_index = 0;
+            // Fix up certain troublesome instructions
+            // In practice, we hope that register allocation takes care of not producing cases which
+            // are troublesome, so we don't end up inserting any/many instructions at this stage
+            {
+                enum { MAX_PREFIXES = 5, MAX_POSTFIXES = 5 };
+                Inst prefix_array[MAX_PREFIXES] = {0}, postfix_array[MAX_POSTFIXES] = {0};
+                u8 prefix_index = 0, postfix_index = MAX_POSTFIXES;
 
-            // Handle instructions with limited encoding modes
-            switch (inst->kind) {
-                case INST_IMUL:
-                case INST_MUL:
-                {
-                    assert(inst->places[0].kind == PLACE_REG); // TODO We don't properly handle this case!
+                enum { MAX_FAKE_KEYS = 6 };
+                Key fake_keys[MAX_FAKE_KEYS] = {
+                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
+                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
+                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
+                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
+                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
+                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
+                };
+                u32 fake_key_index = 0;
 
-                    Inst prefix_array[4] = {0}, postfix_array[4] = {0};
-                    u8 prefix_index = 0, postfix_index = 4;
+                bool rax_was_free = usage_map[RAX] == null;
+                bool rdx_was_free = usage_map[RDX] == null;
+                if (rax_was_free) usage_map[RAX] = &fake_keys[fake_key_index++];
+                if (rdx_was_free) usage_map[RDX] = &fake_keys[fake_key_index++];
+                
+                // Handle instructions with limited encoding modes
+                switch (inst->kind) {
+                    case INST_MUL:
+                    case INST_DIV:
+                    case INST_IMUL:
+                    case INST_IDIV:
+                    {
+                        assert(inst->places[0].kind == PLACE_REG); // TODO We don't properly handle this case!
+                        u32 inst_size = inst->places[0].size;
 
-                    if (inst->kind == INST_IMUL && inst->places[0].size > 1) {
                         // Use the IMUL reg reg variant
-                        if (inst->places[1].kind == PLACE_NONE) {
-                            assert(inst->imm.size > 0);
+                        if (inst->kind == INST_IMUL && inst_size > 1) {
+                            if (inst->places[1].kind == PLACE_NONE) {
+                                assert(inst->imm.size > 0);
 
-                            Reg imm_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
-                            if (imm_reg == REG_NONE)  {
-                                unimplemented(); // TODO We need a register, flush something
+                                Reg imm_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                if (imm_reg == REG_NONE)  {
+                                    unimplemented(); // TODO We need a register, flush something
+                                }
+                                Place imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
+
+                                prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
+                                inst->places[1] = imm_place;
+                                inst->imm.size = 0;
                             }
-                            Place imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
 
-                            prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
-                            inst->places[1] = imm_place;
-                            inst->imm.size = 0;
+                            break; // NB breaks out of switch
                         }
-                    } else {
-                        bool flush_rax = !(usage_map[RAX] == null || inst->places[0].reg == RAX);
-                        bool flush_rdx = !(usage_map[RDX] == null || inst->places[0].reg == RDX || inst->places[0].size == 1);
+
+                        bool flush_rax = !rax_was_free && inst->places[0].reg != RAX;
+                        bool flush_rdx = !rdx_was_free && inst->places[0].reg != RDX && inst_size > 1;
 
                         Reg a_flush_reg = REG_NONE;
                         Place a_flush_place;
                         if (flush_rax) {
-                            u32 flush_size = usage_map[RAX]->size;
+                            u32 flush_size = max(usage_map[RAX]->size, inst_size);
                             a_flush_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
                             if (a_flush_reg != REG_NONE)  {
                                 a_flush_place = (Place) { PLACE_REG, flush_size, .reg = a_flush_reg };
@@ -789,7 +820,7 @@ void assign_regs(Code_Builder *builder) {
                         Reg d_flush_reg = REG_NONE;
                         Place d_flush_place;
                         if (flush_rdx) {
-                            u32 flush_size = usage_map[RDX]->size;
+                            u32 flush_size = max(usage_map[RDX]->size, inst_size);
                             d_flush_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
 
                             if (d_flush_reg != REG_NONE)  {
@@ -805,18 +836,16 @@ void assign_regs(Code_Builder *builder) {
 
                         if (
                             (inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX) &&
-                            !(inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX)
+                            !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX)
                         ) {
                             assert(a_flush_reg != REG_NONE);
-
-                            u32 size = inst->places[1].size;
-                            Place mul_place = { PLACE_REG, size, .reg = a_flush_reg };
-                            inst->places[1] = mul_place;
+                            inst->places[1] = (Place) { PLACE_REG, inst_size, .reg = a_flush_reg };
                         }
 
+                        bool left_was_rdx = inst->places[0].reg == RDX;
+
                         if (inst->places[0].reg != RAX) {
-                            u32 size = inst->places[0].size;
-                            Place a_place = { PLACE_REG, size, .reg = RAX };
+                            Place a_place = { PLACE_REG, inst_size, .reg = RAX };
                             prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_place, inst->places[0] } };
                             postfix_array[--postfix_index] = (Inst) { INST_MOV, { inst->places[0], a_place } };
                         }
@@ -826,7 +855,7 @@ void assign_regs(Code_Builder *builder) {
 
                             Place imm_place;
 
-                            if (flush_rdx || inst->places[0].reg == RDX) {
+                            if ((flush_rdx || inst->places[0].reg == RDX) && inst->kind != INST_DIV && inst->kind != INST_IDIV) {
                                 imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = RDX };
                             } else {
                                 Reg imm_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
@@ -841,51 +870,84 @@ void assign_regs(Code_Builder *builder) {
                             inst->imm.size = 0;
                         }
 
+                        if ((inst->kind == INST_DIV || inst->kind == INST_IDIV) && inst_size > 1 && inst->places[1].kind == PLACE_REG && inst->places[1].reg == RDX) {
+                            Place divider_place;
+                            if (left_was_rdx) {
+                                divider_place = (Place) { PLACE_REG, inst_size, .reg = RAX };
+                            } else if (flush_rdx) {
+                                divider_place = (Place) { PLACE_REG, inst_size, .reg = d_flush_reg };
+                            } else {
+                                Reg divider_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                if (divider_reg == REG_NONE)  {
+                                    unimplemented(); // TODO We need a register, flush something
+                                }
+                                divider_place = (Place) { PLACE_REG, inst_size, .reg = divider_reg };
+                                Place d_place = (Place) { PLACE_REG, inst_size, .reg = RDX };
+                                prefix_array[prefix_index++] = (Inst) { INST_MOV, { divider_place, d_place } };
+                            }
+
+                            inst->places[1] = divider_place;
+                        }
+
+                        if (inst->kind == INST_IDIV) {
+                            Inst_Kind extend_inst;
+                            switch (inst_size) {
+                                case 1: extend_inst = INST_CBW; break;
+                                case 2: extend_inst = INST_CWD; break;
+                                case 4: extend_inst = INST_CDQ; break;
+                                case 8: extend_inst = INST_CQO; break;
+                                default: assert(false);
+                            }
+                            prefix_array[prefix_index++] = (Inst) { extend_inst };
+                        }
+                        
+                        if (inst->kind == INST_DIV) {
+                            if (inst_size == 1) {
+                                prefix_array[prefix_index++] = (Inst) { INST_ZERO_AH };
+                            } else {
+                                Place d_place = { PLACE_REG, inst_size, .reg = RDX };
+                                prefix_array[prefix_index++] = (Inst) { INST_XOR, { d_place, d_place } };
+                            }
+                        }
+
                         inst->places[0] = inst->places[1];
                         inst->places[1].kind = PLACE_NONE;
-                    }
+                    } break;
 
-                    Inst *prefix_pointer = prefix_array;
-                    u8 prefix_length = prefix_index;
+                    case INST_SHL:
+                    case INST_SHR:
+                    case INST_SAR:
+                    {
+                        // Right must be either immediate, or in CL
+                        unimplemented();
+                    } break;
+                }
 
-                    Inst *postfix_pointer = postfix_array + postfix_index;
-                    u8 postfix_length = 4 - postfix_index;
+                assert(prefix_index <= MAX_PREFIXES && postfix_index <= MAX_POSTFIXES);
 
-                    code_builder_insert_insts(
-                        builder, block, i,
-                        prefix_pointer, prefix_length,
-                        postfix_pointer, postfix_length
-                    );
-                    skip_insts += prefix_length + postfix_length;
-                } break;
+                Inst *prefix_pointer = prefix_array;
+                u8 prefix_length = prefix_index;
 
-                case INST_IDIV:
-                case INST_DIV:
-                {
-                    // Left must be RAX
-                    // Sign- or zero-extend into RDX (except for 8-bit version, then extend into AH)
-                    // Right must be any register or memory location (i.e. remove immediates)
-                    unimplemented();
-                } break;
+                Inst *postfix_pointer = postfix_array + postfix_index;
+                u8 postfix_length = MAX_POSTFIXES - postfix_index;
 
-                case INST_SHL:
-                case INST_SHR:
-                case INST_SAR:
-                {
-                    // Right must be either immediate, or in CL
-                    unimplemented();
-                } break;
-            }
+                code_builder_insert_insts(
+                    builder, block, i,
+                    prefix_pointer, prefix_length,
+                    postfix_pointer, postfix_length
+                );
+                skip_insts += prefix_length + postfix_length;
 
-            if (fake_key_index > 0) {
-                assert(fake_key_index <= MAX_FAKE_KEYS);
+                if (fake_key_index > 0) {
+                    assert(fake_key_index <= MAX_FAKE_KEYS);
 
-                for (Reg reg = 0; reg < REG_COUNT; reg += 1) {
                     for (u32 i = 0; i < fake_key_index; i += 1) {
                         Key *key = &fake_keys[i];
-                        if (usage_map[reg] == key) {
-                            usage_map[reg] = null;
-                            break;
+                        for (Reg reg = 0; reg < REG_COUNT; reg += 1) {
+                            if (usage_map[reg] == key) {
+                                usage_map[reg] = null;
+                                break;
+                            }
                         }
                     }
                 }
@@ -991,6 +1053,8 @@ typedef struct Encoded_Inst {
     u8 bytes[15]; // NB x64 instructions can be at most 15 bytes long
 } Encoded_Inst;
 
+void print_encoded_inst(Encoded_Inst encoded);
+
 
 enum {
     // These are the absolute maxima for x64. Min length is for a jump to an immediate 8-bit offset,
@@ -999,6 +1063,8 @@ enum {
     ENCODING_JMP_MAX_LENGTH = 8,
     ENCODING_JMP_MIN_LENGTH = 2,
 };
+
+const Encoded_Inst ZERO_AH_ENCODING = { 2, { 0x30, 0xe4 } };
 
 Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_CALL] = {
@@ -1017,6 +1083,13 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_INT3] = { [ENCODE_NO_PARAMS] = { 1, 0xcc } },
     [INST_RET]  = { [ENCODE_NO_PARAMS] = { 1, 0xc3 } },
     [INST_NOP]  = { [ENCODE_NO_PARAMS] = { 1, 0x90 } },
+
+    [INST_CBW] = { [ENCODE_NO_PARAMS] = { 1, 0x98, ENCODING_WORD_OPERANDS } },
+    [INST_CWD] = { [ENCODE_NO_PARAMS] = { 1, 0x99, ENCODING_WORD_OPERANDS } },
+    [INST_CDQ] = { [ENCODE_NO_PARAMS] = { 1, 0x99 } },
+    [INST_CQO] = { [ENCODE_NO_PARAMS] = { 1, 0x99, ENCODING_REX_W } },
+
+    [INST_ZERO_AH] = { [ENCODE_NO_PARAMS] = { 1, 0 } }, // Just returns ZERO_AH_ENCODING
 
     [INST_JE]  = { [ENCODE_I1] = { 1, 0x74 }, [ENCODE_I4] = { 1, 0x84, ENCODING_SECONDARY } },
     [INST_JNE] = { [ENCODE_I1] = { 1, 0x75 }, [ENCODE_I4] = { 1, 0x85, ENCODING_SECONDARY } },
@@ -1407,6 +1480,10 @@ Encoded_Inst encode_inst(Inst *inst) {
         }
     }
 
+    if (inst->kind == INST_ZERO_AH) {
+        return ZERO_AH_ENCODING;
+    }
+
     enum {
         REX_BASE = 0x40,
         REX_W    = 0x08, // selects 64-bit operands over 32-bit operands
@@ -1666,36 +1743,47 @@ void encode_insts(Code_Builder *builder) {
 
     printf("Encoded %u bytes of machinecode\n", bytecode_length);
 
-    if (true) {
-        // TODO Make this not use winapi
-        u8 *executable_memory = VirtualAlloc(null, bytecode_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (executable_memory == null) {
-            panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
+    // Print out the bytes for the instructions
+    #if 0
+    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+        for (u16 i = 0; i < block->length; i += 1) {
+            Encoded_Inst encoded = encode_inst(&block->insts[i]);
+            print_encoded_inst(encoded);
         }
-
-        u64 write_cursor = 0;
-        for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
-            for (u16 i = 0; i < block->length; i += 1) {
-                Encoded_Inst encoded = encode_inst(&block->insts[i]);
-                assert(write_cursor + encoded.length <= bytecode_length);
-
-                mem_copy(encoded.bytes, executable_memory + write_cursor, encoded.length);
-                write_cursor += (u64) encoded.length;
-            }
-        }
-        assert(write_cursor == bytecode_length);
-
-        u32 old_permissions;
-        if (!VirtualProtect(executable_memory, bytecode_length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
-            printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
-        }
-
-        i8 (*generated_function)() = (void*) executable_memory;
-        i8 result = (*generated_function)();
-        printf("Generated function returned %i\n", (i64) result);
-
-        VirtualFree(executable_memory, 0, MEM_RELEASE);
     }
+    #endif
+
+    // Run the generated instructions in memory
+    // TODO Make this not use winapi if we actually want to keep it around
+    #if 1
+    u8 *executable_memory = VirtualAlloc(null, bytecode_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (executable_memory == null) {
+        panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
+    }
+
+    u64 write_cursor = 0;
+    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+        for (u16 i = 0; i < block->length; i += 1) {
+            Encoded_Inst encoded = encode_inst(&block->insts[i]);
+            assert(write_cursor + encoded.length <= bytecode_length);
+
+            mem_copy(encoded.bytes, executable_memory + write_cursor, encoded.length);
+            write_cursor += (u64) encoded.length;
+        }
+    }
+    assert(write_cursor == bytecode_length);
+
+    u32 old_permissions;
+    if (!VirtualProtect(executable_memory, bytecode_length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
+        printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
+    }
+
+    i32 (*generated_function)() = (void*) executable_memory;
+    i32 result = (*generated_function)();
+    printf("Generated function returned %i\n", (i64) result);
+
+    VirtualFree(executable_memory, 0, MEM_RELEASE);
+    #endif
 }
 
 u8 *REG_NAMES[REG_COUNT][4] = {
@@ -1937,10 +2025,10 @@ void nasty_mul_test(Code_Builder *code_builder) {
 }
 
 void nasty_imul_test(Code_Builder *code_builder) {
-    Key *a = new_i8(code_builder, 1);
-    Key *c = new_i8(code_builder, 2);
-    Key *d = new_i8(code_builder, 3);
-    Key *b = new_i8(code_builder, 4);
+    Key *a = new_i32(code_builder, 1);
+    Key *c = new_i32(code_builder, 2);
+    Key *d = new_i32(code_builder, 3);
+    Key *b = new_i32(code_builder, 4);
 
     binary(code_builder, BINARY_IMUL, c, b);
     binary(code_builder, BINARY_IMUL, c, d);
@@ -1953,14 +2041,38 @@ void nasty_imul_test(Code_Builder *code_builder) {
     binary(code_builder, BINARY_IMUL, d, d);
 
     add_label(code_builder, "imms");
-    binary(code_builder, BINARY_IMUL, c, new_i8(code_builder, 3));
-    binary(code_builder, BINARY_IMUL, d, new_i8(code_builder, 3));
+    binary(code_builder, BINARY_IMUL, c, new_i32(code_builder, 3));
+    binary(code_builder, BINARY_IMUL, d, new_i32(code_builder, 3));
 
     add_label(code_builder, "ensure_regs_are_used");
     binary(code_builder, BINARY_ADD, a, b);
     binary(code_builder, BINARY_ADD, b, a);
     binary(code_builder, BINARY_ADD, c, d);
     binary(code_builder, BINARY_ADD, d, c);
+
+    end_function(code_builder);
+}
+
+void nasty_div_test(Code_Builder *code_builder) {
+    Key *a = new_i32(code_builder, 17745);
+    Key *c = new_i32(code_builder, 65);
+    Key *d = new_i32(code_builder, 7);
+    Key *b = new_i32(code_builder, 5);
+
+    binary(code_builder, BINARY_IDIV, c, b);
+    binary(code_builder, BINARY_IDIV, a, c);
+    binary(code_builder, BINARY_IDIV, a, c);
+    binary(code_builder, BINARY_IDIV, a, d);
+    binary(code_builder, BINARY_IDIV, a, b);
+
+    end_function(code_builder);
+}
+
+void encoding_test(Code_Builder *code_builder) {
+    Inst insts[4] = { { INST_CBW }, { INST_CWD }, { INST_CDQ }, { INST_CQO } };
+    for (u32 i = 0; i < 4; i += 1) {
+        code_builder_add_inst(code_builder, insts[i]);
+    }
 
     end_function(code_builder);
 }
@@ -1973,7 +2085,9 @@ void main() {
     //fibonachi(code_builder, 10);
     //not_fibonachi(code_builder, 3);
     //nasty_mul_test(code_builder);
-    nasty_imul_test(code_builder);
+    //nasty_imul_test(code_builder);
+    nasty_div_test(code_builder);
+    //encoding_test(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
