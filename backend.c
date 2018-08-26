@@ -764,11 +764,6 @@ void assign_regs(Code_Builder *builder) {
                 };
                 u32 fake_key_index = 0;
 
-                bool rax_was_free = usage_map[RAX] == null;
-                bool rdx_was_free = usage_map[RDX] == null;
-                if (rax_was_free) usage_map[RAX] = &fake_keys[fake_key_index++];
-                if (rdx_was_free) usage_map[RDX] = &fake_keys[fake_key_index++];
-                
                 // Handle instructions with limited encoding modes
                 switch (inst->kind) {
                     case INST_MUL:
@@ -798,8 +793,17 @@ void assign_regs(Code_Builder *builder) {
                             break; // NB breaks out of switch
                         }
 
-                        bool flush_rax = !rax_was_free && inst->places[0].reg != RAX;
-                        bool flush_rdx = !rdx_was_free && inst->places[0].reg != RDX && inst_size > 1;
+                        bool flush_rax = inst->places[0].reg != RAX;
+                        bool flush_rdx = inst->places[0].reg != RDX && inst_size > 1;
+
+                        if (usage_map[RDX == null]) {
+                            usage_map[RAX] = &fake_keys[fake_key_index++];
+                            flush_rax = false;
+                        }
+                        if (usage_map[RDX] == null) {
+                            usage_map[RDX] = &fake_keys[fake_key_index++];
+                            flush_rdx = false;
+                        }
 
                         Reg a_flush_reg = REG_NONE;
                         Place a_flush_place;
@@ -918,8 +922,39 @@ void assign_regs(Code_Builder *builder) {
                     case INST_SHR:
                     case INST_SAR:
                     {
-                        // Right must be either immediate, or in CL
-                        unimplemented();
+                        u32 inst_size = inst->places[0].size;
+
+                        if (inst->places[1].kind == PLACE_NONE) {
+                            assert(inst->imm.size == inst->places[0].size);
+                            inst->imm.size = 1; // Shift only takes eight bit immediates
+
+                        } else if (inst->places[1].kind != PLACE_REG || inst->places[1].reg != RCX) {
+                            Reg c_flush_reg = REG_NONE;
+                            if (usage_map[RCX] != null) {
+                                Place c_flush_place;
+
+                                u32 flush_size = max(usage_map[RCX]->size, inst_size);
+                                c_flush_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                if (c_flush_reg != REG_NONE)  {
+                                    c_flush_place = (Place) { PLACE_REG, flush_size, .reg = c_flush_reg };
+                                } else {
+                                    unimplemented(); // Get a place on the stack
+                                }
+
+                                Place c_place = { PLACE_REG, c_flush_place.size, .reg = RCX };
+                                prefix_array[prefix_index++]   = (Inst) { INST_MOV, { c_flush_place, c_place } };
+                                postfix_array[--postfix_index] = (Inst) { INST_MOV, { c_place, c_flush_place } };
+                            }
+
+                            Place c_place = { PLACE_REG, inst_size, .reg = RCX };
+                            prefix_array[prefix_index++] = (Inst) { INST_MOV, { c_place, inst->places[1] } };
+
+                            if (inst->places[0].kind == PLACE_REG && inst->places[0].reg == RCX) {
+                                inst->places[0].reg = c_flush_reg;
+                            }
+                        }
+
+                        inst->places[1].kind = PLACE_NONE;
                     } break;
                 }
 
@@ -1756,33 +1791,35 @@ void encode_insts(Code_Builder *builder) {
     // Run the generated instructions in memory
     // TODO Make this not use winapi if we actually want to keep it around
     #if 1
-    u8 *executable_memory = VirtualAlloc(null, bytecode_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (executable_memory == null) {
-        panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
-    }
-
-    u64 write_cursor = 0;
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
-        for (u16 i = 0; i < block->length; i += 1) {
-            Encoded_Inst encoded = encode_inst(&block->insts[i]);
-            assert(write_cursor + encoded.length <= bytecode_length);
-
-            mem_copy(encoded.bytes, executable_memory + write_cursor, encoded.length);
-            write_cursor += (u64) encoded.length;
+    if (bytecode_length > 0) {
+        u8 *executable_memory = VirtualAlloc(null, bytecode_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (executable_memory == null) {
+            panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
         }
+
+        u64 write_cursor = 0;
+        for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+            for (u16 i = 0; i < block->length; i += 1) {
+                Encoded_Inst encoded = encode_inst(&block->insts[i]);
+                assert(write_cursor + encoded.length <= bytecode_length);
+
+                mem_copy(encoded.bytes, executable_memory + write_cursor, encoded.length);
+                write_cursor += (u64) encoded.length;
+            }
+        }
+        assert(write_cursor == bytecode_length);
+
+        u32 old_permissions;
+        if (!VirtualProtect(executable_memory, bytecode_length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
+            printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
+        }
+
+        i32 (*generated_function)() = (void*) executable_memory;
+        i32 result = (*generated_function)();
+        printf("Generated function returned %i\n", (i64) result);
+
+        VirtualFree(executable_memory, 0, MEM_RELEASE);
     }
-    assert(write_cursor == bytecode_length);
-
-    u32 old_permissions;
-    if (!VirtualProtect(executable_memory, bytecode_length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
-        printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
-    }
-
-    i32 (*generated_function)() = (void*) executable_memory;
-    i32 result = (*generated_function)();
-    printf("Generated function returned %i\n", (i64) result);
-
-    VirtualFree(executable_memory, 0, MEM_RELEASE);
     #endif
 }
 
@@ -2074,6 +2111,19 @@ void encoding_test(Code_Builder *code_builder) {
         code_builder_add_inst(code_builder, insts[i]);
     }
 
+    add_label(code_builder, "shifty_shafts");
+    Key *a = new_i32(code_builder, -32);
+    Key *c = new_i32(code_builder, 3);
+    Key *d = new_i32(code_builder, 456);
+    Key *b = new_i32(code_builder, 4);
+
+    binary(code_builder, BINARY_SAR, a, b);
+    binary(code_builder, BINARY_SAR, c, d);
+    binary(code_builder, BINARY_SAR, c, c);
+
+    binary(code_builder, BINARY_ADD, b, a);
+    binary(code_builder, BINARY_ADD, d, a);
+
     end_function(code_builder);
 }
 
@@ -2086,8 +2136,8 @@ void main() {
     //not_fibonachi(code_builder, 3);
     //nasty_mul_test(code_builder);
     //nasty_imul_test(code_builder);
-    nasty_div_test(code_builder);
-    //encoding_test(code_builder);
+    //nasty_div_test(code_builder);
+    encoding_test(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
