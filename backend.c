@@ -82,6 +82,11 @@ typedef struct Address {
     i32 offset;
 } Address;
 
+void replace_regs_in_address(Address *address, Reg old, Reg new) {
+    if (address->base == old)  address->base = new;
+    if (address->index == old) address->index = new;
+}
+
 
 enum Key_Flags {
     KEY_FLAG_ONLY_SET_ONCE = 1,
@@ -113,7 +118,6 @@ typedef struct Place {
 
     union {
         Key *key;
-        Key *key_address;
 
         Reg reg;
         Address address;
@@ -531,6 +535,14 @@ Key *new_key_with_value(Code_Builder *builder, int kind, u32 size, void *value) 
     return key;
 }
 
+Place key_deref(Key *key, u32 size) {
+    return (Place) { PLACE_KEY_ADDRESS, size, .key = key };
+}
+
+Place key_direct(Key *key) {
+    return (Place) { PLACE_KEY, key->size, .key = key };
+}
+
 
 #define GEN_NEW_INT_FUNCTION(name, type) \
 Key *name(Code_Builder *builder, type value) { \
@@ -544,6 +556,7 @@ GEN_NEW_INT_FUNCTION(new_u8,  u8)
 GEN_NEW_INT_FUNCTION(new_u16, u16)
 GEN_NEW_INT_FUNCTION(new_u32, u32)
 GEN_NEW_INT_FUNCTION(new_u64, u64)
+GEN_NEW_INT_FUNCTION(new_pointer, u64)
 #undef GEN_NEW_INT_FUNCTION
 
 Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
@@ -599,11 +612,23 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
     builder->link_list_head->length += 1;
 }
 
-void set_return(Code_Builder *builder, Key *key) {
-    assert(key->kind == KEY_INTEGER); // TODO Handle more complex return values in the future
+void set_return(Code_Builder *builder, int kind, Place place) {
+    // TODO This function is to simplistic. We would preferably couple it with
+    // how we generate the 'ret' instruction, or alternatively with how we
+    // handle register allocation, so we can verify that the generated 'mov rax, ...'
+    // is allways followed by the epilog or a direct 'ret'
 
-    Inst inst = { INST_MOV, { { PLACE_REG, key->size, .reg = RAX }, { PLACE_KEY, key->size, key } } };
-    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS);
+    if (place.kind == PLACE_KEY) {
+        assert(place.key->kind == kind);
+    }
+
+    if (kind == KEY_INTEGER) {
+        Inst inst = { INST_MOV, { { PLACE_REG, place.key->size, .reg = RAX }, place } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    } else {
+        assert(false);
+    }
 }
 
 
@@ -624,17 +649,27 @@ enum {
     BINARY_SAR,
 };
 
-void binary(Code_Builder *builder, int binary, Key *left, Key *right) {
-    left->flags &= ~KEY_FLAG_ONLY_SET_ONCE;
+void binary(Code_Builder *builder, int kind, int binary, Place left, Place right) {
+    assert(left.size == right.size);
+    if (left.kind == PLACE_KEY) {
+        left.key->flags &= ~KEY_FLAG_ONLY_SET_ONCE;
+        assert(left.key->kind == kind);
+    } else if (left.kind == PLACE_KEY_ADDRESS) {
+        assert(left.key->size == POINTER_SIZE && left.key->kind == KEY_INTEGER);
+    } else {
+        assert(false);
+    }
+    if (right.kind == PLACE_KEY) {
+        assert(right.key->kind == kind);
+    } else if (right.kind == PLACE_KEY_ADDRESS) {
+        assert(right.key->size == POINTER_SIZE && right.key->kind == KEY_INTEGER);
+    } else {
+        assert(false);
+    }
 
-    assert(left->size == right->size);
-    assert(left->kind == right->kind);
-    int key_kind = left->kind;
-    u32 size = left->size;
 
     Inst_Kind inst_kind;
-
-    if (key_kind == KEY_INTEGER) {
+    if (kind == KEY_INTEGER) {
         switch (binary) {
             case BINARY_MOV:  inst_kind = INST_MOV; break;
             case BINARY_ADD:  inst_kind = INST_ADD; break;
@@ -652,13 +687,13 @@ void binary(Code_Builder *builder, int binary, Key *left, Key *right) {
             case BINARY_SAR:  inst_kind = INST_SAR; break;
             default: assert(false);
         }
-    } else if (key_kind == KEY_FLOAT) {
+    } else if (kind == KEY_FLOAT) {
         unimplemented();
     } else {
         assert(false);
     }
 
-    Inst inst = { inst_kind, { { PLACE_KEY, size, .key = left }, { PLACE_KEY, size, .key = right } } };
+    Inst inst = { inst_kind, { left, right } };
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 }
 
@@ -669,12 +704,18 @@ enum {
     UNARY_DEC,
 };
 
-void unary(Code_Builder *builder, int unary, Key *key) {
-    key->flags &= ~KEY_FLAG_ONLY_SET_ONCE;
+void unary(Code_Builder *builder, int kind, int unary, Place place) {
+    if (place.kind == PLACE_KEY) {
+        place.key->flags &= ~KEY_FLAG_ONLY_SET_ONCE;
+        assert(place.key->kind == kind);
+    } else if (place.kind == PLACE_KEY_ADDRESS) {
+        assert(place.key->size == POINTER_SIZE && place.key->kind == KEY_INTEGER);
+    } else {
+        assert(false);
+    }
 
     Inst_Kind inst_kind;
-
-    if (key->kind == KEY_INTEGER) {
+    if (kind == KEY_INTEGER) {
         switch (unary) {
             case UNARY_NEG: inst_kind = INST_NEG; break;
             case UNARY_NOT: inst_kind = INST_NOT; break;
@@ -682,17 +723,19 @@ void unary(Code_Builder *builder, int unary, Key *key) {
             case UNARY_DEC: inst_kind = INST_DEC; break;
             default: assert(false);
         }
-    } else if (key->kind == KEY_FLOAT) {
+    } else if (kind == KEY_FLOAT) {
         unimplemented();
     } else {
         assert(false);
     }
 
-    Inst inst = { inst_kind, { { PLACE_KEY, key->size, .key = key } } };
+    Inst inst = { inst_kind, { place } };
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 }
 
-Key *reference_key(Code_Builder *builder, Key *value) {
+// Produces a new key, which contains the pointer to the given value
+// This generates a lea instruction
+Key *address_of_key(Code_Builder *builder, Key *value) {
     value->flags |= KEY_FLAG_ADDRESSABLE;
     value->flags &= ~KEY_FLAG_ONLY_SET_ONCE; // so we don't optimize the it away
 
@@ -702,23 +745,6 @@ Key *reference_key(Code_Builder *builder, Key *value) {
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 
     return address;
-}
-
-Key *dereference_key(Code_Builder *builder, Key *address, int kind, u32 size) {
-    if (kind == KEY_INTEGER) {
-        Key *value = new_key(builder, KEY_INTEGER, size);
-        Inst inst = { INST_MOV, { { PLACE_KEY, size, .key = value }, { PLACE_KEY_ADDRESS, size, .key_address = address } } };
-        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
-        return value;
-
-    } else if (kind == KEY_FLOAT) {
-        unimplemented();
-        return null;
-
-    } else {
-        assert(false);
-        return null;
-    }
 }
 
 
@@ -739,14 +765,10 @@ void end_function(Code_Builder *builder) {
             Inst *inst = &block->insts[i];
 
             for (u8 j = 0; j < 2; j += 1) {
-                Key *key;
-                if (inst->places[j].kind == PLACE_KEY) {
-                    key = inst->places[j].key;
-                } else if (inst->places[j].kind == PLACE_KEY_ADDRESS) {
-                    key = inst->places[j].key_address;
-                } else {
+                if (!(inst->places[j].kind == PLACE_KEY || inst->places[j].kind == PLACE_KEY_ADDRESS)) {
                     continue;
                 }
+                Key *key = inst->places[j].key;
 
                 Place *assigned_place = &key_places[key->index];
                 if (assigned_place->kind == PLACE_NONE) {
@@ -823,7 +845,7 @@ void end_function(Code_Builder *builder) {
                         *place_slot = key_places[key->index];
                     }
                 } else if (inst->places[j].kind == PLACE_KEY_ADDRESS) {
-                    Key *key = place_slot->key_address;
+                    Key *key = place_slot->key;
                     Place *place = &key_places[key->index];
 
                     Reg pointer_reg = REG_NONE;
@@ -867,7 +889,6 @@ void end_function(Code_Builder *builder) {
                 case INST_IMUL:
                 case INST_IDIV:
                 {
-                    assert(inst->places[0].kind == PLACE_REG); // TODO We don't properly handle this case!
                     u32 inst_size = inst->places[0].size;
 
                     // Use the IMUL reg reg variant
@@ -889,8 +910,8 @@ void end_function(Code_Builder *builder) {
                         break; // NB breaks out of switch
                     }
 
-                    bool flush_rax = inst->places[0].reg != RAX;
-                    bool flush_rdx = inst->places[0].reg != RDX && inst_size > 1;
+                    bool flush_rax = !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX);
+                    bool flush_rdx = !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RDX) && inst_size > 1;
 
                     // Don't flush the registers if they are not in use
                     if (next_gpr <= RAX) flush_rax = false;
@@ -938,12 +959,18 @@ void end_function(Code_Builder *builder) {
                         inst->places[1] = (Place) { PLACE_REG, inst_size, .reg = a_flush_reg };
                     }
 
-                    bool left_was_rdx = inst->places[0].reg == RDX;
+                    bool left_was_rdx = inst->places[0].kind == PLACE_REG && inst->places[0].reg == RDX;
 
-                    if (inst->places[0].reg != RAX) {
+                    if (!(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX)) {
+                        Place old_place = inst->places[0];
+                        if (old_place.kind == PLACE_MEM) {
+                            if (flush_rax) replace_regs_in_address(&old_place.address, RAX, a_flush_reg);
+                            if (flush_rdx) replace_regs_in_address(&old_place.address, RDX, d_flush_reg);
+                        }
+
                         Place a_place = { PLACE_REG, inst_size, .reg = RAX };
-                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_place, inst->places[0] } };
-                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { inst->places[0], a_place } };
+                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_place, old_place } };
+                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { old_place, a_place } };
                     }
 
                     if (inst->places[1].kind == PLACE_NONE) {
@@ -964,7 +991,11 @@ void end_function(Code_Builder *builder) {
                         prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
                         inst->places[1] = imm_place;
                         inst->imm.size = 0;
+                    } else if (inst->places[1].kind == PLACE_MEM) {
+                        if (flush_rax) replace_regs_in_address(&inst->places[1].address, RAX, a_flush_reg);
+                        if (flush_rdx) replace_regs_in_address(&inst->places[1].address, RDX, d_flush_reg);
                     }
+
 
                     if ((inst->kind == INST_DIV || inst->kind == INST_IDIV) && inst_size > 1 && inst->places[1].kind == PLACE_REG && inst->places[1].reg == RDX) {
                         Place divider_place;
@@ -1945,8 +1976,8 @@ void encode_insts(Code_Builder *builder) {
             printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
         }
 
-        i16 (*generated_function)() = (void*) executable_memory;
-        i16 result = (*generated_function)();
+        i32 (*generated_function)() = (void*) executable_memory;
+        i32 result = (*generated_function)();
         printf("Generated function returned %i\n", (i64) result);
 
         VirtualFree(executable_memory, 0, MEM_RELEASE);
@@ -2122,16 +2153,16 @@ void fibonachi(Code_Builder *code_builder, i32 iterations) {
     Key *n = new_i32(code_builder, 1);
 
     Key *counter = new_i32(code_builder, iterations);
-    binary(code_builder, BINARY_SUB, counter, new_i32(code_builder, 2));
+    binary(code_builder, KEY_INTEGER, BINARY_SUB, key_direct(counter), key_direct(new_i32(code_builder, 2)));
     Jump_To *loop_start = add_label(code_builder, "start");
 
     Key *old_m = new_i32(code_builder, 0);
-    binary(code_builder, BINARY_MOV, old_m, m);
-    binary(code_builder, BINARY_ADD, m, n);
-    binary(code_builder, BINARY_MOV, n, old_m);
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(old_m), key_direct(m));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(m), key_direct(n));
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(n), key_direct(old_m));
 
-    unary(code_builder, UNARY_DEC, counter);
-    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, 0));
+    unary(code_builder, KEY_INTEGER, UNARY_DEC, key_direct(counter));
+    binary(code_builder, KEY_INTEGER, BINARY_CMP, key_direct(counter), key_direct(new_i32(code_builder, 0)));
     Jump_From *loop_end = add_jump(code_builder, CONDITION_G);
     link_jump(code_builder, loop_end, loop_start);
 }
@@ -2143,11 +2174,11 @@ void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
     Key *counter = new_i32(code_builder, 0);
     Jump_To *loop_start = add_label(code_builder, "start");
 
-    binary(code_builder, BINARY_IMUL, a, b);
-    binary(code_builder, BINARY_IMUL, b, a);
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(a), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(b), key_direct(a));
 
-    unary(code_builder, UNARY_INC, counter);
-    binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, iterations));
+    unary(code_builder, KEY_INTEGER, UNARY_INC, key_direct(counter));
+    binary(code_builder, KEY_INTEGER, BINARY_CMP, key_direct(counter), key_direct(new_i32(code_builder, iterations)));
     Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
     link_jump(code_builder, loop_end, loop_start);
 }
@@ -2159,32 +2190,32 @@ void nasty_mul_test(Code_Builder *code_builder) {
     Key *b = new_i32(code_builder, 4);
 
     add_label(code_builder, "1");
-    binary(code_builder, BINARY_MUL, c, b);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(b));
     add_label(code_builder, "2");
-    binary(code_builder, BINARY_MUL, c, d);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(d));
     add_label(code_builder, "3");
-    binary(code_builder, BINARY_MUL, d, b);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(b));
     add_label(code_builder, "4");
-    binary(code_builder, BINARY_MUL, a, d);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(a), key_direct(d));
     add_label(code_builder, "5");
-    binary(code_builder, BINARY_MUL, c, a);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(a));
     add_label(code_builder, "6");
-    binary(code_builder, BINARY_MUL, d, a);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(a));
     add_label(code_builder, "7");
-    binary(code_builder, BINARY_MUL, a, a);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(a), key_direct(a));
     add_label(code_builder, "8");
-    binary(code_builder, BINARY_MUL, c, c);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(c));
     add_label(code_builder, "9");
-    binary(code_builder, BINARY_MUL, d, d);
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(d));
 
     add_label(code_builder, "10");
-    binary(code_builder, BINARY_MUL, d, new_i32(code_builder, 3));
+    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(new_i32(code_builder, 3)));
 
     add_label(code_builder, "ensure_regs_are_used");
-    binary(code_builder, BINARY_ADD, a, b);
-    binary(code_builder, BINARY_ADD, b, a);
-    binary(code_builder, BINARY_ADD, c, d);
-    binary(code_builder, BINARY_ADD, d, c);
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(a), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(c), key_direct(d));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(c));
 }
 
 void nasty_imul_test(Code_Builder *code_builder) {
@@ -2193,25 +2224,25 @@ void nasty_imul_test(Code_Builder *code_builder) {
     Key *d = new_i32(code_builder, 3);
     Key *b = new_i32(code_builder, 4);
 
-    binary(code_builder, BINARY_IMUL, c, b);
-    binary(code_builder, BINARY_IMUL, c, d);
-    binary(code_builder, BINARY_IMUL, d, b);
-    binary(code_builder, BINARY_IMUL, a, d);
-    binary(code_builder, BINARY_IMUL, c, a);
-    binary(code_builder, BINARY_IMUL, d, a);
-    binary(code_builder, BINARY_IMUL, a, a);
-    binary(code_builder, BINARY_IMUL, c, c);
-    binary(code_builder, BINARY_IMUL, d, d);
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(d));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(a), key_direct(d));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(a));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(a));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(a), key_direct(a));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(c));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(d));
 
     add_label(code_builder, "imms");
-    binary(code_builder, BINARY_IMUL, c, new_i32(code_builder, 3));
-    binary(code_builder, BINARY_IMUL, d, new_i32(code_builder, 3));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(new_i32(code_builder, 3)));
+    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(new_i32(code_builder, 3)));
 
     add_label(code_builder, "ensure_regs_are_used");
-    binary(code_builder, BINARY_ADD, a, b);
-    binary(code_builder, BINARY_ADD, b, a);
-    binary(code_builder, BINARY_ADD, c, d);
-    binary(code_builder, BINARY_ADD, d, c);
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(a), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(c), key_direct(d));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(c));
 }
 
 void nasty_div_test(Code_Builder *code_builder) {
@@ -2220,11 +2251,11 @@ void nasty_div_test(Code_Builder *code_builder) {
     Key *d = new_i32(code_builder, 7);
     Key *b = new_i32(code_builder, 5);
 
-    binary(code_builder, BINARY_IDIV, c, b);
-    binary(code_builder, BINARY_IDIV, a, c);
-    binary(code_builder, BINARY_IDIV, a, c);
-    binary(code_builder, BINARY_IDIV, a, d);
-    binary(code_builder, BINARY_IDIV, a, b);
+    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(c), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(c));
+    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(c));
+    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(d));
+    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(b));
 }
 
 void encoding_test(Code_Builder *code_builder) {
@@ -2239,24 +2270,41 @@ void encoding_test(Code_Builder *code_builder) {
     Key *d = new_i32(code_builder, 456);
     Key *b = new_i32(code_builder, 4);
 
-    binary(code_builder, BINARY_SAR, a, b);
-    binary(code_builder, BINARY_SAR, c, d);
-    binary(code_builder, BINARY_SAR, c, c);
+    binary(code_builder, KEY_INTEGER, BINARY_SAR, key_direct(a), key_direct(b));
+    binary(code_builder, KEY_INTEGER, BINARY_SAR, key_direct(c), key_direct(d));
+    binary(code_builder, KEY_INTEGER, BINARY_SAR, key_direct(c), key_direct(c));
 
-    binary(code_builder, BINARY_ADD, b, a);
-    binary(code_builder, BINARY_ADD, d, a);
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(a));
 }
 
 void address_test(Code_Builder *code_builder) {
-    Key *my_value = new_i32(code_builder, 28);
-    Key *pointer = reference_key(code_builder, my_value);
-    Key *pointer_to_pointer = reference_key(code_builder, pointer);
-    Key *pointer_to_pointer_to_pointer = reference_key(code_builder, pointer_to_pointer);
+    Key *my_value = new_i32(code_builder, 196);
+    Key *pointer = address_of_key(code_builder, my_value);
+    Key *pointer_to_pointer = address_of_key(code_builder, pointer);
+    Key *pointer_to_pointer_to_pointer = address_of_key(code_builder, pointer_to_pointer);
 
-    Key *pointer_to_pointer_copy = dereference_key(code_builder, pointer_to_pointer_to_pointer, KEY_INTEGER, POINTER_SIZE);
-    Key *pointer_copy = dereference_key(code_builder, pointer_to_pointer_copy, KEY_INTEGER, POINTER_SIZE);
-    Key *copy = dereference_key(code_builder, pointer_copy, KEY_INTEGER, 2);
-    set_return(code_builder, copy);
+    Key *seven = new_i32(code_builder, 7);
+    seven->flags = KEY_FLAG_ADDRESSABLE;
+
+    Key *not_seven_yet = new_i32(code_builder, 8);
+    not_seven_yet->flags = KEY_FLAG_ADDRESSABLE;
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(not_seven_yet), key_direct(seven));
+
+    add_label(code_builder, "div_start");
+    binary(code_builder, KEY_INTEGER, BINARY_DIV, key_direct(my_value), key_direct(seven));
+    add_label(code_builder, "div_end");
+
+    Key *pointer_to_pointer_copy = new_pointer(code_builder, 0);
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(pointer_to_pointer_copy), key_deref(pointer_to_pointer_to_pointer, POINTER_SIZE));
+
+    Key *pointer_copy = new_pointer(code_builder, 0);
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(pointer_copy), key_deref(pointer_to_pointer_copy, POINTER_SIZE));
+
+    Key *copy = new_i32(code_builder, 0);
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(copy), key_deref(pointer_copy, 4));
+
+    set_return(code_builder, KEY_INTEGER, key_direct(copy));
 }
 
 void main() {
@@ -2269,7 +2317,7 @@ void main() {
     //nasty_imul_test(code_builder);    // Returns 148
     //nasty_div_test(code_builder);     // Returns 3
     //encoding_test(code_builder);      // Returns -2
-    address_test(code_builder);
+    //address_test(code_builder);       // Returns 28
 
     printf("\n; input\n");
     dump_instructions(code_builder);
