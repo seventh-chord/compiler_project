@@ -104,6 +104,7 @@ typedef struct Place {
         PLACE_NONE,
 
         PLACE_KEY,
+        PLACE_KEY_ADDRESS,
 
         PLACE_REG,
         PLACE_MEM,
@@ -112,6 +113,7 @@ typedef struct Place {
 
     union {
         Key *key;
+        Key *key_address;
 
         Reg reg;
         Address address;
@@ -597,6 +599,13 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
     builder->link_list_head->length += 1;
 }
 
+void set_return(Code_Builder *builder, Key *key) {
+    assert(key->kind == KEY_INTEGER); // TODO Handle more complex return values in the future
+
+    Inst inst = { INST_MOV, { { PLACE_REG, key->size, .reg = RAX }, { PLACE_KEY, key->size, key } } };
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+}
+
 
 enum {
     BINARY_MOV,
@@ -690,9 +699,26 @@ Key *reference_key(Code_Builder *builder, Key *value) {
     Key *address = new_key(builder, KEY_INTEGER, POINTER_SIZE);
 
     Inst inst = { INST_LEA, { { PLACE_KEY, POINTER_SIZE, .key = address }, { PLACE_KEY, POINTER_SIZE, .key = value } } };
-    inst_block_group_add_inst(builder, &builder->inst_blocks, inst); // TODO TODO TODO
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 
     return address;
+}
+
+Key *dereference_key(Code_Builder *builder, Key *address, int kind, u32 size) {
+    if (kind == KEY_INTEGER) {
+        Key *value = new_key(builder, KEY_INTEGER, size);
+        Inst inst = { INST_MOV, { { PLACE_KEY, size, .key = value }, { PLACE_KEY_ADDRESS, size, .key_address = address } } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+        return value;
+
+    } else if (kind == KEY_FLOAT) {
+        unimplemented();
+        return null;
+
+    } else {
+        assert(false);
+        return null;
+    }
 }
 
 
@@ -713,35 +739,40 @@ void end_function(Code_Builder *builder) {
             Inst *inst = &block->insts[i];
 
             for (u8 j = 0; j < 2; j += 1) {
+                Key *key;
                 if (inst->places[j].kind == PLACE_KEY) {
-                    Key *key = inst->places[j].key;
-                    Place *assigned_place = &key_places[key->index];
+                    key = inst->places[j].key;
+                } else if (inst->places[j].kind == PLACE_KEY_ADDRESS) {
+                    key = inst->places[j].key_address;
+                } else {
+                    continue;
+                }
 
-                    if (assigned_place->kind == PLACE_NONE) {
-                        if (key->kind == KEY_COMPOUND || (key->flags & KEY_FLAG_ADDRESSABLE)) {
-                            u32 size = key->size;
-                            u32 align = key->size; // TODO actually get proper alignment
-                            assert(align == 1 || align == 2 || align == 4 || align == 8);
+                Place *assigned_place = &key_places[key->index];
+                if (assigned_place->kind == PLACE_NONE) {
+                    if (key->kind == KEY_COMPOUND || (key->flags & KEY_FLAG_ADDRESSABLE)) {
+                        u32 size = key->size;
+                        u32 align = key->size; // TODO actually get proper alignment
+                        assert(align == 1 || align == 2 || align == 4 || align == 8);
 
-                            next_stack_index = (u64) round_to_next((u64) next_stack_index, (u64) align);
-                            i32 stack_index = next_stack_index;
-                            next_stack_index += size;
-                            assert(next_stack_index <= I32_MAX);
+                        next_stack_index = (u64) round_to_next((u64) next_stack_index, (u64) align);
+                        i32 stack_index = next_stack_index;
+                        next_stack_index += size;
+                        assert(next_stack_index <= I32_MAX);
 
-                            Address address = { RSP, REG_NONE, 0, stack_index };
-                            *assigned_place = (Place) { PLACE_MEM, size, .address = address };
-                        } else if (key->kind == KEY_INTEGER) {
-                            Reg reg = next_gpr;
-                            assert(reg <= R15);
-                            next_gpr += 1;
+                        Address address = { RSP, REG_NONE, 0, stack_index };
+                        *assigned_place = (Place) { PLACE_MEM, size, .address = address };
+                    } else if (key->kind == KEY_INTEGER) {
+                        Reg reg = next_gpr;
+                        assert(reg <= R15);
+                        next_gpr += 1;
 
-                            *assigned_place = (Place) { PLACE_REG, key->size, .reg = reg };
-                            reg_sizes = set_reg_size(reg_sizes, reg, key->size);
-                        } else if (key->kind == KEY_FLOAT) {
-                            unimplemented(); // TODO allocate a gpr
-                        } else {
-                            assert(false);
-                        }
+                        *assigned_place = (Place) { PLACE_REG, key->size, .reg = reg };
+                        reg_sizes = set_reg_size(reg_sizes, reg, key->size);
+                    } else if (key->kind == KEY_FLOAT) {
+                        unimplemented(); // TODO allocate a gpr
+                    } else {
+                        assert(false);
                     }
                 }
             }
@@ -759,34 +790,60 @@ void end_function(Code_Builder *builder) {
                 continue;
             }
 
+            enum { MAX_PREFIXES = 6, MAX_POSTFIXES = 6 };
+            Inst prefix_array[MAX_PREFIXES] = {0}, postfix_array[MAX_POSTFIXES] = {0};
+            u8 prefix_index = 0, postfix_index = MAX_POSTFIXES;
+
+            Reg next_temp_reg = max(RBX, next_gpr); // Avoid allocating RAX, RDX and RCX for temp registers
+
+
             Inst *inst = &block->insts[i];
             bool remove_inst = false;
 
-            if (inst->places[0].kind == PLACE_KEY) {
-                Key *key = inst->places[0].key;
+            for (u8 j = 0; j < 2; j += 1) {
+                Place *place_slot = &inst->places[j];
 
-                if (key->flags & KEY_FLAG_ONLY_SET_ONCE) {
-                    assert(inst->kind == INST_MOV);
-                    assert(inst->places[1].kind == PLACE_NONE && inst->imm.size > 0);
-                    remove_inst = true;
-                } else {
+                if (place_slot->kind == PLACE_KEY) {
+                    Key *key = place_slot->key;
+
+                    if (key->flags & KEY_FLAG_ONLY_SET_ONCE) {
+                        if (j == 0) {
+                            assert(inst->kind == INST_MOV);
+                            assert(inst->places[1].kind == PLACE_NONE && inst->imm.size > 0);
+                            remove_inst = true;
+                            break;
+                        } else if (j == 1) {
+                            assert(inst->imm.size == 0);
+                            inst->places[1].kind = PLACE_NONE;
+                            inst->imm = key->constant_value;
+                        } else {
+                            assert(false);
+                        }
+                    } else {
+                        *place_slot = key_places[key->index];
+                    }
+                } else if (inst->places[j].kind == PLACE_KEY_ADDRESS) {
+                    Key *key = place_slot->key_address;
                     Place *place = &key_places[key->index];
-                    assert(place->kind != PLACE_NONE);
-                    inst->places[0] = *place;
-                }
-            }
 
-            if (inst->places[1].kind == PLACE_KEY) {
-                Key *key = inst->places[1].key;
+                    Reg pointer_reg = REG_NONE;
 
-                if (key->flags & KEY_FLAG_ONLY_SET_ONCE) {
-                    assert(inst->imm.size == 0);
-                    inst->places[1].kind = PLACE_NONE;
-                    inst->imm = key->constant_value;
-                } else {
-                    Place *place = &key_places[key->index];
-                    assert(place->kind != PLACE_NONE);
-                    inst->places[1] = *place;
+                    if (place->kind == PLACE_MEM) {
+                        pointer_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                        if (pointer_reg == REG_NONE)  {
+                            unimplemented(); // TODO We need a register, flush something
+                        }
+
+                        prefix_array[prefix_index++] = (Inst) { INST_MOV, { { PLACE_REG, POINTER_SIZE, .reg = pointer_reg }, *place } };
+
+                    } else if (place->kind == PLACE_REG) {
+                        pointer_reg = place->reg;
+                    } else {
+                        assert(false);
+                    }
+
+                    Address address = { place->reg, REG_NONE, 0, 0 };
+                    *place_slot = (Place) { PLACE_MEM, place_slot->size, .address = address };
                 }
             }
 
@@ -804,222 +861,227 @@ void end_function(Code_Builder *builder) {
             // Fix up certain troublesome instructions
             // In practice, we hope that register allocation takes care of not producing cases which
             // are troublesome, so we don't end up inserting any/many instructions at this stage
-            {
-                enum { MAX_PREFIXES = 5, MAX_POSTFIXES = 5 };
-                Inst prefix_array[MAX_PREFIXES] = {0}, postfix_array[MAX_POSTFIXES] = {0};
-                u8 prefix_index = 0, postfix_index = MAX_POSTFIXES;
+            switch (inst->kind) {
+                case INST_MUL:
+                case INST_DIV:
+                case INST_IMUL:
+                case INST_IDIV:
+                {
+                    assert(inst->places[0].kind == PLACE_REG); // TODO We don't properly handle this case!
+                    u32 inst_size = inst->places[0].size;
 
-                Reg next_temp_reg = max(RBX, next_gpr); // Avoid allocating RAX, RDX and RCX for temp registers
-
-                switch (inst->kind) {
-                    case INST_MUL:
-                    case INST_DIV:
-                    case INST_IMUL:
-                    case INST_IDIV:
-                    {
-                        assert(inst->places[0].kind == PLACE_REG); // TODO We don't properly handle this case!
-                        u32 inst_size = inst->places[0].size;
-
-                        // Use the IMUL reg reg variant
-                        if (inst->kind == INST_IMUL && inst_size > 1) {
-                            if (inst->places[1].kind == PLACE_NONE) {
-                                assert(inst->imm.size > 0);
-
-                                Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-                                if (imm_reg == REG_NONE)  {
-                                    unimplemented(); // TODO We need a register, flush something
-                                }
-                                Place imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
-
-                                prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
-                                inst->places[1] = imm_place;
-                                inst->imm.size = 0;
-                            }
-
-                            break; // NB breaks out of switch
-                        }
-
-                        bool flush_rax = inst->places[0].reg != RAX;
-                        bool flush_rdx = inst->places[0].reg != RDX && inst_size > 1;
-
-                        // Don't flush the registers if they are not in use
-                        if (next_gpr <= RAX) flush_rax = false;
-                        if (next_gpr <= RDX) flush_rdx = false;
-
-                        Reg a_flush_reg = REG_NONE;
-                        Place a_flush_place;
-                        if (flush_rax) {
-                            u32 flush_size = max(get_reg_size(reg_sizes, RAX), inst_size);
-                            a_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-
-                            if (a_flush_reg != REG_NONE)  {
-                                a_flush_place = (Place) { PLACE_REG, flush_size, .reg = a_flush_reg };
-                            } else {
-                                unimplemented(); // Get a place on the stack
-                            }
-
-                            Place a_place = { PLACE_REG, a_flush_place.size, .reg = RAX };
-                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_flush_place, a_place } };
-                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { a_place, a_flush_place } };
-                        }
-
-                        Reg d_flush_reg = REG_NONE;
-                        Place d_flush_place;
-                        if (flush_rdx) {
-                            u32 flush_size = max(get_reg_size(reg_sizes, RDX), inst_size);
-                            d_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-
-                            if (d_flush_reg != REG_NONE)  {
-                                d_flush_place = (Place) { PLACE_REG, flush_size, .reg = d_flush_reg };
-                            } else {
-                                unimplemented(); // Get a place on the stack
-                            }
-
-                            Place d_place = { PLACE_REG, d_flush_place.size, .reg = RDX };
-                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { d_flush_place, d_place } };
-                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { d_place, d_flush_place } };
-                        }
-
-                        if (
-                            (inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX) &&
-                            !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX)
-                        ) {
-                            assert(a_flush_reg != REG_NONE);
-                            inst->places[1] = (Place) { PLACE_REG, inst_size, .reg = a_flush_reg };
-                        }
-
-                        bool left_was_rdx = inst->places[0].reg == RDX;
-
-                        if (inst->places[0].reg != RAX) {
-                            Place a_place = { PLACE_REG, inst_size, .reg = RAX };
-                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_place, inst->places[0] } };
-                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { inst->places[0], a_place } };
-                        }
-
+                    // Use the IMUL reg reg variant
+                    if (inst->kind == INST_IMUL && inst_size > 1) {
                         if (inst->places[1].kind == PLACE_NONE) {
                             assert(inst->imm.size > 0);
 
-                            Place imm_place;
-
-                            if ((flush_rdx || inst->places[0].reg == RDX) && inst->kind != INST_DIV && inst->kind != INST_IDIV) {
-                                imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = RDX };
-                            } else {
-                                Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-                                if (imm_reg == REG_NONE)  {
-                                    unimplemented(); // TODO We need a register, flush something
-                                }
-                                imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
+                            Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            if (imm_reg == REG_NONE)  {
+                                unimplemented(); // TODO We need a register, flush something
                             }
+                            Place imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
 
                             prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
                             inst->places[1] = imm_place;
                             inst->imm.size = 0;
                         }
 
-                        if ((inst->kind == INST_DIV || inst->kind == INST_IDIV) && inst_size > 1 && inst->places[1].kind == PLACE_REG && inst->places[1].reg == RDX) {
-                            Place divider_place;
-                            if (left_was_rdx) {
-                                divider_place = (Place) { PLACE_REG, inst_size, .reg = RAX };
-                            } else if (flush_rdx) {
-                                divider_place = (Place) { PLACE_REG, inst_size, .reg = d_flush_reg };
+                        break; // NB breaks out of switch
+                    }
+
+                    bool flush_rax = inst->places[0].reg != RAX;
+                    bool flush_rdx = inst->places[0].reg != RDX && inst_size > 1;
+
+                    // Don't flush the registers if they are not in use
+                    if (next_gpr <= RAX) flush_rax = false;
+                    if (next_gpr <= RDX) flush_rdx = false;
+
+                    Reg a_flush_reg = REG_NONE;
+                    Place a_flush_place;
+                    if (flush_rax) {
+                        u32 flush_size = max(get_reg_size(reg_sizes, RAX), inst_size);
+                        a_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+
+                        if (a_flush_reg != REG_NONE)  {
+                            a_flush_place = (Place) { PLACE_REG, flush_size, .reg = a_flush_reg };
+                        } else {
+                            unimplemented(); // Get a place on the stack
+                        }
+
+                        Place a_place = { PLACE_REG, a_flush_place.size, .reg = RAX };
+                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_flush_place, a_place } };
+                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { a_place, a_flush_place } };
+                    }
+
+                    Reg d_flush_reg = REG_NONE;
+                    Place d_flush_place;
+                    if (flush_rdx) {
+                        u32 flush_size = max(get_reg_size(reg_sizes, RDX), inst_size);
+                        d_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+
+                        if (d_flush_reg != REG_NONE)  {
+                            d_flush_place = (Place) { PLACE_REG, flush_size, .reg = d_flush_reg };
+                        } else {
+                            unimplemented(); // Get a place on the stack
+                        }
+
+                        Place d_place = { PLACE_REG, d_flush_place.size, .reg = RDX };
+                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { d_flush_place, d_place } };
+                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { d_place, d_flush_place } };
+                    }
+
+                    if (
+                        (inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX) &&
+                        !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX)
+                    ) {
+                        assert(a_flush_reg != REG_NONE);
+                        inst->places[1] = (Place) { PLACE_REG, inst_size, .reg = a_flush_reg };
+                    }
+
+                    bool left_was_rdx = inst->places[0].reg == RDX;
+
+                    if (inst->places[0].reg != RAX) {
+                        Place a_place = { PLACE_REG, inst_size, .reg = RAX };
+                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_place, inst->places[0] } };
+                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { inst->places[0], a_place } };
+                    }
+
+                    if (inst->places[1].kind == PLACE_NONE) {
+                        assert(inst->imm.size > 0);
+
+                        Place imm_place;
+
+                        if ((flush_rdx || inst->places[0].reg == RDX) && inst->kind != INST_DIV && inst->kind != INST_IDIV) {
+                            imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = RDX };
+                        } else {
+                            Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            if (imm_reg == REG_NONE)  {
+                                unimplemented(); // TODO We need a register, flush something
+                            }
+                            imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
+                        }
+
+                        prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
+                        inst->places[1] = imm_place;
+                        inst->imm.size = 0;
+                    }
+
+                    if ((inst->kind == INST_DIV || inst->kind == INST_IDIV) && inst_size > 1 && inst->places[1].kind == PLACE_REG && inst->places[1].reg == RDX) {
+                        Place divider_place;
+                        if (left_was_rdx) {
+                            divider_place = (Place) { PLACE_REG, inst_size, .reg = RAX };
+                        } else if (flush_rdx) {
+                            divider_place = (Place) { PLACE_REG, inst_size, .reg = d_flush_reg };
+                        } else {
+                            Reg divider_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            if (divider_reg == REG_NONE)  {
+                                unimplemented(); // TODO We need a register, flush something
+                            }
+                            divider_place = (Place) { PLACE_REG, inst_size, .reg = divider_reg };
+                            Place d_place = (Place) { PLACE_REG, inst_size, .reg = RDX };
+                            prefix_array[prefix_index++] = (Inst) { INST_MOV, { divider_place, d_place } };
+                        }
+
+                        inst->places[1] = divider_place;
+                    }
+
+                    if (inst->kind == INST_IDIV) {
+                        Inst_Kind extend_inst;
+                        switch (inst_size) {
+                            case 1: extend_inst = INST_CBW; break;
+                            case 2: extend_inst = INST_CWD; break;
+                            case 4: extend_inst = INST_CDQ; break;
+                            case 8: extend_inst = INST_CQO; break;
+                            default: assert(false);
+                        }
+                        prefix_array[prefix_index++] = (Inst) { extend_inst };
+                    }
+                    
+                    if (inst->kind == INST_DIV) {
+                        if (inst_size == 1) {
+                            prefix_array[prefix_index++] = (Inst) { INST_ZERO_AH };
+                        } else {
+                            Place d_place = { PLACE_REG, inst_size, .reg = RDX };
+                            prefix_array[prefix_index++] = (Inst) { INST_XOR, { d_place, d_place } };
+                        }
+                    }
+
+                    inst->places[0] = inst->places[1];
+                    inst->places[1].kind = PLACE_NONE;
+                } break;
+
+                case INST_SHL:
+                case INST_SHR:
+                case INST_SAR:
+                {
+                    u32 inst_size = inst->places[0].size;
+
+                    if (inst->places[1].kind == PLACE_NONE) {
+                        assert(inst->imm.size == inst->places[0].size);
+                        inst->imm.size = 1; // Shift only takes eight bit immediates
+
+                    } else if (inst->places[1].kind != PLACE_REG || inst->places[1].reg != RCX) {
+                        Reg c_flush_reg = REG_NONE;
+                        if (next_gpr > RCX) { // If RCX is allocated
+                            Place c_flush_place;
+
+                            u32 flush_size = max(get_reg_size(reg_sizes, RCX), inst_size);
+                            c_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            if (c_flush_reg != REG_NONE)  {
+                                c_flush_place = (Place) { PLACE_REG, flush_size, .reg = c_flush_reg };
                             } else {
-                                Reg divider_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-                                if (divider_reg == REG_NONE)  {
-                                    unimplemented(); // TODO We need a register, flush something
-                                }
-                                divider_place = (Place) { PLACE_REG, inst_size, .reg = divider_reg };
-                                Place d_place = (Place) { PLACE_REG, inst_size, .reg = RDX };
-                                prefix_array[prefix_index++] = (Inst) { INST_MOV, { divider_place, d_place } };
+                                unimplemented(); // Get a place on the stack
                             }
 
-                            inst->places[1] = divider_place;
+                            Place c_place = { PLACE_REG, c_flush_place.size, .reg = RCX };
+                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { c_flush_place, c_place } };
+                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { c_place, c_flush_place } };
                         }
 
-                        if (inst->kind == INST_IDIV) {
-                            Inst_Kind extend_inst;
-                            switch (inst_size) {
-                                case 1: extend_inst = INST_CBW; break;
-                                case 2: extend_inst = INST_CWD; break;
-                                case 4: extend_inst = INST_CDQ; break;
-                                case 8: extend_inst = INST_CQO; break;
-                                default: assert(false);
-                            }
-                            prefix_array[prefix_index++] = (Inst) { extend_inst };
+                        Place c_place = { PLACE_REG, inst_size, .reg = RCX };
+                        prefix_array[prefix_index++] = (Inst) { INST_MOV, { c_place, inst->places[1] } };
+
+                        if (inst->places[0].kind == PLACE_REG && inst->places[0].reg == RCX) {
+                            inst->places[0].reg = c_flush_reg;
                         }
-                        
-                        if (inst->kind == INST_DIV) {
-                            if (inst_size == 1) {
-                                prefix_array[prefix_index++] = (Inst) { INST_ZERO_AH };
-                            } else {
-                                Place d_place = { PLACE_REG, inst_size, .reg = RDX };
-                                prefix_array[prefix_index++] = (Inst) { INST_XOR, { d_place, d_place } };
-                            }
-                        }
+                    }
 
-                        inst->places[0] = inst->places[1];
-                        inst->places[1].kind = PLACE_NONE;
-                    } break;
+                    inst->places[1].kind = PLACE_NONE;
+                } break;
 
-                    case INST_SHL:
-                    case INST_SHR:
-                    case INST_SAR:
-                    {
-                        u32 inst_size = inst->places[0].size;
+                case INST_LEA: {
+                    assert(inst->places[1].kind == PLACE_MEM);
+                    inst->places[1].size = POINTER_SIZE;
+                } break;
+            }
 
-                        if (inst->places[1].kind == PLACE_NONE) {
-                            assert(inst->imm.size == inst->places[0].size);
-                            inst->imm.size = 1; // Shift only takes eight bit immediates
 
-                        } else if (inst->places[1].kind != PLACE_REG || inst->places[1].reg != RCX) {
-                            Reg c_flush_reg = REG_NONE;
-                            if (next_gpr > RCX) { // If RCX is allocated
-                                Place c_flush_place;
-
-                                u32 flush_size = max(get_reg_size(reg_sizes, RCX), inst_size);
-                                c_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-                                if (c_flush_reg != REG_NONE)  {
-                                    c_flush_place = (Place) { PLACE_REG, flush_size, .reg = c_flush_reg };
-                                } else {
-                                    unimplemented(); // Get a place on the stack
-                                }
-
-                                Place c_place = { PLACE_REG, c_flush_place.size, .reg = RCX };
-                                prefix_array[prefix_index++]   = (Inst) { INST_MOV, { c_flush_place, c_place } };
-                                postfix_array[--postfix_index] = (Inst) { INST_MOV, { c_place, c_flush_place } };
-                            }
-
-                            Place c_place = { PLACE_REG, inst_size, .reg = RCX };
-                            prefix_array[prefix_index++] = (Inst) { INST_MOV, { c_place, inst->places[1] } };
-
-                            if (inst->places[0].kind == PLACE_REG && inst->places[0].reg == RCX) {
-                                inst->places[0].reg = c_flush_reg;
-                            }
-                        }
-
-                        inst->places[1].kind = PLACE_NONE;
-                    } break;
-
-                    case INST_LEA: {
-                        assert(inst->places[1].kind == PLACE_MEM);
-                        inst->places[1].size = POINTER_SIZE;
-                    } break;
+            if (inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_MEM) {
+                Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                if (temp_reg == REG_NONE)  {
+                    unimplemented(); // TODO We need a register, flush something
                 }
 
-                assert(prefix_index <= MAX_PREFIXES && postfix_index <= MAX_POSTFIXES);
-
-                Inst *prefix_pointer = prefix_array;
-                u8 prefix_length = prefix_index;
-
-                Inst *postfix_pointer = postfix_array + postfix_index;
-                u8 postfix_length = MAX_POSTFIXES - postfix_index;
-
-                code_builder_insert_insts(
-                    builder, block, i,
-                    prefix_pointer, prefix_length,
-                    postfix_pointer, postfix_length
-                );
-                skip_insts += prefix_length + postfix_length;
+                Place temp_place = { PLACE_REG, inst->places[1].size, .reg = temp_reg };
+                postfix_array[--postfix_index] = (Inst) { INST_MOV, { inst->places[0], temp_place } };
+                inst->places[0] = temp_place;
             }
+
+
+            assert(prefix_index <= MAX_PREFIXES && postfix_index <= MAX_POSTFIXES);
+
+            Inst *prefix_pointer = prefix_array;
+            u8 prefix_length = prefix_index;
+
+            Inst *postfix_pointer = postfix_array + postfix_index;
+            u8 postfix_length = MAX_POSTFIXES - postfix_index;
+
+            code_builder_insert_insts(
+                builder, block, i,
+                prefix_pointer, prefix_length,
+                postfix_pointer, postfix_length
+            );
+            skip_insts += prefix_length + postfix_length;
         }
 
         if (block->length == 0 && (block->jump_to == null || (block->next != null && block->next->jump_to == null))) {
@@ -1883,8 +1945,8 @@ void encode_insts(Code_Builder *builder) {
             printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
         }
 
-        i32 (*generated_function)() = (void*) executable_memory;
-        i32 result = (*generated_function)();
+        i16 (*generated_function)() = (void*) executable_memory;
+        i16 result = (*generated_function)();
         printf("Generated function returned %i\n", (i64) result);
 
         VirtualFree(executable_memory, 0, MEM_RELEASE);
@@ -2188,6 +2250,13 @@ void encoding_test(Code_Builder *code_builder) {
 void address_test(Code_Builder *code_builder) {
     Key *my_value = new_i32(code_builder, 28);
     Key *pointer = reference_key(code_builder, my_value);
+    Key *pointer_to_pointer = reference_key(code_builder, pointer);
+    Key *pointer_to_pointer_to_pointer = reference_key(code_builder, pointer_to_pointer);
+
+    Key *pointer_to_pointer_copy = dereference_key(code_builder, pointer_to_pointer_to_pointer, KEY_INTEGER, POINTER_SIZE);
+    Key *pointer_copy = dereference_key(code_builder, pointer_to_pointer_copy, KEY_INTEGER, POINTER_SIZE);
+    Key *copy = dereference_key(code_builder, pointer_copy, KEY_INTEGER, 2);
+    set_return(code_builder, copy);
 }
 
 void main() {
