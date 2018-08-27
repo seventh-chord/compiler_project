@@ -9,6 +9,7 @@ cl /nologo /c /WX^
     /Fd"build\backend.pdb"^
     /Fo"build\backend.obj"^
     /TC^
+    /D"TESTING_BACKEND"^
     /D"DEBUG"^
     /D"WINDOWS"^
     "backend.c"^

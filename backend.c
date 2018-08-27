@@ -19,13 +19,13 @@ typedef struct Imm {
 typedef enum Reg {
     REG_NONE = 0,
 
+    RIP, // Only used for addresses
+    RSP, RBP, // Kept outside main range so they don't get allocated
+
     RAX, RCX, RDX, RBX,
     /*RSP, RBP*/ RSI, RDI,
     R8,  R9,  R10, R11,
     R12, R13, R14, R15,
-
-    RSP, RBP, // Kept outside main range so they don't get allocated
-    RIP, // Only used for addresses
 
     XMM0,  XMM1,  XMM2,  XMM3, 
     XMM4,  XMM5,  XMM6,  XMM7, 
@@ -35,6 +35,32 @@ typedef enum Reg {
     REG_COUNT
 } Reg;
 
+typedef u64 Reg_Sizes;
+u8 get_reg_size(Reg_Sizes sizes, Reg reg) {
+    assert(reg >= RAX && reg <= XMM15);
+    u8 size_index = (sizes >> ((reg - RAX)*2)) & 3;
+    return 1 << size_index;
+}
+
+Reg_Sizes set_reg_size(Reg_Sizes sizes, Reg reg, u8 size) {
+    u8 size_index;
+    switch (size) {
+        case 1: size_index = 0; break;
+        case 2: size_index = 1; break;
+        case 4: size_index = 2; break;
+        case 8: size_index = 3; break;
+        default: assert(false);
+    }
+
+    assert(reg >= RAX && reg <= XMM15);
+
+    u8 offset = (reg - RAX)*2;
+    sizes &= ~(3 << offset);
+    sizes |= size_index << offset;
+
+    return sizes;
+}
+
 typedef enum Reg_Kind {
     REG_KIND_INVALID = 0,
     REG_KIND_GPR,
@@ -42,11 +68,13 @@ typedef enum Reg_Kind {
 } Reg_Kind;
 
 Reg_Kind reg_kind(Reg reg) {
-    if (reg >= RAX && reg <= R15) return REG_KIND_GPR;
+    if ((reg >= RAX && reg <= R15) || reg == RSP || reg == RBP) return REG_KIND_GPR;
     if (reg >= XMM0 && reg <= XMM15) return REG_KIND_GPR;
     assert(false);
     return 0;
 }
+
+enum { POINTER_SIZE = 8 };
 
 typedef struct Address {
     u8 base, index; // Reg
@@ -56,7 +84,8 @@ typedef struct Address {
 
 
 enum Key_Flags {
-    KEY_FLAG_ONLY_SET_ONCE = 1 << 0,
+    KEY_FLAG_ONLY_SET_ONCE = 1,
+    KEY_FLAG_ADDRESSABLE   = 2,
 };
 
 typedef struct Key {
@@ -65,8 +94,6 @@ typedef struct Key {
 
     u32 size;
     enum { KEY_INTEGER, KEY_FLOAT, KEY_COMPOUND } kind;
-
-    u16 lifetime_start, lifetime_end; // inst indices
 
     Imm constant_value; // Used when 'KEY_FLAG_ONLY_SET_ONCE'
 } Key;
@@ -108,6 +135,7 @@ typedef enum Inst_Kind {
     INST_ZERO_AH,
     
     INST_MOV,
+    INST_LEA,
     INST_XCHG,
     INST_ADD,
     INST_SUB,
@@ -201,6 +229,7 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_SETGE]  = "setge",
 
     [INST_MOV]  = "mov",
+    [INST_LEA]  = "lea",
     [INST_XCHG] = "xchg",
     [INST_ADD]  = "add",
     [INST_SUB]  = "sub",
@@ -305,41 +334,55 @@ struct Link_List {
 };
 
 
-typedef struct Code_Builder {
-    Arena *arena;
-    u64 next_key_index;
+typedef struct Inst_Block_Group {
     u16 next_inst_index;
-    Inst_Block *insts_start, *insts_head;
-    Link_List *link_list_start, *link_list_head;
+    Inst_Block *start, *head;
+} Inst_Block_Group;
+
+typedef struct Code_Builder {
+    Arena *arena, *stack;
+    u64 next_key_index;
+    Link_List *link_list_start, *link_list_head; // for jumps
+
+    Inst_Block_Group inst_blocks;
 } Code_Builder;
 
-Code_Builder *code_builder_new(Arena *arena) {
+
+Code_Builder *code_builder_new(Arena *arena, Arena *stack) {
     Code_Builder *builder = arena_new(arena, Code_Builder);
     builder->arena = arena;
+    builder->stack = stack;
     return builder;
 }
 
-void code_builder_start_new_inst_block(Code_Builder *builder, u16 capacity) {
-    Inst_Block *new = (Inst_Block*) arena_alloc(builder->arena, sizeof(Inst_Block) + capacity*sizeof(Inst));
-    new->capacity = capacity;
-    builder->insts_head = builder->insts_start == null? (builder->insts_start = new) : (builder->insts_head->next = new);
+void inst_block_group_concat(Inst_Block_Group *start, Inst_Block_Group *end) {
+    assert(start->head != null && start->head->next == null);
+    assert(end->start != null && end->head != null);
+    start->head->next = end->start;
+    start->head = end->head;
 }
 
-void code_builder_add_inst(Code_Builder *builder, Inst inst) {
+void inst_block_group_start_new_block(Code_Builder *builder, Inst_Block_Group *group, u16 capacity) {
+    Inst_Block *new = (Inst_Block*) arena_alloc(builder->arena, sizeof(Inst_Block) + capacity*sizeof(Inst));
+    new->capacity = capacity;
+    group->head = group->start == null? (group->start = new) : (group->head->next = new);
+}
+
+void inst_block_group_add_inst(Code_Builder *builder, Inst_Block_Group *group, Inst inst) {
     if (
-        builder->insts_head == null ||
-        builder->insts_head->length >= builder->insts_head->capacity ||
-        builder->insts_head->jump_from != null
+        group->head == null ||
+        group->head->length >= group->head->capacity ||
+        group->head->jump_from != null
     ) {
-        code_builder_start_new_inst_block(builder, DEFAULT_INST_BLOCK_CAPACITY);
+        inst_block_group_start_new_block(builder, group, DEFAULT_INST_BLOCK_CAPACITY);
     }
 
-    assert(builder->next_inst_index + 1 > builder->next_inst_index);
-    builder->next_inst_index += 1;
-    inst.index = builder->next_inst_index;
+    assert(group->next_inst_index + 1 > group->next_inst_index);
+    group->next_inst_index += 1;
+    inst.index = group->next_inst_index;
 
-    builder->insts_head->insts[builder->insts_head->length] = inst;
-    builder->insts_head->length += 1;
+    group->head->insts[group->head->length] = inst;
+    group->head->length += 1;
 }
 
 void code_builder_insert_insts(
@@ -364,6 +407,10 @@ void code_builder_insert_insts(
 
         new->next = block->next;
         block->next = new;
+
+        if (new->next == null) {
+            builder->inst_blocks.head = new;
+        }
     }
 
     // Move instructions after the current instruction into their right spot
@@ -477,7 +524,7 @@ Key *new_key_with_value(Code_Builder *builder, int kind, u32 size, void *value) 
     key->constant_value = imm;
 
     Inst inst = { INST_MOV, { { PLACE_KEY, .size = size, .key = key } }, imm };
-    code_builder_add_inst(builder, inst);
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 
     return key;
 }
@@ -502,12 +549,12 @@ Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
     result->relative_bytecode_pos = U64_MAX;
     result->debug_name = debug_name;
 
-    if (builder->insts_head == null || builder->insts_head->length > 0 || builder->insts_head->jump_to != null) {
-        code_builder_start_new_inst_block(builder, DEFAULT_INST_BLOCK_CAPACITY);
+    if (builder->inst_blocks.head == null || builder->inst_blocks.head->length > 0 || builder->inst_blocks.head->jump_to != null) {
+        inst_block_group_start_new_block(builder, &builder->inst_blocks, DEFAULT_INST_BLOCK_CAPACITY);
     }
-    assert(builder->insts_head->jump_to == null);
-    builder->insts_head->jump_to = result;
-    result->block = builder->insts_head;
+    assert(builder->inst_blocks.head->jump_to == null);
+    builder->inst_blocks.head->jump_to = result;
+    result->block = builder->inst_blocks.head;
 
     return result;
 }
@@ -515,16 +562,17 @@ Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
 Jump_From *add_jump(Code_Builder *builder, Condition condition) {
     Jump_From *result = arena_new(builder->arena, Jump_From);
 
-    if (builder->insts_head == null || builder->insts_head->jump_from != null) {
-        code_builder_start_new_inst_block(builder, 1); // We have to start a new block after the jump we insert!
+    if (builder->inst_blocks.head == null || builder->inst_blocks.head->jump_from != null) {
+        // We have to start a new block after the jump we insert, so we just need a single slot in this block.
+        inst_block_group_start_new_block(builder, &builder->inst_blocks, 1);
     }
 
     Inst inst = { JMP_FOR_CONDITION[condition] };
-    code_builder_add_inst(builder, inst);
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 
-    assert(builder->insts_head->jump_from == null);
-    builder->insts_head->jump_from = result;
-    result->block = builder->insts_head;
+    assert(builder->inst_blocks.head->jump_from == null);
+    builder->inst_blocks.head->jump_from = result;
+    result->block = builder->inst_blocks.head;
     
     return result;
 }
@@ -547,11 +595,6 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
     builder->link_list_head->links[builder->link_list_head->length].from = from;
     builder->link_list_head->links[builder->link_list_head->length].to = to;
     builder->link_list_head->length += 1;
-}
-
-
-void end_function(Code_Builder *builder) {
-    code_builder_add_inst(builder, (Inst) { INST_RET });
 }
 
 
@@ -607,7 +650,7 @@ void binary(Code_Builder *builder, int binary, Key *left, Key *right) {
     }
 
     Inst inst = { inst_kind, { { PLACE_KEY, size, .key = left }, { PLACE_KEY, size, .key = right } } };
-    code_builder_add_inst(builder, inst);
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 }
 
 enum {
@@ -637,58 +680,79 @@ void unary(Code_Builder *builder, int unary, Key *key) {
     }
 
     Inst inst = { inst_kind, { { PLACE_KEY, key->size, .key = key } } };
-    code_builder_add_inst(builder, inst);
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+}
+
+Key *reference_key(Code_Builder *builder, Key *value) {
+    value->flags |= KEY_FLAG_ADDRESSABLE;
+    value->flags &= ~KEY_FLAG_ONLY_SET_ONCE; // so we don't optimize the it away
+
+    Key *address = new_key(builder, KEY_INTEGER, POINTER_SIZE);
+
+    Inst inst = { INST_LEA, { { PLACE_KEY, POINTER_SIZE, .key = address }, { PLACE_KEY, POINTER_SIZE, .key = value } } };
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst); // TODO TODO TODO
+
+    return address;
 }
 
 
-typedef Key *Register_Map[REG_COUNT];
+void end_function(Code_Builder *builder) {
+    arena_stack_push(builder->stack);
 
-Reg find_reg_for_key(Register_Map *map, Key *key) {
-    Reg_Kind reg_kind = REG_KIND_GPR; // TODO
+    u64 key_count = builder->next_key_index;
+    Place *key_places = (Place*) arena_alloc(builder->stack, key_count * sizeof(Place));
+    mem_clear((u8*) key_places, key_count * sizeof(Place));
+    Reg_Sizes reg_sizes = 0;
 
-    Reg range_start, range_end;
-    switch (reg_kind) {
-        case REG_KIND_GPR: range_start = RAX; range_end = R15; break;
-        case REG_KIND_XMM: range_start = XMM0; range_end = XMM15; break;
-        default: assert(false);
-    }
+    // Worst register allocator ever!
+    Reg next_gpr = RAX;
+    u32 next_stack_index = 0;
 
-    Reg first_free = REG_NONE;
-    for (Reg reg = range_start; reg <= range_end; reg += 1) {
-        if ((*map)[reg] == key) return reg;
-        if (first_free == REG_NONE && (*map)[reg] == null) first_free = reg;
-    }
-
-    if (first_free == REG_NONE) {
-        unimplemented(); // TODO We have do flush some registers
-        return REG_NONE;
-    } else {
-        (*map)[first_free] = key;
-        return first_free;
-    }
-}
-
-void assign_regs(Code_Builder *builder) {
-    Register_Map usage_map = {0};
-
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+    for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
             Inst *inst = &block->insts[i];
 
             for (u8 j = 0; j < 2; j += 1) {
                 if (inst->places[j].kind == PLACE_KEY) {
                     Key *key = inst->places[j].key;
-                    if (inst->index < key->lifetime_start) key->lifetime_start = inst->index;
-                    if (inst->index > key->lifetime_end)   key->lifetime_end   = inst->index;
+                    Place *assigned_place = &key_places[key->index];
+
+                    if (assigned_place->kind == PLACE_NONE) {
+                        if (key->kind == KEY_COMPOUND || (key->flags & KEY_FLAG_ADDRESSABLE)) {
+                            u32 size = key->size;
+                            u32 align = key->size; // TODO actually get proper alignment
+                            assert(align == 1 || align == 2 || align == 4 || align == 8);
+
+                            next_stack_index = (u64) round_to_next((u64) next_stack_index, (u64) align);
+                            i32 stack_index = next_stack_index;
+                            next_stack_index += size;
+                            assert(next_stack_index <= I32_MAX);
+
+                            Address address = { RSP, REG_NONE, 0, stack_index };
+                            *assigned_place = (Place) { PLACE_MEM, size, .address = address };
+                        } else if (key->kind == KEY_INTEGER) {
+                            Reg reg = next_gpr;
+                            assert(reg <= R15);
+                            next_gpr += 1;
+
+                            *assigned_place = (Place) { PLACE_REG, key->size, .reg = reg };
+                            reg_sizes = set_reg_size(reg_sizes, reg, key->size);
+                        } else if (key->kind == KEY_FLOAT) {
+                            unimplemented(); // TODO allocate a gpr
+                        } else {
+                            assert(false);
+                        }
+                    }
                 }
             }
         }
     }
 
-    Inst_Block **previous_block_slot = &builder->insts_start;
+    // Generate instructions
+    Inst_Block **previous_block_slot = &builder->inst_blocks.start;
 
     u32 skip_insts = 0;
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+    for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
             if (skip_insts > 0) {
                 skip_insts -= 1;
@@ -698,14 +762,6 @@ void assign_regs(Code_Builder *builder) {
             Inst *inst = &block->insts[i];
             bool remove_inst = false;
 
-            for (Reg reg = 0; reg < REG_COUNT; reg += 1) {
-                Key *key = usage_map[reg];
-                if (key != null) {
-                    assert(key->lifetime_start <= inst->index);
-                    if (key->lifetime_end < inst->index) usage_map[reg] = null;
-                }
-            }
-
             if (inst->places[0].kind == PLACE_KEY) {
                 Key *key = inst->places[0].key;
 
@@ -714,9 +770,9 @@ void assign_regs(Code_Builder *builder) {
                     assert(inst->places[1].kind == PLACE_NONE && inst->imm.size > 0);
                     remove_inst = true;
                 } else {
-                    Reg reg = find_reg_for_key(&usage_map, key);
-                    inst->places[0].kind = PLACE_REG;
-                    inst->places[0].reg = reg;
+                    Place *place = &key_places[key->index];
+                    assert(place->kind != PLACE_NONE);
+                    inst->places[0] = *place;
                 }
             }
 
@@ -728,9 +784,9 @@ void assign_regs(Code_Builder *builder) {
                     inst->places[1].kind = PLACE_NONE;
                     inst->imm = key->constant_value;
                 } else {
-                    Reg reg = find_reg_for_key(&usage_map, key);
-                    inst->places[1].kind = PLACE_REG;
-                    inst->places[1].reg = reg;
+                    Place *place = &key_places[key->index];
+                    assert(place->kind != PLACE_NONE);
+                    inst->places[1] = *place;
                 }
             }
 
@@ -753,18 +809,8 @@ void assign_regs(Code_Builder *builder) {
                 Inst prefix_array[MAX_PREFIXES] = {0}, postfix_array[MAX_POSTFIXES] = {0};
                 u8 prefix_index = 0, postfix_index = MAX_POSTFIXES;
 
-                enum { MAX_FAKE_KEYS = 6 };
-                Key fake_keys[MAX_FAKE_KEYS] = {
-                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                    { .size = inst->places[0].size, .kind = KEY_INTEGER },
-                };
-                u32 fake_key_index = 0;
+                Reg next_temp_reg = max(RBX, next_gpr); // Avoid allocating RAX, RDX and RCX for temp registers
 
-                // Handle instructions with limited encoding modes
                 switch (inst->kind) {
                     case INST_MUL:
                     case INST_DIV:
@@ -779,7 +825,7 @@ void assign_regs(Code_Builder *builder) {
                             if (inst->places[1].kind == PLACE_NONE) {
                                 assert(inst->imm.size > 0);
 
-                                Reg imm_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                                 if (imm_reg == REG_NONE)  {
                                     unimplemented(); // TODO We need a register, flush something
                                 }
@@ -796,20 +842,16 @@ void assign_regs(Code_Builder *builder) {
                         bool flush_rax = inst->places[0].reg != RAX;
                         bool flush_rdx = inst->places[0].reg != RDX && inst_size > 1;
 
-                        if (usage_map[RDX == null]) {
-                            usage_map[RAX] = &fake_keys[fake_key_index++];
-                            flush_rax = false;
-                        }
-                        if (usage_map[RDX] == null) {
-                            usage_map[RDX] = &fake_keys[fake_key_index++];
-                            flush_rdx = false;
-                        }
+                        // Don't flush the registers if they are not in use
+                        if (next_gpr <= RAX) flush_rax = false;
+                        if (next_gpr <= RDX) flush_rdx = false;
 
                         Reg a_flush_reg = REG_NONE;
                         Place a_flush_place;
                         if (flush_rax) {
-                            u32 flush_size = max(usage_map[RAX]->size, inst_size);
-                            a_flush_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                            u32 flush_size = max(get_reg_size(reg_sizes, RAX), inst_size);
+                            a_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+
                             if (a_flush_reg != REG_NONE)  {
                                 a_flush_place = (Place) { PLACE_REG, flush_size, .reg = a_flush_reg };
                             } else {
@@ -824,8 +866,8 @@ void assign_regs(Code_Builder *builder) {
                         Reg d_flush_reg = REG_NONE;
                         Place d_flush_place;
                         if (flush_rdx) {
-                            u32 flush_size = max(usage_map[RDX]->size, inst_size);
-                            d_flush_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                            u32 flush_size = max(get_reg_size(reg_sizes, RDX), inst_size);
+                            d_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
 
                             if (d_flush_reg != REG_NONE)  {
                                 d_flush_place = (Place) { PLACE_REG, flush_size, .reg = d_flush_reg };
@@ -862,7 +904,7 @@ void assign_regs(Code_Builder *builder) {
                             if ((flush_rdx || inst->places[0].reg == RDX) && inst->kind != INST_DIV && inst->kind != INST_IDIV) {
                                 imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = RDX };
                             } else {
-                                Reg imm_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                                 if (imm_reg == REG_NONE)  {
                                     unimplemented(); // TODO We need a register, flush something
                                 }
@@ -881,7 +923,7 @@ void assign_regs(Code_Builder *builder) {
                             } else if (flush_rdx) {
                                 divider_place = (Place) { PLACE_REG, inst_size, .reg = d_flush_reg };
                             } else {
-                                Reg divider_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                Reg divider_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                                 if (divider_reg == REG_NONE)  {
                                     unimplemented(); // TODO We need a register, flush something
                                 }
@@ -930,11 +972,11 @@ void assign_regs(Code_Builder *builder) {
 
                         } else if (inst->places[1].kind != PLACE_REG || inst->places[1].reg != RCX) {
                             Reg c_flush_reg = REG_NONE;
-                            if (usage_map[RCX] != null) {
+                            if (next_gpr > RCX) { // If RCX is allocated
                                 Place c_flush_place;
 
-                                u32 flush_size = max(usage_map[RCX]->size, inst_size);
-                                c_flush_reg = find_reg_for_key(&usage_map, &fake_keys[fake_key_index++]);
+                                u32 flush_size = max(get_reg_size(reg_sizes, RCX), inst_size);
+                                c_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                                 if (c_flush_reg != REG_NONE)  {
                                     c_flush_place = (Place) { PLACE_REG, flush_size, .reg = c_flush_reg };
                                 } else {
@@ -956,6 +998,11 @@ void assign_regs(Code_Builder *builder) {
 
                         inst->places[1].kind = PLACE_NONE;
                     } break;
+
+                    case INST_LEA: {
+                        assert(inst->places[1].kind == PLACE_MEM);
+                        inst->places[1].size = POINTER_SIZE;
+                    } break;
                 }
 
                 assert(prefix_index <= MAX_PREFIXES && postfix_index <= MAX_POSTFIXES);
@@ -972,30 +1019,46 @@ void assign_regs(Code_Builder *builder) {
                     postfix_pointer, postfix_length
                 );
                 skip_insts += prefix_length + postfix_length;
-
-                if (fake_key_index > 0) {
-                    assert(fake_key_index <= MAX_FAKE_KEYS);
-
-                    for (u32 i = 0; i < fake_key_index; i += 1) {
-                        Key *key = &fake_keys[i];
-                        for (Reg reg = 0; reg < REG_COUNT; reg += 1) {
-                            if (usage_map[reg] == key) {
-                                usage_map[reg] = null;
-                                break;
-                            }
-                        }
-                    }
-                }
             }
         }
 
         if (block->length == 0 && (block->jump_to == null || (block->next != null && block->next->jump_to == null))) {
             assert(block->jump_from == null);
             *previous_block_slot = block->next;
+            if (block->next == null) {
+                assert(builder->inst_blocks.head == block);
+                builder->inst_blocks.head = *previous_block_slot;
+            }
         }
 
         previous_block_slot = &block->next;
     }
+
+
+    // TODO also, if we need to save/restore registers, we need to insert a stack frame
+    if (next_stack_index > 0) {
+        Inst_Block_Group prolog = {0}, epilog = {0};
+
+
+        i32 stack_size = next_stack_index;
+        stack_size = ((stack_size + 7) & ~15) + 8; // Rounds to a multiple of 16, offset by 8
+
+        Place place_rsp = { PLACE_REG, POINTER_SIZE, .reg = RSP };
+        Imm imm_stack_size = { 4, .value = (u64) stack_size };
+        inst_block_group_add_inst(builder, &prolog, (Inst) { INST_SUB, { place_rsp }, imm_stack_size });
+        inst_block_group_add_inst(builder, &epilog, (Inst) { INST_ADD, { place_rsp }, imm_stack_size });
+
+        inst_block_group_add_inst(builder, &epilog, (Inst) { INST_RET });
+
+
+        inst_block_group_concat(&prolog, &builder->inst_blocks);
+        inst_block_group_concat(&builder->inst_blocks, &epilog);
+        builder->inst_blocks = prolog;
+    } else {
+        inst_block_group_add_inst(builder, &builder->inst_blocks, (Inst) { INST_RET });
+    }
+
+    arena_stack_pop(builder->stack);
 }
 
 
@@ -1177,6 +1240,10 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         [ENCODE_R2_M2] = { 1, 0x8b, ENCODING_WORD_OPERANDS },
         [ENCODE_R4_M4] = { 1, 0x8b },
         [ENCODE_R8_M8] = { 1, 0x8b, ENCODING_REX_W },
+    },
+
+    [INST_LEA] = {
+        [ENCODE_R8_M8] = { 1, 0x8d, ENCODING_REX_W },
     },
 
     [INST_XCHG] = {
@@ -1486,7 +1553,8 @@ Encoded_Inst encode_inst(Inst *inst) {
             case ENC(M2, R2, 0): encoding_mode = ENCODE_M2_R2; break;
             case ENC(M4, R4, 0): encoding_mode = ENCODE_M4_R4; break;
             case ENC(M8, R8, 0): encoding_mode = ENCODE_M8_R8; break;
-            default: assert(false);
+
+            default:; // Don't assert, so we print the error message below!
         }
         #undef ENC
 
@@ -1597,7 +1665,7 @@ Encoded_Inst encode_inst(Inst *inst) {
 
             u8 index = REG_INDEX_MAP[inst->places[0].reg];
             opcode |= index & 7;
-            if (index & 8) rex |= REX_B;
+            if (index & 8) rex |= REX_BASE | REX_B;
         }
 
         if (encode_in_reg != ENCODE_NEITHER) {
@@ -1693,6 +1761,7 @@ Encoded_Inst encode_inst(Inst *inst) {
     }
 
     if (rex != 0) {
+        assert(rex & REX_BASE);
         result.bytes[result.length++] = rex;
     }
 
@@ -1732,7 +1801,7 @@ Encoded_Inst encode_inst(Inst *inst) {
 void encode_insts(Code_Builder *builder) {
     u64 bytecode_length = 0;
 
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+    for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         if (block->jump_to != null) block->jump_to->relative_bytecode_pos = bytecode_length;
 
         u16 l = block->jump_from == null? block->length : block->length - 1;
@@ -1780,7 +1849,7 @@ void encode_insts(Code_Builder *builder) {
 
     // Print out the bytes for the instructions
     #if 0
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+    for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
             Encoded_Inst encoded = encode_inst(&block->insts[i]);
             print_encoded_inst(encoded);
@@ -1798,7 +1867,7 @@ void encode_insts(Code_Builder *builder) {
         }
 
         u64 write_cursor = 0;
-        for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+        for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
             for (u16 i = 0; i < block->length; i += 1) {
                 Encoded_Inst encoded = encode_inst(&block->insts[i]);
                 assert(write_cursor + encoded.length <= bytecode_length);
@@ -1954,7 +2023,7 @@ void print_encoded_inst(Encoded_Inst encoded) {
 }
 
 void dump_instructions(Code_Builder *builder) {
-    for (Inst_Block *block = builder->insts_start; block != null; block = block->next) {
+    for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         if (block->jump_to != null) {
             printf("%s:\n", block->jump_to->debug_name);
         }
@@ -1984,6 +2053,7 @@ void dump_instructions(Code_Builder *builder) {
 }
 
 
+#ifdef TESTING_BACKEND
 
 void fibonachi(Code_Builder *code_builder, i32 iterations) {
     Key *m = new_i32(code_builder, 1);
@@ -2002,8 +2072,6 @@ void fibonachi(Code_Builder *code_builder, i32 iterations) {
     binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, 0));
     Jump_From *loop_end = add_jump(code_builder, CONDITION_G);
     link_jump(code_builder, loop_end, loop_start);
-
-    end_function(code_builder);
 }
 
 void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
@@ -2020,8 +2088,6 @@ void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
     binary(code_builder, BINARY_CMP, counter, new_i32(code_builder, iterations));
     Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
     link_jump(code_builder, loop_end, loop_start);
-
-    end_function(code_builder);
 }
 
 void nasty_mul_test(Code_Builder *code_builder) {
@@ -2057,8 +2123,6 @@ void nasty_mul_test(Code_Builder *code_builder) {
     binary(code_builder, BINARY_ADD, b, a);
     binary(code_builder, BINARY_ADD, c, d);
     binary(code_builder, BINARY_ADD, d, c);
-
-    end_function(code_builder);
 }
 
 void nasty_imul_test(Code_Builder *code_builder) {
@@ -2086,8 +2150,6 @@ void nasty_imul_test(Code_Builder *code_builder) {
     binary(code_builder, BINARY_ADD, b, a);
     binary(code_builder, BINARY_ADD, c, d);
     binary(code_builder, BINARY_ADD, d, c);
-
-    end_function(code_builder);
 }
 
 void nasty_div_test(Code_Builder *code_builder) {
@@ -2101,14 +2163,12 @@ void nasty_div_test(Code_Builder *code_builder) {
     binary(code_builder, BINARY_IDIV, a, c);
     binary(code_builder, BINARY_IDIV, a, d);
     binary(code_builder, BINARY_IDIV, a, b);
-
-    end_function(code_builder);
 }
 
 void encoding_test(Code_Builder *code_builder) {
     Inst insts[4] = { { INST_CBW }, { INST_CWD }, { INST_CDQ }, { INST_CQO } };
     for (u32 i = 0; i < 4; i += 1) {
-        code_builder_add_inst(code_builder, insts[i]);
+        inst_block_group_add_inst(code_builder, &code_builder->inst_blocks, insts[i]);
     }
 
     add_label(code_builder, "shifty_shafts");
@@ -2123,29 +2183,34 @@ void encoding_test(Code_Builder *code_builder) {
 
     binary(code_builder, BINARY_ADD, b, a);
     binary(code_builder, BINARY_ADD, d, a);
-
-    end_function(code_builder);
 }
 
+void address_test(Code_Builder *code_builder) {
+    Key *my_value = new_i32(code_builder, 28);
+    Key *pointer = reference_key(code_builder, my_value);
+}
 
 void main() {
-    Arena arena = {0};
-    Code_Builder *code_builder = code_builder_new(&arena);
+    Arena arena = {0}, stack = {0};
+    Code_Builder *code_builder = code_builder_new(&arena, &stack);
 
-    //fibonachi(code_builder, 10);
-    //not_fibonachi(code_builder, 3);
-    //nasty_mul_test(code_builder);
-    //nasty_imul_test(code_builder);
-    //nasty_div_test(code_builder);
-    encoding_test(code_builder);
+    //fibonachi(code_builder, 10);      // Returns 55
+    //not_fibonachi(code_builder, 3);   // Returns 8192
+    //nasty_mul_test(code_builder);     // Returns 148
+    //nasty_imul_test(code_builder);    // Returns 148
+    //nasty_div_test(code_builder);     // Returns 3
+    //encoding_test(code_builder);      // Returns -2
+    address_test(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
 
-    assign_regs(code_builder);
+    end_function(code_builder);
 
     printf("\n; output\n");
     dump_instructions(code_builder);
 
     encode_insts(code_builder);
 }
+
+#endif // TESTING_BACKEND

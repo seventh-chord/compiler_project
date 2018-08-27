@@ -1230,4 +1230,30 @@ u8 *io_result_message(IO_Result result) {
     }
 }
 
+
+u64 round_to_next(u64 value, u64 step) {
+    if (step > 0) {
+        value += step - 1;
+        value /= step;
+        value *= step;
+    }
+
+    return value;
+}
+
+
+// We need these for when MSVC auto-inserts them in /O2 builds
+/*
+#pragma function(memset)
+void *memset(void *dest, i32 value, u64 count) {
+    mem_fill(dest, (u8) value, count);
+    return ((u8*) dest) + count;
+}
+#pragma function(memcpy)
+void *memcpy(void *dest, void *src, u64 count) {
+    mem_copy(src, dest, count);
+    return ((u8*) dest) + count;
+}
+*/
+
 #endif // COMMON_C ...

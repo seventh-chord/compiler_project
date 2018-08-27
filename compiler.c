@@ -1,17 +1,6 @@
 
 #include "common.c"
 
-u64 round_to_next(u64 value, u64 step) {
-    if (step > 0) {
-        value += step - 1;
-        value /= step;
-        value *= step;
-    }
-
-    return value;
-}
-
-
 typedef struct File_Pos {
     u8 *file_name;
     u32 line;
