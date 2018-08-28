@@ -864,7 +864,7 @@ void end_function(Code_Builder *builder) {
                         assert(false);
                     }
 
-                    Address address = { place->reg, REG_NONE, 0, 0 };
+                    Address address = { pointer_reg, REG_NONE, 0, 0 };
                     *place_slot = (Place) { PLACE_MEM, place_slot->size, .address = address };
                 }
             }
@@ -2284,15 +2284,13 @@ void address_test(Code_Builder *code_builder) {
     Key *pointer_to_pointer = address_of_key(code_builder, pointer);
     Key *pointer_to_pointer_to_pointer = address_of_key(code_builder, pointer_to_pointer);
 
-    Key *seven = new_i32(code_builder, 7);
-    seven->flags = KEY_FLAG_ADDRESSABLE;
-
     Key *not_seven_yet = new_i32(code_builder, 8);
-    not_seven_yet->flags = KEY_FLAG_ADDRESSABLE;
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(not_seven_yet), key_direct(seven));
+    Key *pointer_to_seven = address_of_key(code_builder, not_seven_yet);
+
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_deref(pointer_to_seven, 4), key_direct(new_i32(code_builder, 7)));
 
     add_label(code_builder, "div_start");
-    binary(code_builder, KEY_INTEGER, BINARY_DIV, key_direct(my_value), key_direct(seven));
+    binary(code_builder, KEY_INTEGER, BINARY_DIV, key_deref(pointer, 4), key_deref(pointer_to_seven, 4));
     add_label(code_builder, "div_end");
 
     Key *pointer_to_pointer_copy = new_pointer(code_builder, 0);
@@ -2317,7 +2315,7 @@ void main() {
     //nasty_imul_test(code_builder);    // Returns 148
     //nasty_div_test(code_builder);     // Returns 3
     //encoding_test(code_builder);      // Returns -2
-    //address_test(code_builder);       // Returns 28
+    address_test(code_builder);       // Returns 28
 
     printf("\n; input\n");
     dump_instructions(code_builder);
