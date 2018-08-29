@@ -126,6 +126,11 @@ typedef enum Inst_Kind {
     INST_REP_STOSD,
     INST_REP_STOSQ,
 
+    INST_REP_MOVSB,
+    INST_REP_MOVSW,
+    INST_REP_MOVSD,
+    INST_REP_MOVSQ,
+
     INST_ZERO_AH,
     
     INST_MOV,
@@ -194,10 +199,15 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_CDQ] = "cdq",
     [INST_CQO] = "cqo",
 
-    [INST_REP_STOSB] = "rep stosb byte ptr [rdi], al",
-    [INST_REP_STOSW] = "rep stosw word ptr [rdi], ax",
-    [INST_REP_STOSD] = "rep stosd dword ptr [rdi], eax",
-    [INST_REP_STOSQ] = "rep stosq qword ptr [rdi], rax",
+    [INST_REP_STOSB] = "rep stosb",
+    [INST_REP_STOSW] = "rep stosw",
+    [INST_REP_STOSD] = "rep stosd",
+    [INST_REP_STOSQ] = "rep stosq",
+
+    [INST_REP_MOVSB] = "rep movsb",
+    [INST_REP_MOVSW] = "rep movsw",
+    [INST_REP_MOVSD] = "rep movsd",
+    [INST_REP_MOVSQ] = "rep movsq",
 
     [INST_ZERO_AH] = "xor ah, ah",
 
@@ -589,6 +599,46 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
     builder->link_list_head->length += 1;
 }
 
+void clear(Code_Builder *builder, Place place) {
+    assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS);
+
+    if (place.size == 1 || place.size == 2 || place.size == 4 || place.size == 8) {
+        Inst inst = { INST_MOV, { place }, { place.size, .value = 0 } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    } else {
+        // TODO Unroll this into a sequence of movs in some cases
+        // What heuristic should we use for that? Unroll when the unrolled version
+        // produces less bytes of instructions, or unroll when the unrolled version
+        // causes less register pressure?
+        // For the second option, we would have to do the unrolling at a later stage
+        // in the pipeline, when we know whether using RAX, RCX and RDI would cause us
+        // to have to spill many registers.
+        // TODO Also, what about alignment concerns. Is that really not an issue anymore
+        // on modern processors?
+        // NB When we fix this, also fix 'copy', see below
+
+        u32 size = place.size;
+        Inst inst = { INST_REP_STOSB, { place }, { 4, place.size } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    }
+}
+
+void copy(Code_Builder *builder, Place source, Place destination) {
+    assert(source.kind == PLACE_KEY || source.kind == PLACE_KEY_ADDRESS);
+    assert(destination.kind == PLACE_KEY || destination.kind == PLACE_KEY_ADDRESS);
+    assert(source.size == destination.size);
+    u32 size = source.size;
+
+    if (size == 1 || size == 2 || size == 4 || size == 8) {
+        Inst inst = { INST_MOV, { destination, source } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    } else {
+        // TODO The same general concerns as in 'void clear' above also apply here
+        Inst inst = { INST_REP_MOVSB, { destination, source }, { 4, size } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    }
+}
+
 void set_return(Code_Builder *builder, int kind, Place place) {
     // TODO This function is to simplistic. We would preferably couple it with
     // how we generate the 'ret' instruction, or alternatively with how we
@@ -706,29 +756,6 @@ void unary(Code_Builder *builder, int kind, int unary, Place place) {
 
     Inst inst = { inst_kind, { place } };
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
-}
-
-void clear(Code_Builder *builder, Place place) {
-    assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS);
-
-    if (place.size == 1 || place.size == 2 || place.size == 4 || place.size == 8) {
-        Inst inst = { INST_MOV, { place }, { place.size, .value = 0 } };
-        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
-    } else {
-        // TODO Unroll this into a sequence of movs in some cases
-        // What heuristic should we use for that? Unroll when the unrolled version
-        // produces less bytes of instructions, or unroll when the unrolled version
-        // causes less register pressure?
-        // For the second option, we would have to do the unrolling at a later stage
-        // in the pipeline, when we know whether using RAX, RCX and RDI would cause us
-        // to have to spill many registers.
-        // TODO Also, what about alignment concerns. Is that really not an issue anymore
-        // on modern processors?
-
-        u32 size = place.size;
-        Inst inst = { INST_REP_STOSB, { place }, { 4, place.size } };
-        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
-    }
 }
 
 // Produces a new key, which contains the pointer to the given value
@@ -1066,6 +1093,11 @@ void end_function(Code_Builder *builder) {
                 } break;
 
                 case INST_REP_STOSB: {
+                    // Note: The REP prefix, as we use it, depends upon the direction flag (DF) being cleared.
+                    // Calling convention specifies that it should always be cleared on function entry, and msdn
+                    // seems to indicate that this is the case for windows. Also, neither gcc nor msvc generate
+                    // a 'cld' instruction to clear DF by default.
+
                     assert(inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_NONE && inst->imm.size > 0);
 
                     Address address = inst->places[0].address;
@@ -1122,6 +1154,75 @@ void end_function(Code_Builder *builder) {
                 case INST_REP_STOSQ:
                 {
                     assert(false); // We only generate 'INST_REP_STOSB', and choose bigger move sizes as apropriate, see above
+                } break;
+
+                case INST_REP_MOVSB: {
+                    // Note: The REP prefix, as we use it, depends upon the direction flag (DF) being cleared.
+                    // Calling convention specifies that it should always be cleared on function entry, and msdn
+                    // seems to indicate that this is the case for windows. Also, neither gcc nor msvc generate
+                    // a 'cld' instruction to clear DF by default.
+
+                    assert(inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_MEM && inst->imm.size > 0);
+
+                    Address dst = inst->places[0].address;
+                    Address src = inst->places[1].address;
+                    u64 size_mask = 0xffffffffffffffff >> ((8-inst->imm.size)*8);
+                    u64 count = inst->imm.value & size_mask;
+
+                    bool dst_is_rdi = dst.base == RDI && dst.index == REG_NONE && dst.offset == 0;
+                    bool src_is_rsi = src.base == RSI && src.index == REG_NONE && src.offset == 0;
+
+                    Reg regs_to_flush[3] = { RCX, RSI, RDI };
+                    for (u32 i = 0; i < 3; i += 1) {
+                        Reg reg = regs_to_flush[i];
+
+                        if (reg == RDI && dst_is_rdi) continue;
+                        if (reg == RSI && src_is_rsi) continue;
+
+                        if (next_gpr > reg) {
+                            u32 flush_size = get_reg_size(reg_sizes, RAX);
+
+                            if (next_temp_reg == RDI) next_temp_reg += 1;
+                            Reg flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+
+                            Place flush_place;
+                            if (flush_reg != REG_NONE)  {
+                                flush_place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
+                            } else {
+                                unimplemented(); // Get a place on the stack
+                            }
+
+                            Place place = { PLACE_REG, flush_place.size, .reg = reg };
+                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { flush_place, place } };
+                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { place, flush_place } };
+
+                            replace_regs_in_address(&src, reg, flush_reg);
+                            replace_regs_in_address(&dst, reg, flush_reg);
+                        }
+                    }
+
+                    if (!dst_is_rdi) {
+                        Inst inst = { INST_LEA, { { PLACE_REG, POINTER_SIZE, .reg = RDI }, { PLACE_MEM, POINTER_SIZE, .address = dst } } };
+                        prefix_array[prefix_index++] = inst;
+                    }
+                    if (!src_is_rsi) {
+                        Inst inst = { INST_LEA, { { PLACE_REG, POINTER_SIZE, .reg = RSI }, { PLACE_MEM, POINTER_SIZE, .address = src } } };
+                        prefix_array[prefix_index++] = inst;
+                    }
+
+                    assert(count < U32_MAX);
+                    prefix_array[prefix_index++] = (Inst) { INST_MOV, { { PLACE_REG, POINTER_SIZE, .reg = RCX } }, { POINTER_SIZE, count } };
+
+                    inst->places[0].kind = PLACE_NONE;
+                    inst->places[1].kind = PLACE_NONE;
+                    inst->imm.size = 0;
+                } break;
+
+                case INST_REP_MOVSW:
+                case INST_REP_MOVSD:
+                case INST_REP_MOVSQ:
+                {
+                    assert(false); // We only generate 'INST_REP_MOVSB', and choose bigger move sizes as apropriate, see above
                 } break;
             }
 
@@ -1341,6 +1442,11 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_REP_STOSW] = { [ENCODE_NO_PARAMS] = { 1, 0xab, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_WORD_OPERANDS } },
     [INST_REP_STOSD] = { [ENCODE_NO_PARAMS] = { 1, 0xab, ENCODING_FLAGS_REP_PREFIX } },
     [INST_REP_STOSQ] = { [ENCODE_NO_PARAMS] = { 1, 0xab, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_REX_W } },
+
+    [INST_REP_MOVSB] = { [ENCODE_NO_PARAMS] = { 1, 0xa4, ENCODING_FLAGS_REP_PREFIX } },
+    [INST_REP_MOVSW] = { [ENCODE_NO_PARAMS] = { 1, 0xa5, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_WORD_OPERANDS } },
+    [INST_REP_MOVSD] = { [ENCODE_NO_PARAMS] = { 1, 0xa5, ENCODING_FLAGS_REP_PREFIX } },
+    [INST_REP_MOVSQ] = { [ENCODE_NO_PARAMS] = { 1, 0xa5, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_REX_W } },
 
     [INST_ZERO_AH] = { [ENCODE_NO_PARAMS] = { 1, 0 } }, // Just returns ZERO_AH_ENCODING
 
@@ -2110,6 +2216,8 @@ void print_place(Place *place) {
         
     } else if (place->kind == PLACE_KEY) {
         printf("$%u", place->key->index);
+    } else if (place->kind == PLACE_KEY_ADDRESS) {
+        printf("[$%u]", place->key->index);
     } else if (place->kind == PLACE_REG) {
         print_reg(place->reg, place->size);
     } else if (place->kind == PLACE_MEM) {
@@ -2370,17 +2478,22 @@ void address_test(Code_Builder *code_builder) {
 }
 
 void compound_test(Code_Builder *code_builder) {
-    u32 length = 2;
-    Key *array = new_key(code_builder, KEY_COMPOUND, 2 * sizeof(i32), sizeof(i32));
+    Key *array = new_key(code_builder, KEY_COMPOUND, 4 * sizeof(i32), sizeof(i32));
     clear(code_builder, key_direct(array));
 
     Key *array_pointer = address_of(code_builder, array);
     binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(array_pointer), key_direct(new_i64(code_builder, 1 * sizeof(i32))));
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_deref(array_pointer, sizeof(i32)), key_direct(new_i32(code_builder, 43)));
 
-    Key *second_element = new_key(code_builder, KEY_INTEGER, sizeof(i32), sizeof(i32));
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(second_element), key_deref(array_pointer, sizeof(i32)));
+    Key *other_array = new_key(code_builder, KEY_COMPOUND, 4 * sizeof(i32), sizeof(i32));
+    copy(code_builder, key_direct(array), key_direct(other_array));
 
-    set_return(code_builder, KEY_INTEGER, key_direct(second_element));
+    Key *result = new_key(code_builder, KEY_INTEGER, sizeof(i32), sizeof(i32));
+    Key *other_array_pointer = address_of(code_builder, other_array);
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(other_array_pointer), key_direct(new_i64(code_builder, 1 * sizeof(i32))));
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(result), key_deref(other_array_pointer, sizeof(i32)));
+
+    set_return(code_builder, KEY_INTEGER, key_direct(result));
 }
 
 void main() {
@@ -2392,9 +2505,9 @@ void main() {
     //nasty_mul_test(code_builder);     // Returns 148
     //nasty_imul_test(code_builder);    // Returns 148
     //nasty_div_test(code_builder);     // Returns 3
-    encoding_test(code_builder);      // Returns -2
+    //encoding_test(code_builder);      // Returns -2
     //address_test(code_builder);       // Returns 28
-    //compound_test(code_builder);
+    compound_test(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
