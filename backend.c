@@ -1,21 +1,6 @@
 
 #include "common.c"
 
-#define IMM_SIZE_USE_POINTER 0xff
-
-typedef struct Big_Imm {
-    u32 size;
-    u8 data[];
-} Big_Imm;
-
-typedef struct Imm {
-    u8 size;
-    union {
-        u64 value; // only used when size is 1, 2, 4 or 8
-        Big_Imm *pointer;
-    };
-} Imm;
-
 typedef enum Reg {
     REG_NONE = 0,
 
@@ -89,18 +74,16 @@ void replace_regs_in_address(Address *address, Reg old, Reg new) {
 
 
 enum Key_Flags {
-    KEY_FLAG_ONLY_SET_ONCE = 1,
-    KEY_FLAG_ADDRESSABLE   = 2,
+    KEY_FLAG_ADDRESSABLE  = 2,
 };
 
 typedef struct Key {
     u64 index;
     u32 flags;
 
+    u32 alignment;
     u32 size;
     enum { KEY_INTEGER, KEY_FLOAT, KEY_COMPOUND } kind;
-
-    Imm constant_value; // Used when 'KEY_FLAG_ONLY_SET_ONCE'
 } Key;
 
 
@@ -137,6 +120,11 @@ typedef enum Inst_Kind {
     INST_CWD, // sign extend ax into dx
     INST_CDQ, // sign extend eax into edx
     INST_CQO, // sign extend rax into rdx
+
+    INST_REP_STOSB,
+    INST_REP_STOSW,
+    INST_REP_STOSD,
+    INST_REP_STOSQ,
 
     INST_ZERO_AH,
     
@@ -206,6 +194,11 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_CDQ] = "cdq",
     [INST_CQO] = "cqo",
 
+    [INST_REP_STOSB] = "rep stosb byte ptr [rdi], al",
+    [INST_REP_STOSW] = "rep stosw word ptr [rdi], ax",
+    [INST_REP_STOSD] = "rep stosd dword ptr [rdi], eax",
+    [INST_REP_STOSQ] = "rep stosq qword ptr [rdi], rax",
+
     [INST_ZERO_AH] = "xor ah, ah",
 
     [INST_JE]   = "je",
@@ -256,6 +249,11 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_NOT]  = "not",
 };
 
+
+typedef struct Imm {
+    u8 size;
+    u64 value;
+} Imm;
 
 typedef struct Inst {
     Inst_Kind kind;
@@ -493,7 +491,7 @@ void code_builder_insert_insts(
 }
 
 
-Key *new_key(Code_Builder *builder, int kind, u32 size) {
+Key *new_key(Code_Builder *builder, int kind, u32 size, u32 alignment) {
     if (kind == KEY_INTEGER) {
         assert(size == 1 || size == 2 || size == 4 || size == 8);
     } else if (kind == KEY_FLOAT) {
@@ -509,32 +507,6 @@ Key *new_key(Code_Builder *builder, int kind, u32 size) {
     return key;
 }
 
-Key *new_key_with_value(Code_Builder *builder, int kind, u32 size, void *value) {
-    Imm imm = {0};
-    imm.size = (u8) size;
-    switch (size) {
-        case 1: imm.value = (u64) *((u8*)  value); break;
-        case 2: imm.value = (u64) *((u16*) value); break;
-        case 4: imm.value = (u64) *((u32*) value); break;
-        case 8: imm.value = (u64) *((u64*) value); break;
-        default: {
-            imm.size = IMM_SIZE_USE_POINTER;
-            imm.pointer = (Big_Imm*) arena_alloc(builder->arena, sizeof(u32) + size);
-            imm.pointer->size = size;
-            mem_copy(value, imm.pointer->data, size);
-        } break;
-    }
-
-    Key *key = new_key(builder, kind, size);
-    key->flags |= KEY_FLAG_ONLY_SET_ONCE;
-    key->constant_value = imm;
-
-    Inst inst = { INST_MOV, { { PLACE_KEY, .size = size, .key = key } }, imm };
-    inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
-
-    return key;
-}
-
 Place key_deref(Key *key, u32 size) {
     return (Place) { PLACE_KEY_ADDRESS, size, .key = key };
 }
@@ -546,8 +518,12 @@ Place key_direct(Key *key) {
 
 #define GEN_NEW_INT_FUNCTION(name, type) \
 Key *name(Code_Builder *builder, type value) { \
-    return new_key_with_value(builder, KEY_INTEGER, sizeof(type), &value); \
+    Key *key = new_key(builder, KEY_INTEGER, sizeof(type), sizeof(type)); \
+    Inst inst = { INST_MOV, { { PLACE_KEY, sizeof(type), .key = key } }, { sizeof(type), .value = (u64) value } }; \
+    inst_block_group_add_inst(builder, &builder->inst_blocks, inst); \
+    return key; \
 }
+
 GEN_NEW_INT_FUNCTION(new_i8,  i8)
 GEN_NEW_INT_FUNCTION(new_i16, i16)
 GEN_NEW_INT_FUNCTION(new_i32, i32)
@@ -557,6 +533,7 @@ GEN_NEW_INT_FUNCTION(new_u16, u16)
 GEN_NEW_INT_FUNCTION(new_u32, u32)
 GEN_NEW_INT_FUNCTION(new_u64, u64)
 GEN_NEW_INT_FUNCTION(new_pointer, u64)
+
 #undef GEN_NEW_INT_FUNCTION
 
 Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
@@ -652,7 +629,6 @@ enum {
 void binary(Code_Builder *builder, int kind, int binary, Place left, Place right) {
     assert(left.size == right.size);
     if (left.kind == PLACE_KEY) {
-        left.key->flags &= ~KEY_FLAG_ONLY_SET_ONCE;
         assert(left.key->kind == kind);
     } else if (left.kind == PLACE_KEY_ADDRESS) {
         assert(left.key->size == POINTER_SIZE && left.key->kind == KEY_INTEGER);
@@ -706,7 +682,6 @@ enum {
 
 void unary(Code_Builder *builder, int kind, int unary, Place place) {
     if (place.kind == PLACE_KEY) {
-        place.key->flags &= ~KEY_FLAG_ONLY_SET_ONCE;
         assert(place.key->kind == kind);
     } else if (place.kind == PLACE_KEY_ADDRESS) {
         assert(place.key->size == POINTER_SIZE && place.key->kind == KEY_INTEGER);
@@ -733,13 +708,35 @@ void unary(Code_Builder *builder, int kind, int unary, Place place) {
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 }
 
+void clear(Code_Builder *builder, Place place) {
+    assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS);
+
+    if (place.size == 1 || place.size == 2 || place.size == 4 || place.size == 8) {
+        Inst inst = { INST_MOV, { place }, { place.size, .value = 0 } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    } else {
+        // TODO Unroll this into a sequence of movs in some cases
+        // What heuristic should we use for that? Unroll when the unrolled version
+        // produces less bytes of instructions, or unroll when the unrolled version
+        // causes less register pressure?
+        // For the second option, we would have to do the unrolling at a later stage
+        // in the pipeline, when we know whether using RAX, RCX and RDI would cause us
+        // to have to spill many registers.
+        // TODO Also, what about alignment concerns. Is that really not an issue anymore
+        // on modern processors?
+
+        u32 size = place.size;
+        Inst inst = { INST_REP_STOSB, { place }, { 4, place.size } };
+        inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
+    }
+}
+
 // Produces a new key, which contains the pointer to the given value
 // This generates a lea instruction
-Key *address_of_key(Code_Builder *builder, Key *value) {
+Key *address_of(Code_Builder *builder, Key *value) {
     value->flags |= KEY_FLAG_ADDRESSABLE;
-    value->flags &= ~KEY_FLAG_ONLY_SET_ONCE; // so we don't optimize the it away
 
-    Key *address = new_key(builder, KEY_INTEGER, POINTER_SIZE);
+    Key *address = new_key(builder, KEY_INTEGER, POINTER_SIZE, POINTER_SIZE);
 
     Inst inst = { INST_LEA, { { PLACE_KEY, POINTER_SIZE, .key = address }, { PLACE_KEY, POINTER_SIZE, .key = value } } };
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
@@ -774,8 +771,7 @@ void end_function(Code_Builder *builder) {
                 if (assigned_place->kind == PLACE_NONE) {
                     if (key->kind == KEY_COMPOUND || (key->flags & KEY_FLAG_ADDRESSABLE)) {
                         u32 size = key->size;
-                        u32 align = key->size; // TODO actually get proper alignment
-                        assert(align == 1 || align == 2 || align == 4 || align == 8);
+                        u32 align = key->alignment;
 
                         next_stack_index = (u64) round_to_next((u64) next_stack_index, (u64) align);
                         i32 stack_index = next_stack_index;
@@ -812,7 +808,7 @@ void end_function(Code_Builder *builder) {
                 continue;
             }
 
-            enum { MAX_PREFIXES = 6, MAX_POSTFIXES = 6 };
+            enum { MAX_PREFIXES = 7, MAX_POSTFIXES = 6 };
             Inst prefix_array[MAX_PREFIXES] = {0}, postfix_array[MAX_POSTFIXES] = {0};
             u8 prefix_index = 0, postfix_index = MAX_POSTFIXES;
 
@@ -827,23 +823,7 @@ void end_function(Code_Builder *builder) {
 
                 if (place_slot->kind == PLACE_KEY) {
                     Key *key = place_slot->key;
-
-                    if (key->flags & KEY_FLAG_ONLY_SET_ONCE) {
-                        if (j == 0) {
-                            assert(inst->kind == INST_MOV);
-                            assert(inst->places[1].kind == PLACE_NONE && inst->imm.size > 0);
-                            remove_inst = true;
-                            break;
-                        } else if (j == 1) {
-                            assert(inst->imm.size == 0);
-                            inst->places[1].kind = PLACE_NONE;
-                            inst->imm = key->constant_value;
-                        } else {
-                            assert(false);
-                        }
-                    } else {
-                        *place_slot = key_places[key->index];
-                    }
+                    *place_slot = key_places[key->index];
                 } else if (inst->places[j].kind == PLACE_KEY_ADDRESS) {
                     Key *key = place_slot->key;
                     Place *place = &key_places[key->index];
@@ -1084,18 +1064,92 @@ void end_function(Code_Builder *builder) {
                     assert(inst->places[1].kind == PLACE_MEM);
                     inst->places[1].size = POINTER_SIZE;
                 } break;
+
+                case INST_REP_STOSB: {
+                    assert(inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_NONE && inst->imm.size > 0);
+
+                    Address address = inst->places[0].address;
+                    u64 size_mask = 0xffffffffffffffff >> ((8-inst->imm.size)*8);
+                    u64 count = inst->imm.value & size_mask;
+
+                    bool address_is_rdi = address.base == RDI && address.index == REG_NONE && address.offset == 0;
+
+                    Reg regs_to_flush[3] = { RCX, RAX, RDI };
+                    for (u32 i = 0; i < 3; i += 1) {
+                        Reg reg = regs_to_flush[i];
+
+                        if (reg == RDI && address_is_rdi) {
+                            continue;
+                        }
+
+                        if (next_gpr > reg) {
+                            u32 flush_size = get_reg_size(reg_sizes, RAX);
+
+                            if (next_temp_reg == RDI) next_temp_reg += 1;
+                            Reg flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+
+                            Place flush_place;
+                            if (flush_reg != REG_NONE)  {
+                                flush_place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
+                            } else {
+                                unimplemented(); // Get a place on the stack
+                            }
+
+                            Place place = { PLACE_REG, flush_place.size, .reg = reg };
+                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { flush_place, place } };
+                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { place, flush_place } };
+
+                            replace_regs_in_address(&address, reg, flush_reg);
+                        }
+                    }
+
+                    if (!address_is_rdi) {
+                        Inst inst = { INST_LEA, { { PLACE_REG, POINTER_SIZE, .reg = RDI }, { PLACE_MEM, POINTER_SIZE, .address = address } } };
+                        prefix_array[prefix_index++] = inst;
+                    }
+
+                    assert(count < U32_MAX);
+                    prefix_array[prefix_index++] = (Inst) { INST_MOV, { { PLACE_REG, POINTER_SIZE, .reg = RCX } }, { POINTER_SIZE, count } };
+
+                    prefix_array[prefix_index++] = (Inst) { INST_XOR, { { PLACE_REG, POINTER_SIZE, .reg = RAX }, { PLACE_REG, POINTER_SIZE, .reg = RAX } } };
+
+                    inst->places[0].kind = PLACE_NONE;
+                    inst->imm.size = 0;
+                } break;
+
+                case INST_REP_STOSW:
+                case INST_REP_STOSD:
+                case INST_REP_STOSQ:
+                {
+                    assert(false); // We only generate 'INST_REP_STOSB', and choose bigger move sizes as apropriate, see above
+                } break;
             }
 
 
             if (inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_MEM) {
                 Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-                if (temp_reg == REG_NONE)  {
+                if (temp_reg == REG_NONE) {
                     unimplemented(); // TODO We need a register, flush something
                 }
 
                 Place temp_place = { PLACE_REG, inst->places[1].size, .reg = temp_reg };
                 postfix_array[--postfix_index] = (Inst) { INST_MOV, { inst->places[0], temp_place } };
                 inst->places[0] = temp_place;
+            }
+
+            assert(inst->imm.size == 0 || inst->imm.size == 1 || inst->imm.size == 2 || inst->imm.size == 4 || inst->imm.size == 8);
+            if (inst->imm.size == 8 && !(inst->kind == INST_MOV && inst->places[0].kind == PLACE_REG)) {
+                assert(inst->places[1].kind == PLACE_NONE);
+
+                Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                if (temp_reg == REG_NONE) {
+                    unimplemented(); // TODO We need a register, flush something
+                }
+
+                Place temp_place = { PLACE_REG, inst->imm.size, .reg = temp_reg };
+                prefix_array[prefix_index++] = (Inst) { INST_MOV, { temp_place }, inst->imm };
+                inst->imm.size = 0;
+                inst->places[1] = temp_place;
             }
 
 
@@ -1226,11 +1280,14 @@ u8 *ENCODING_MODE_NAMES[ENCODING_MODE_COUNT] = {
 };
 
 
-#define ENCODING_WORD_OPERANDS    0x01 // prefixes 0x66
-#define ENCODING_REX_W            0x02
-#define ENCODING_MODRM_FLAG       0x04 // sets modrm.reg to Encoding.modrm_flag
-#define ENCODING_REG_IN_OPCODE    0x08
-#define ENCODING_SECONDARY        0x10 // prefixes 0x0f
+enum {
+    ENCODING_FLAGS_WORD_OPERANDS = 0x01, // prefixes 0x66
+    ENCODING_FLAGS_REX_W         = 0x02,
+    ENCODING_FLAGS_MODRM_FLAG    = 0x04, // sets modrm.reg to Encoding.modrm_flag
+    ENCODING_FLAGS_REG_IN_OPCODE = 0x08,
+    ENCODING_FLAGS_SECONDARY     = 0x10, // prefixes 0x0f
+    ENCODING_FLAGS_REP_PREFIX    = 0x20,
+};
 
 typedef struct Encoding {
     u8 exists;
@@ -1262,8 +1319,8 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
         // There are I2, R2 and M2 encodings, but those don't seem to work on x64. Also, they are 
         // mostly useless anyways
         [ENCODE_I4] = { 1, 0xe8 },
-        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG, .modrm_flag = 2 },
-        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG, .modrm_flag = 2 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 2 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 2 },
     },
     [INST_JMP] = {
         [ENCODE_I1] = { 1, 0xeb },
@@ -1275,108 +1332,113 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_RET]  = { [ENCODE_NO_PARAMS] = { 1, 0xc3 } },
     [INST_NOP]  = { [ENCODE_NO_PARAMS] = { 1, 0x90 } },
 
-    [INST_CBW] = { [ENCODE_NO_PARAMS] = { 1, 0x98, ENCODING_WORD_OPERANDS } },
-    [INST_CWD] = { [ENCODE_NO_PARAMS] = { 1, 0x99, ENCODING_WORD_OPERANDS } },
+    [INST_CBW] = { [ENCODE_NO_PARAMS] = { 1, 0x98, ENCODING_FLAGS_WORD_OPERANDS } },
+    [INST_CWD] = { [ENCODE_NO_PARAMS] = { 1, 0x99, ENCODING_FLAGS_WORD_OPERANDS } },
     [INST_CDQ] = { [ENCODE_NO_PARAMS] = { 1, 0x99 } },
-    [INST_CQO] = { [ENCODE_NO_PARAMS] = { 1, 0x99, ENCODING_REX_W } },
+    [INST_CQO] = { [ENCODE_NO_PARAMS] = { 1, 0x99, ENCODING_FLAGS_REX_W } },
+
+    [INST_REP_STOSB] = { [ENCODE_NO_PARAMS] = { 1, 0xaa, ENCODING_FLAGS_REP_PREFIX } },
+    [INST_REP_STOSW] = { [ENCODE_NO_PARAMS] = { 1, 0xab, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_WORD_OPERANDS } },
+    [INST_REP_STOSD] = { [ENCODE_NO_PARAMS] = { 1, 0xab, ENCODING_FLAGS_REP_PREFIX } },
+    [INST_REP_STOSQ] = { [ENCODE_NO_PARAMS] = { 1, 0xab, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_REX_W } },
 
     [INST_ZERO_AH] = { [ENCODE_NO_PARAMS] = { 1, 0 } }, // Just returns ZERO_AH_ENCODING
 
-    [INST_JE]  = { [ENCODE_I1] = { 1, 0x74 }, [ENCODE_I4] = { 1, 0x84, ENCODING_SECONDARY } },
-    [INST_JNE] = { [ENCODE_I1] = { 1, 0x75 }, [ENCODE_I4] = { 1, 0x85, ENCODING_SECONDARY } },
-    [INST_JP]  = { [ENCODE_I1] = { 1, 0x7a }, [ENCODE_I4] = { 1, 0x8a, ENCODING_SECONDARY } },
-    [INST_JNP] = { [ENCODE_I1] = { 1, 0x7b }, [ENCODE_I4] = { 1, 0x8b, ENCODING_SECONDARY } },
-    [INST_JA]  = { [ENCODE_I1] = { 1, 0x77 }, [ENCODE_I4] = { 1, 0x87, ENCODING_SECONDARY } },
-    [INST_JAE] = { [ENCODE_I1] = { 1, 0x73 }, [ENCODE_I4] = { 1, 0x83, ENCODING_SECONDARY } },
-    [INST_JB]  = { [ENCODE_I1] = { 1, 0x72 }, [ENCODE_I4] = { 1, 0x82, ENCODING_SECONDARY } },
-    [INST_JBE] = { [ENCODE_I1] = { 1, 0x76 }, [ENCODE_I4] = { 1, 0x86, ENCODING_SECONDARY } },
-    [INST_JG]  = { [ENCODE_I1] = { 1, 0x7f }, [ENCODE_I4] = { 1, 0x8f, ENCODING_SECONDARY } },
-    [INST_JGE] = { [ENCODE_I1] = { 1, 0x7d }, [ENCODE_I4] = { 1, 0x8d, ENCODING_SECONDARY } },
-    [INST_JL]  = { [ENCODE_I1] = { 1, 0x7c }, [ENCODE_I4] = { 1, 0x8c, ENCODING_SECONDARY } },
-    [INST_JLE] = { [ENCODE_I1] = { 1, 0x7e }, [ENCODE_I4] = { 1, 0x8e, ENCODING_SECONDARY } },
+    [INST_JE]  = { [ENCODE_I1] = { 1, 0x74 }, [ENCODE_I4] = { 1, 0x84, ENCODING_FLAGS_SECONDARY } },
+    [INST_JNE] = { [ENCODE_I1] = { 1, 0x75 }, [ENCODE_I4] = { 1, 0x85, ENCODING_FLAGS_SECONDARY } },
+    [INST_JP]  = { [ENCODE_I1] = { 1, 0x7a }, [ENCODE_I4] = { 1, 0x8a, ENCODING_FLAGS_SECONDARY } },
+    [INST_JNP] = { [ENCODE_I1] = { 1, 0x7b }, [ENCODE_I4] = { 1, 0x8b, ENCODING_FLAGS_SECONDARY } },
+    [INST_JA]  = { [ENCODE_I1] = { 1, 0x77 }, [ENCODE_I4] = { 1, 0x87, ENCODING_FLAGS_SECONDARY } },
+    [INST_JAE] = { [ENCODE_I1] = { 1, 0x73 }, [ENCODE_I4] = { 1, 0x83, ENCODING_FLAGS_SECONDARY } },
+    [INST_JB]  = { [ENCODE_I1] = { 1, 0x72 }, [ENCODE_I4] = { 1, 0x82, ENCODING_FLAGS_SECONDARY } },
+    [INST_JBE] = { [ENCODE_I1] = { 1, 0x76 }, [ENCODE_I4] = { 1, 0x86, ENCODING_FLAGS_SECONDARY } },
+    [INST_JG]  = { [ENCODE_I1] = { 1, 0x7f }, [ENCODE_I4] = { 1, 0x8f, ENCODING_FLAGS_SECONDARY } },
+    [INST_JGE] = { [ENCODE_I1] = { 1, 0x7d }, [ENCODE_I4] = { 1, 0x8d, ENCODING_FLAGS_SECONDARY } },
+    [INST_JL]  = { [ENCODE_I1] = { 1, 0x7c }, [ENCODE_I4] = { 1, 0x8c, ENCODING_FLAGS_SECONDARY } },
+    [INST_JLE] = { [ENCODE_I1] = { 1, 0x7e }, [ENCODE_I4] = { 1, 0x8e, ENCODING_FLAGS_SECONDARY } },
 
-    [INST_SETE]  = { [ENCODE_R1] = { 1, 0x94, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x94, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETNE] = { [ENCODE_R1] = { 1, 0x95, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x95, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETP]  = { [ENCODE_R1] = { 1, 0x9a, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9a, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETNP] = { [ENCODE_R1] = { 1, 0x9b, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9b, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETA]  = { [ENCODE_R1] = { 1, 0x97, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x97, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETAE] = { [ENCODE_R1] = { 1, 0x93, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x93, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETB]  = { [ENCODE_R1] = { 1, 0x92, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x92, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETBE] = { [ENCODE_R1] = { 1, 0x96, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x96, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETG]  = { [ENCODE_R1] = { 1, 0x9f, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9f, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETGE] = { [ENCODE_R1] = { 1, 0x9d, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9d, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETL]  = { [ENCODE_R1] = { 1, 0x9c, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9c, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
-    [INST_SETLE] = { [ENCODE_R1] = { 1, 0x9e, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9e, ENCODING_SECONDARY | ENCODING_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETE]  = { [ENCODE_R1] = { 1, 0x94, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x94, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETNE] = { [ENCODE_R1] = { 1, 0x95, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x95, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETP]  = { [ENCODE_R1] = { 1, 0x9a, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9a, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETNP] = { [ENCODE_R1] = { 1, 0x9b, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9b, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETA]  = { [ENCODE_R1] = { 1, 0x97, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x97, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETAE] = { [ENCODE_R1] = { 1, 0x93, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x93, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETB]  = { [ENCODE_R1] = { 1, 0x92, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x92, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETBE] = { [ENCODE_R1] = { 1, 0x96, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x96, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETG]  = { [ENCODE_R1] = { 1, 0x9f, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9f, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETGE] = { [ENCODE_R1] = { 1, 0x9d, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9d, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETL]  = { [ENCODE_R1] = { 1, 0x9c, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9c, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
+    [INST_SETLE] = { [ENCODE_R1] = { 1, 0x9e, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 }, [ENCODE_M1] = { 1, 0x9e, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 } },
 
     [INST_MOV] = {
-        [ENCODE_R1_I1] = { 1, 0xb0, ENCODING_REG_IN_OPCODE },
-        [ENCODE_R2_I2] = { 1, 0xb8, ENCODING_WORD_OPERANDS | ENCODING_REG_IN_OPCODE },
-        [ENCODE_R4_I4] = { 1, 0xb8, ENCODING_REG_IN_OPCODE },
-        [ENCODE_R8_I8] = { 1, 0xb8, ENCODING_REX_W | ENCODING_REG_IN_OPCODE },
+        [ENCODE_R1_I1] = { 1, 0xb0, ENCODING_FLAGS_REG_IN_OPCODE },
+        [ENCODE_R2_I2] = { 1, 0xb8, ENCODING_FLAGS_WORD_OPERANDS | ENCODING_FLAGS_REG_IN_OPCODE },
+        [ENCODE_R4_I4] = { 1, 0xb8, ENCODING_FLAGS_REG_IN_OPCODE },
+        [ENCODE_R8_I8] = { 1, 0xb8, ENCODING_FLAGS_REX_W | ENCODING_FLAGS_REG_IN_OPCODE },
 
-        [ENCODE_M1_I1] = { 1, 0xc6, ENCODING_MODRM_FLAG, .modrm_flag = 0 },
-        [ENCODE_M2_I2] = { 1, 0xc7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 0 },
-        [ENCODE_M4_I4] = { 1, 0xc7, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_M8_I4] = { 1, 0xc7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
+        [ENCODE_M1_I1] = { 1, 0xc6, ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = 0 },
+        [ENCODE_M2_I2] = { 1, 0xc7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 0 },
+        [ENCODE_M4_I4] = { 1, 0xc7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_M8_I4] = { 1, 0xc7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 0 },
 
         [ENCODE_R1_R1] = { 1, 0x8a },
-        [ENCODE_R2_R2] = { 1, 0x8b, ENCODING_WORD_OPERANDS },
+        [ENCODE_R2_R2] = { 1, 0x8b, ENCODING_FLAGS_WORD_OPERANDS },
         [ENCODE_R4_R4] = { 1, 0x8b },
-        [ENCODE_R8_R8] = { 1, 0x8b, ENCODING_REX_W },
+        [ENCODE_R8_R8] = { 1, 0x8b, ENCODING_FLAGS_REX_W },
 
         [ENCODE_M1_R1] = { 1, 0x88 },
-        [ENCODE_M2_R2] = { 1, 0x89, ENCODING_WORD_OPERANDS },
+        [ENCODE_M2_R2] = { 1, 0x89, ENCODING_FLAGS_WORD_OPERANDS },
         [ENCODE_M4_R4] = { 1, 0x89 },
-        [ENCODE_M8_R8] = { 1, 0x89, ENCODING_REX_W },
+        [ENCODE_M8_R8] = { 1, 0x89, ENCODING_FLAGS_REX_W },
 
         [ENCODE_R1_M1] = { 1, 0x8a },
-        [ENCODE_R2_M2] = { 1, 0x8b, ENCODING_WORD_OPERANDS },
+        [ENCODE_R2_M2] = { 1, 0x8b, ENCODING_FLAGS_WORD_OPERANDS },
         [ENCODE_R4_M4] = { 1, 0x8b },
-        [ENCODE_R8_M8] = { 1, 0x8b, ENCODING_REX_W },
+        [ENCODE_R8_M8] = { 1, 0x8b, ENCODING_FLAGS_REX_W },
     },
 
     [INST_LEA] = {
-        [ENCODE_R8_M8] = { 1, 0x8d, ENCODING_REX_W },
+        [ENCODE_R8_M8] = { 1, 0x8d, ENCODING_FLAGS_REX_W },
     },
 
     [INST_XCHG] = {
         [ENCODE_R1_R1] = { 1, 0x86 },
-        [ENCODE_R2_R2] = { 1, 0x87, ENCODING_WORD_OPERANDS },
+        [ENCODE_R2_R2] = { 1, 0x87, ENCODING_FLAGS_WORD_OPERANDS },
         [ENCODE_R4_R4] = { 1, 0x87 },
-        [ENCODE_R8_R8] = { 1, 0x87, ENCODING_REX_W },
+        [ENCODE_R8_R8] = { 1, 0x87, ENCODING_FLAGS_REX_W },
     },
 
     #define INST_INTEGER(inst, imm_flag, op_a, op_b, op_c, op_d) \
     [inst] = { \
-        [ENCODE_R1_I1] = { 1, 0x80, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
-        [ENCODE_R2_I1] = { 1, 0x83, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
-        [ENCODE_R4_I1] = { 1, 0x83, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
-        [ENCODE_R8_I1] = { 1, 0x83, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
-        [ENCODE_R2_I2] = { 1, 0x81, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
-        [ENCODE_R4_I4] = { 1, 0x81, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
-        [ENCODE_R8_I4] = { 1, 0x81, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
-        [ENCODE_M1_I1] = { 1, 0x80, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
-        [ENCODE_M2_I1] = { 1, 0x83, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
-        [ENCODE_M4_I1] = { 1, 0x83, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
-        [ENCODE_M8_I1] = { 1, 0x83, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
-        [ENCODE_M2_I2] = { 1, 0x81, ENCODING_WORD_OPERANDS | ENCODING_MODRM_FLAG, .modrm_flag = imm_flag }, \
-        [ENCODE_M4_I4] = { 1, 0x81, ENCODING_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
-        [ENCODE_M8_I4] = { 1, 0x81, ENCODING_REX_W | ENCODING_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_R1_I1] = { 1, 0x80, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_R2_I1] = { 1, 0x83, ENCODING_FLAGS_WORD_OPERANDS | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_R4_I1] = { 1, 0x83, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_R8_I1] = { 1, 0x83, ENCODING_FLAGS_REX_W | ENCODING_FLAGS_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_R2_I2] = { 1, 0x81, ENCODING_FLAGS_WORD_OPERANDS | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_R4_I4] = { 1, 0x81, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_R8_I4] = { 1, 0x81, ENCODING_FLAGS_REX_W | ENCODING_FLAGS_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_M1_I1] = { 1, 0x80, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_M2_I1] = { 1, 0x83, ENCODING_FLAGS_WORD_OPERANDS | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_M4_I1] = { 1, 0x83, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_M8_I1] = { 1, 0x83, ENCODING_FLAGS_REX_W | ENCODING_FLAGS_MODRM_FLAG,         .modrm_flag = imm_flag }, \
+        [ENCODE_M2_I2] = { 1, 0x81, ENCODING_FLAGS_WORD_OPERANDS | ENCODING_FLAGS_MODRM_FLAG, .modrm_flag = imm_flag }, \
+        [ENCODE_M4_I4] = { 1, 0x81, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = imm_flag }, \
+        [ENCODE_M8_I4] = { 1, 0x81, ENCODING_FLAGS_REX_W | ENCODING_FLAGS_MODRM_FLAG,         .modrm_flag = imm_flag }, \
  \
         [ENCODE_R1_M1] = { 1, op_c }, \
-        [ENCODE_R2_M2] = { 1, op_d, ENCODING_WORD_OPERANDS }, \
+        [ENCODE_R2_M2] = { 1, op_d, ENCODING_FLAGS_WORD_OPERANDS }, \
         [ENCODE_R4_M4] = { 1, op_d }, \
-        [ENCODE_R8_M8] = { 1, op_d, ENCODING_REX_W }, \
+        [ENCODE_R8_M8] = { 1, op_d, ENCODING_FLAGS_REX_W }, \
  \
         [ENCODE_M1_R1] = { 1, op_a }, \
-        [ENCODE_M2_R2] = { 1, op_b, ENCODING_WORD_OPERANDS }, \
+        [ENCODE_M2_R2] = { 1, op_b, ENCODING_FLAGS_WORD_OPERANDS }, \
         [ENCODE_M4_R4] = { 1, op_b }, \
-        [ENCODE_M8_R8] = { 1, op_b, ENCODING_REX_W }, \
+        [ENCODE_M8_R8] = { 1, op_b, ENCODING_FLAGS_REX_W }, \
  \
         [ENCODE_R1_R1] = { 1, op_c }, \
-        [ENCODE_R2_R2] = { 1, op_d, ENCODING_WORD_OPERANDS }, \
+        [ENCODE_R2_R2] = { 1, op_d, ENCODING_FLAGS_WORD_OPERANDS }, \
         [ENCODE_R4_R4] = { 1, op_d }, \
-        [ENCODE_R8_R8] = { 1, op_d, ENCODING_REX_W }, \
+        [ENCODE_R8_R8] = { 1, op_d, ENCODING_FLAGS_REX_W }, \
     },
 
     INST_INTEGER(INST_ADD, 0, 0x00, 0x01, 0x02, 0x03)
@@ -1389,153 +1451,153 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     #undef INST_INTEGER
 
     [INST_SHR] = {
-        [ENCODE_R1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_R2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
-        [ENCODE_R4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_R8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5},
-        [ENCODE_M1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_M2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
-        [ENCODE_M4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_M8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5},
+        [ENCODE_R1]    = { 1, 0xd2, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_R2]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_R4]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_R8]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 5},
+        [ENCODE_M1]    = { 1, 0xd2, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M2]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_M4]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M8]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 5},
 
-        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
-        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5},
-        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 5},
-        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5},
+        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 5},
+        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5},
+        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 5},
     },
     [INST_SAR] = {
-        [ENCODE_R1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_R2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
-        [ENCODE_R4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_R8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
-        [ENCODE_M1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_M2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
-        [ENCODE_M4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_M8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
+        [ENCODE_R1]    = { 1, 0xd2, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R2]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_R4]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R8]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 7},
+        [ENCODE_M1]    = { 1, 0xd2, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M2]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_M4]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M8]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 7},
 
-        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
-        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_R8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
-        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7},
-        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 7},
-        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7},
+        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_R8_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 7},
+        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 7},
+        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7},
+        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 7},
     },
     [INST_SHL] = {
-        [ENCODE_R1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_R2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
-        [ENCODE_R4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_R8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
-        [ENCODE_M1]    = { 1, 0xd2, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_M2]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
-        [ENCODE_M4]    = { 1, 0xd3, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_M8]    = { 1, 0xd3, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
+        [ENCODE_R1]    = { 1, 0xd2, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R2]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_R4]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R8]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 4},
+        [ENCODE_M1]    = { 1, 0xd2, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M2]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_M4]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M8]    = { 1, 0xd3, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 4},
 
-        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
-        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_R8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
-        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4},
-        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG,                          .modrm_flag = 4},
-        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4},
+        [ENCODE_R1_I1] = { 1, 0xc0, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R2_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_R4_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_R8_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 4},
+        [ENCODE_M1_I1] = { 1, 0xc0, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M2_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 4},
+        [ENCODE_M4_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4},
+        [ENCODE_M8_I1] = { 1, 0xc1, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 4},
     },
 
     [INST_INC] = {
-        [ENCODE_R1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_R2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 0 },
-        [ENCODE_R4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
+        [ENCODE_R1] = { 1, 0xfe, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_R2] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 0 },
+        [ENCODE_R4] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 0 },
 
-        [ENCODE_M1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_M2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 0 },
-        [ENCODE_M4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 0 },
-        [ENCODE_M8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 0 },
+        [ENCODE_M1] = { 1, 0xfe, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_M2] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 0 },
+        [ENCODE_M4] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 0 },
+        [ENCODE_M8] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 0 },
     },
     [INST_DEC] = {
-        [ENCODE_R1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
-        [ENCODE_R2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 1 },
-        [ENCODE_R4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
-        [ENCODE_R8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 1 },
+        [ENCODE_R1] = { 1, 0xfe, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_R2] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 1 },
+        [ENCODE_R4] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_R8] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 1 },
 
-        [ENCODE_M1] = { 1, 0xfe, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
-        [ENCODE_M2] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 1 },
-        [ENCODE_M4] = { 1, 0xff, ENCODING_MODRM_FLAG,                          .modrm_flag = 1 },
-        [ENCODE_M8] = { 1, 0xff, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 1 },
+        [ENCODE_M1] = { 1, 0xfe, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_M2] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 1 },
+        [ENCODE_M4] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 1 },
+        [ENCODE_M8] = { 1, 0xff, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 1 },
     },
 
     [INST_MUL] = {
-        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
-        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4 },
-        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
-        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4 },
-        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
-        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 4 },
-        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 4 },
-        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 4 },
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 4 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 4 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 4 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 4 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 4 },
     },
     [INST_DIV] = {
-        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
-        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 6 },
-        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
-        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 6 },
-        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
-        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 6 },
-        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 6 },
-        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 6 },
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 6 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 6 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 6 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 6 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 6 },
     },
     [INST_IMUL] = {
-        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
-        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5 },
-        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
-        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5 },
-        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
-        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 5 },
-        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 5 },
-        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 5 },
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 5 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 5 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 5 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 5 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 5 },
 
-        [ENCODE_R2_R2] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_WORD_OPERANDS },
-        [ENCODE_R4_R4] = { 1, 0xaf, ENCODING_SECONDARY },
-        [ENCODE_R8_R8] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_REX_W },
-        [ENCODE_R2_M2] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_WORD_OPERANDS },
-        [ENCODE_R4_M4] = { 1, 0xaf, ENCODING_SECONDARY },
-        [ENCODE_R8_M8] = { 1, 0xaf, ENCODING_SECONDARY | ENCODING_REX_W },
+        [ENCODE_R2_R2] = { 1, 0xaf, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_WORD_OPERANDS },
+        [ENCODE_R4_R4] = { 1, 0xaf, ENCODING_FLAGS_SECONDARY },
+        [ENCODE_R8_R8] = { 1, 0xaf, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_REX_W },
+        [ENCODE_R2_M2] = { 1, 0xaf, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_WORD_OPERANDS },
+        [ENCODE_R4_M4] = { 1, 0xaf, ENCODING_FLAGS_SECONDARY },
+        [ENCODE_R8_M8] = { 1, 0xaf, ENCODING_FLAGS_SECONDARY | ENCODING_FLAGS_REX_W },
 
         // We don't have the ENCODE_R*_R*_I* and ENCODE_R*_M*_I* variants of imul at the moment
     },
     [INST_IDIV] = {
-        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
-        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7 },
-        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
-        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7 },
-        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
-        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 7 },
-        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 7 },
-        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 7 },
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 7 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 7 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 7 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 7 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 7 },
     },
     [INST_NEG] = {
-        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
-        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 3 },
-        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
-        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 3 },
-        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
-        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 3 },
-        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 3 },
-        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 3 },
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 3 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 3 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 3 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 3 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 3 },
     },
     [INST_NOT] = {
-        [ENCODE_R1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
-        [ENCODE_R2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 2 },
-        [ENCODE_R4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
-        [ENCODE_R8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 2 },
-        [ENCODE_M1] = { 1, 0xf6, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
-        [ENCODE_M2] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_WORD_OPERANDS, .modrm_flag = 2 },
-        [ENCODE_M4] = { 1, 0xf7, ENCODING_MODRM_FLAG,                          .modrm_flag = 2 },
-        [ENCODE_M8] = { 1, 0xf7, ENCODING_MODRM_FLAG | ENCODING_REX_W,         .modrm_flag = 2 },
+        [ENCODE_R1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_R2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 2 },
+        [ENCODE_R4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_R8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 2 },
+        [ENCODE_M1] = { 1, 0xf6, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_M2] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_WORD_OPERANDS, .modrm_flag = 2 },
+        [ENCODE_M4] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG,                          .modrm_flag = 2 },
+        [ENCODE_M8] = { 1, 0xf7, ENCODING_FLAGS_MODRM_FLAG | ENCODING_FLAGS_REX_W,         .modrm_flag = 2 },
     },
 };
 
@@ -1584,7 +1646,7 @@ Encoded_Inst encode_inst(Inst *inst) {
                 case 2: size_offset = 1; break;
                 case 4: size_offset = 2; break;
                 case 8: size_offset = 3; break;
-                default: assert(false);
+                default: assert(inst->places[i].kind == PLACE_NONE);
             }
 
             switch (inst->places[i].kind) {
@@ -1595,7 +1657,7 @@ Encoded_Inst encode_inst(Inst *inst) {
                     default: assert(false);
                 } break;
                 case PLACE_MEM:  place_modes[i] = M1 + size_offset; break;
-                default: assert(inst->places[i].kind == PLACE_NONE);
+                default: assert(false);
             }
         }
 
@@ -1688,6 +1750,7 @@ Encoded_Inst encode_inst(Inst *inst) {
         REX_B    = 0x01, // Most significant, fourth, bit of modrm/rm, SIB base or opcode reg
 
         WORD_OPERAND_PREFIX = 0x66, // selects 16-bit operands over 32-bit operands
+        REP_PREFIX = 0xf3,
         SECONDARY_OPCODE_MAP_PREFIX = 0x0f,
 
         // Keep in mind that when modrm/rm is RSP or RBP, R12 or R13 using MODRM_RM_POINTER_* has special semantics
@@ -1712,7 +1775,7 @@ Encoded_Inst encode_inst(Inst *inst) {
     u32 extra_imm = 0;
 
     {
-        if (encoding.flags & ENCODING_REX_W) {
+        if (encoding.flags & ENCODING_FLAGS_REX_W) {
             rex |= REX_BASE | REX_W;
         }
 
@@ -1739,8 +1802,8 @@ Encoded_Inst encode_inst(Inst *inst) {
             default: assert(false);
         }
 
-        if (encoding.flags & ENCODING_MODRM_FLAG) {
-            assert(!(encoding.flags & ENCODING_REG_IN_OPCODE));
+        if (encoding.flags & ENCODING_FLAGS_MODRM_FLAG) {
+            assert(!(encoding.flags & ENCODING_FLAGS_REG_IN_OPCODE));
             assert(inst->places[0].kind != PLACE_NONE && inst->places[1].kind == PLACE_NONE);
             assert((encoding.modrm_flag & 7) == encoding.modrm_flag);
             modrm |= (encoding.modrm_flag & 7) << 3;
@@ -1750,7 +1813,7 @@ Encoded_Inst encode_inst(Inst *inst) {
             use_modrm = true;
         }
 
-        if (encoding.flags & ENCODING_REG_IN_OPCODE) {
+        if (encoding.flags & ENCODING_FLAGS_REG_IN_OPCODE) {
             assert(inst->places[0].kind == PLACE_REG && inst->places[1].kind == PLACE_NONE);
 
             encode_in_reg = ENCODE_NEITHER;
@@ -1849,7 +1912,10 @@ Encoded_Inst encode_inst(Inst *inst) {
 
     Encoded_Inst result = {0};
 
-    if (encoding.flags & ENCODING_WORD_OPERANDS) {
+    if (encoding.flags & ENCODING_FLAGS_REP_PREFIX) {
+        result.bytes[result.length++] = REP_PREFIX;
+    }
+    if (encoding.flags & ENCODING_FLAGS_WORD_OPERANDS) {
         result.bytes[result.length++] = WORD_OPERAND_PREFIX;
     }
 
@@ -1858,7 +1924,7 @@ Encoded_Inst encode_inst(Inst *inst) {
         result.bytes[result.length++] = rex;
     }
 
-    if (encoding.flags & ENCODING_SECONDARY) {
+    if (encoding.flags & ENCODING_FLAGS_SECONDARY) {
         result.bytes[result.length++] = SECONDARY_OPCODE_MAP_PREFIX;
     }
 
@@ -2043,11 +2109,7 @@ void print_place(Place *place) {
     if (place->kind == PLACE_NONE) {
         
     } else if (place->kind == PLACE_KEY) {
-        if (place->key->flags & KEY_FLAG_ONLY_SET_ONCE) {
-            printf("$$%u", place->key->index);
-        } else {
-            printf("$%u", place->key->index);
-        }
+        printf("$%u", place->key->index);
     } else if (place->kind == PLACE_REG) {
         print_reg(place->reg, place->size);
     } else if (place->kind == PLACE_MEM) {
@@ -2096,8 +2158,6 @@ void print_inst(Inst *inst) {
     if (inst->imm.size == 0) {
         // Do nothing
         printf("\n");
-    } else if (inst->imm.size == IMM_SIZE_USE_POINTER) {
-        printf("{ %u bytes }\n", (u64) inst->imm.pointer->size);
     } else if (inst->imm.size == 1 || inst->imm.size == 2 || inst->imm.size == 4 || inst->imm.size == 8) {
         printf(inst->places[0].kind == PLACE_NONE? " " : ", ");
         u64 size_mask = 0xffffffffffffffff >> ((8-inst->imm.size)*8);
@@ -2276,16 +2336,20 @@ void encoding_test(Code_Builder *code_builder) {
 
     binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
     binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(a));
+
+    add_label(code_builder, "no_reps_no_gains");
+    Key *big = new_key(code_builder, KEY_COMPOUND, 256*sizeof(i32), sizeof(i32));
+    clear(code_builder, key_direct(big));
 }
 
 void address_test(Code_Builder *code_builder) {
     Key *my_value = new_i32(code_builder, 196);
-    Key *pointer = address_of_key(code_builder, my_value);
-    Key *pointer_to_pointer = address_of_key(code_builder, pointer);
-    Key *pointer_to_pointer_to_pointer = address_of_key(code_builder, pointer_to_pointer);
+    Key *pointer = address_of(code_builder, my_value);
+    Key *pointer_to_pointer = address_of(code_builder, pointer);
+    Key *pointer_to_pointer_to_pointer = address_of(code_builder, pointer_to_pointer);
 
     Key *not_seven_yet = new_i32(code_builder, 8);
-    Key *pointer_to_seven = address_of_key(code_builder, not_seven_yet);
+    Key *pointer_to_seven = address_of(code_builder, not_seven_yet);
 
     binary(code_builder, KEY_INTEGER, BINARY_MOV, key_deref(pointer_to_seven, 4), key_direct(new_i32(code_builder, 7)));
 
@@ -2305,6 +2369,20 @@ void address_test(Code_Builder *code_builder) {
     set_return(code_builder, KEY_INTEGER, key_direct(copy));
 }
 
+void compound_test(Code_Builder *code_builder) {
+    u32 length = 2;
+    Key *array = new_key(code_builder, KEY_COMPOUND, 2 * sizeof(i32), sizeof(i32));
+    clear(code_builder, key_direct(array));
+
+    Key *array_pointer = address_of(code_builder, array);
+    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(array_pointer), key_direct(new_i64(code_builder, 1 * sizeof(i32))));
+
+    Key *second_element = new_key(code_builder, KEY_INTEGER, sizeof(i32), sizeof(i32));
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(second_element), key_deref(array_pointer, sizeof(i32)));
+
+    set_return(code_builder, KEY_INTEGER, key_direct(second_element));
+}
+
 void main() {
     Arena arena = {0}, stack = {0};
     Code_Builder *code_builder = code_builder_new(&arena, &stack);
@@ -2314,8 +2392,9 @@ void main() {
     //nasty_mul_test(code_builder);     // Returns 148
     //nasty_imul_test(code_builder);    // Returns 148
     //nasty_div_test(code_builder);     // Returns 3
-    //encoding_test(code_builder);      // Returns -2
-    address_test(code_builder);       // Returns 28
+    encoding_test(code_builder);      // Returns -2
+    //address_test(code_builder);       // Returns 28
+    //compound_test(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
