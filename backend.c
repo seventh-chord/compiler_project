@@ -1402,6 +1402,11 @@ typedef struct Encoded_Inst {
     u8 bytes[15]; // NB x64 instructions can be at most 15 bytes long
 } Encoded_Inst;
 
+typedef struct Encoded_Insts {
+    u8 *bytes;
+    u64 length;
+} Encoded_Insts;
+
 void print_encoded_inst(Encoded_Inst encoded);
 
 
@@ -2063,7 +2068,7 @@ Encoded_Inst encode_inst(Inst *inst) {
     return result;
 }
 
-void encode_insts(Code_Builder *builder) {
+Encoded_Insts encode_insts(Code_Builder *builder) {
     u64 bytecode_length = 0;
 
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
@@ -2110,51 +2115,22 @@ void encode_insts(Code_Builder *builder) {
         }
     }
 
-    printf("Encoded %u bytes of machinecode\n", bytecode_length);
+    Encoded_Insts result = {0};
+    result.bytes = arena_alloc(builder->arena, bytecode_length);
+    result.length = bytecode_length;
 
-    // Print out the bytes for the instructions
-    #if 0
+    u64 cursor = 0;
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
             Encoded_Inst encoded = encode_inst(&block->insts[i]);
-            print_encoded_inst(encoded);
+            mem_copy(encoded.bytes, result.bytes + cursor, encoded.length);
+            cursor += encoded.length;
         }
     }
-    #endif
 
-    // Run the generated instructions in memory
-    // TODO Make this not use winapi if we actually want to keep it around
-    #if 1
-    if (bytecode_length > 0) {
-        u8 *executable_memory = VirtualAlloc(null, bytecode_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (executable_memory == null) {
-            panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
-        }
+    assert(cursor == result.length);
 
-        u64 write_cursor = 0;
-        for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
-            for (u16 i = 0; i < block->length; i += 1) {
-                Encoded_Inst encoded = encode_inst(&block->insts[i]);
-                assert(write_cursor + encoded.length <= bytecode_length);
-
-                mem_copy(encoded.bytes, executable_memory + write_cursor, encoded.length);
-                write_cursor += (u64) encoded.length;
-            }
-        }
-        assert(write_cursor == bytecode_length);
-
-        u32 old_permissions;
-        if (!VirtualProtect(executable_memory, bytecode_length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
-            printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
-        }
-
-        i32 (*generated_function)() = (void*) executable_memory;
-        i32 result = (*generated_function)();
-        printf("Generated function returned %i\n", (i64) result);
-
-        VirtualFree(executable_memory, 0, MEM_RELEASE);
-    }
-    #endif
+    return result;
 }
 
 u8 *REG_NAMES[REG_COUNT][4] = {
@@ -2316,7 +2292,9 @@ void dump_instructions(Code_Builder *builder) {
 
 #ifdef TESTING_BACKEND
 
-void fibonachi(Code_Builder *code_builder, i32 iterations) {
+void fibonachi(Code_Builder *code_builder) {
+    i32 iterations = 10;
+
     Key *m = new_i32(code_builder, 1);
     Key *n = new_i32(code_builder, 1);
 
@@ -2335,7 +2313,9 @@ void fibonachi(Code_Builder *code_builder, i32 iterations) {
     link_jump(code_builder, loop_end, loop_start);
 }
 
-void not_fibonachi(Code_Builder *code_builder, i32 iterations) {
+void not_fibonachi(Code_Builder *code_builder) {
+    i32 iterations = 3;
+
     Key *a = new_i32(code_builder, 2);
     Key *b = new_i32(code_builder, 2);
 
@@ -2496,18 +2476,14 @@ void compound_test(Code_Builder *code_builder) {
     set_return(code_builder, KEY_INTEGER, key_direct(result));
 }
 
-void main() {
+
+void run_test(u8 *test_name, void (*test_generator)(Code_Builder*), i32 expected) {
     Arena arena = {0}, stack = {0};
     Code_Builder *code_builder = code_builder_new(&arena, &stack);
 
-    //fibonachi(code_builder, 10);      // Returns 55
-    //not_fibonachi(code_builder, 3);   // Returns 8192
-    //nasty_mul_test(code_builder);     // Returns 148
-    //nasty_imul_test(code_builder);    // Returns 148
-    //nasty_div_test(code_builder);     // Returns 3
-    //encoding_test(code_builder);      // Returns -2
-    //address_test(code_builder);       // Returns 28
-    compound_test(code_builder);
+    printf("\n\n--- Running test: %s\n");
+
+    (*test_generator)(code_builder);
 
     printf("\n; input\n");
     dump_instructions(code_builder);
@@ -2517,7 +2493,45 @@ void main() {
     printf("\n; output\n");
     dump_instructions(code_builder);
 
-    encode_insts(code_builder);
+    printf("\n");
+    Encoded_Insts encoded = encode_insts(code_builder);
+
+    printf("Encoded %u bytes of machinecode\n", encoded.length);
+    assert(encoded.length > 0);
+
+    u8 *executable_memory = VirtualAlloc(null, encoded.length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (executable_memory == null) {
+        panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
+    }
+
+    mem_copy(encoded.bytes, executable_memory, encoded.length);
+
+    u32 old_permissions;
+    if (!VirtualProtect(executable_memory, encoded.length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
+        printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
+    }
+
+    i32 (*generated_function)() = (void*) executable_memory;
+    i32 result = (*generated_function)();
+    printf("Generated function returned %i, expected %i\n", (i64) result, (i64) expected);
+    assert(result == expected);
+
+    VirtualFree(executable_memory, 0, MEM_RELEASE);
+
+    arena_free(&arena);
+    arena_free(&stack);
+}
+
+
+void main() {
+    run_test("fibonachi", &fibonachi, 55);
+    run_test("not_fibonachi", &not_fibonachi, 8192);
+    run_test("nasty_mul_test", &nasty_mul_test, 148);
+    run_test("nasty_imul_test", &nasty_imul_test, 148);
+    run_test("nasty_div_test", &nasty_div_test, 3);
+    run_test("encoding_test", &encoding_test, -2);
+    run_test("address_test", &address_test, 28);
+    run_test("compound_test", &compound_test, 43);
 }
 
 #endif // TESTING_BACKEND

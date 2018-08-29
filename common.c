@@ -792,18 +792,28 @@ struct Arena_Stack_Frame {
 };
 
 struct Arena {
-    Arena_Page* current_page;
+    Arena_Page *current_page;
     Arena_Stack_Frame frame;
 };
 
 struct Arena_Page {
-    Arena_Page* previous;
-    Arena_Page* next;
+    Arena_Page *previous;
+    Arena_Page *next;
     u64 used;
     u8 data[0];
 };
 
 #define arena_new(a, T)    (arena_insert_with_size((a), &((T) {0}), sizeof(T)))
+
+// NB frees the entire arena
+void arena_free(Arena *arena) {
+    Arena_Page *cursor = arena->current_page;
+    while (cursor != null) {
+        Arena_Page *previous = cursor->previous;
+        sc_free(cursor);
+        cursor = previous;
+    }
+}
 
 void arena_make_space(Arena* arena, u64 size) {
     if (arena->current_page == null) {
@@ -816,7 +826,7 @@ void arena_make_space(Arena* arena, u64 size) {
 
     u64 free_space = ARENA_PAGE_SIZE - arena->current_page->used;
 
-    u8* start = ((u8*) arena->current_page) + sizeof(Arena_Page) + arena->current_page->used;
+    u8 *start = ((u8*) arena->current_page) + sizeof(Arena_Page) + arena->current_page->used;
 
     u64 align_offset = ((u64) start) % ARENA_ALIGN;
     if (align_offset != 0) {
