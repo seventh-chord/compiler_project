@@ -2481,7 +2481,7 @@ void run_test(u8 *test_name, void (*test_generator)(Code_Builder*), i32 expected
     Arena arena = {0}, stack = {0};
     Code_Builder *code_builder = code_builder_new(&arena, &stack);
 
-    printf("\n\n--- Running test: %s\n");
+    printf("\n\n--- Running test: %s\n", test_name);
 
     (*test_generator)(code_builder);
 

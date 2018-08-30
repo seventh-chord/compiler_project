@@ -7,6 +7,8 @@ Unimplemented & bugs
 Other
     a proper test-suite for the compiler
     some static access errors still are obtuse
+    'GetCommandArgsA' and 'GetEnvironmentVariableA': Use widechar versions
+    use various registry calls etc. to get the location of windows libraries
 
 Language features
     c-style for loops, for e.g. link list iteration

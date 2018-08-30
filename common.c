@@ -48,6 +48,7 @@ typedef enum IO_Result {
     IO_OK = 0,
 
     IO_ERROR,
+    IO_INVALID_FILE_PATH_ENCODING,
     IO_NOT_FOUND,
     IO_ALREADY_OPEN,
 } IO_Result;
@@ -330,24 +331,43 @@ IO_Result delete_file(u8 *file_name);
             u32 codepoint;
 
             if ((byte & 0xe0) == 0xc0) {
-                if (i + 1 >= input_length) return null;
+                if (i + 1 >= input_length) return U64_MAX;
+
                 u8 second = input[i + 1];
                 i += 1;
 
+                if ((second & 0xc09) != 0x80) return U64_MAX;
+
                 codepoint = (((u32) byte & 0x1f) << 6) | ((u32) second & 0x3f);
             } else if ((byte & 0xf0) == 0xe0) {
-                if (i + 2 >= input_length) return null;
+                if (i + 2 >= input_length) return U64_MAX;
+
                 u8 second = input[i + 1];
                 u8 third  = input[i + 2];
                 i += 2;
 
+                if (
+                    ((second & 0xc09) != 0x80) &&
+                    ((third  & 0xc09) != 0x80)
+                ) {
+                    return U64_MAX;
+                }
+
                 codepoint = ((((u32) byte) & 0x0f) << 12) | ((((u32) second) & 0x3f) << 6) | (((u32) third) & 0x3f);
             } else if ((byte & 0xf8) == 0xf0) {
-                if (i + 3 >= input_length) return null;
+                if (i + 3 >= input_length) return U64_MAX;
                 u8 second = input[i + 1];
                 u8 third  = input[i + 2];
                 u8 fourth = input[i + 3];
                 i += 3;
+
+                if (
+                    ((second & 0xc09) != 0x80) &&
+                    ((third  & 0xc09) != 0x80) &&
+                    ((fourth & 0xc09) != 0x80)
+                ) {
+                    return U64_MAX;
+                }
 
                 codepoint = ((((u32) byte) & 0x07) << 18) | ((((u32) second) & 0x3f) << 12) | ((((u32) third) & 0x3f) << 6) | (((u32) fourth) & 0x3f);
             } else {
@@ -365,7 +385,11 @@ IO_Result delete_file(u8 *file_name);
             }
         }
 
-        return actual_length;
+        if (actual_length <= output_length) {
+            return actual_length;
+        } else {
+            return U64_MAX;
+        }
     }
 
     u16 *utf8_to_wide_cstr(u8 *input) {
@@ -374,8 +398,12 @@ IO_Result delete_file(u8 *file_name);
 
         u16 *result = (u16*) sc_alloc((input_length + 1) * sizeof(u16));
         u64 result_length = utf8_to_wide(input, input_length, result, input_length + 1);
-        result[result_length] = 0;
-        return result;
+        if (result_length == U64_MAX) {
+            return null;
+        } else {
+            result[result_length] = 0;
+            return result;
+        }
     }
 
     void print(u8 *buffer, u32 buffer_length) {
@@ -387,17 +415,23 @@ IO_Result delete_file(u8 *file_name);
             wide_buffer = sc_alloc(sizeof(u16) * wide_buffer_capacity);
         }
 
-        u64 wide_length = utf8_to_wide(buffer, buffer_length, wide_buffer, wide_buffer_capacity);
+        u16 *wide_result = wide_buffer;
+        u64 wide_length = utf8_to_wide(buffer, buffer_length, wide_result, wide_buffer_capacity);
+
+        if (wide_length == U64_MAX) {
+            wide_result = u"<invalid utf8>";
+            wide_length = 14;
+        }
 
         u32 written = 0;
-        i32 success = WriteConsoleW(stdout, wide_buffer, (u32) wide_length, &written, null);
+        i32 success = WriteConsoleW(stdout, wide_result, (u32) wide_length, &written, null);
         if (!success || written != wide_length) {
             u32 error_code = GetLastError();
             ExitProcess(error_code);
         }
 
         #ifdef DEBUG
-        OutputDebugStringW(wide_buffer);
+        OutputDebugStringW(wide_result);
         #endif
     }
 
@@ -415,6 +449,10 @@ IO_Result delete_file(u8 *file_name);
 
     IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length) {
         u16 *wide_name = utf8_to_wide_cstr(file_name);
+        if (wide_name == null) {
+            return IO_INVALID_FILE_PATH_ENCODING;
+        }
+
         Handle file = CreateFileW(wide_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
         sc_free(wide_name);
 
@@ -458,6 +496,10 @@ IO_Result delete_file(u8 *file_name);
 
     IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length) {
         u16 *wide_name = utf8_to_wide_cstr(file_name);
+        if (wide_name == null) {
+            return IO_INVALID_FILE_PATH_ENCODING;
+        }
+
         Handle file = CreateFileW(wide_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
         sc_free(wide_name);
 
@@ -1324,11 +1366,12 @@ u8 *path_join(Arena *arena, u8 *a, u8 *b) {
 
 u8 *io_result_message(IO_Result result) {
     switch (result) {
-        case IO_OK:             return "Ok";
-        case IO_ERROR:          return "IO Error";
-        case IO_NOT_FOUND:      return "File not found";
-        case IO_ALREADY_OPEN:   return "File is open in another program";
-        default: assert(false); return null;
+        case IO_OK:                         return "Ok";
+        case IO_INVALID_FILE_PATH_ENCODING: return "Invalid file path encoding";
+        case IO_ERROR:                      return "IO Error";
+        case IO_NOT_FOUND:                  return "File not found";
+        case IO_ALREADY_OPEN:               return "File is open in another program";
+        default: assert(false);             return null;
     }
 }
 
