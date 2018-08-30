@@ -114,18 +114,18 @@ IO_Result delete_file(u8 *file_name);
     #define STD_OUTPUT_HANDLE ((u32)-11)
     #define STD_ERROR_HANDLE  ((u32)-12)
 
-    WINAPI_PRE u32 WINAPI_POST GetTempPathA(u32 buffer_length, u8* buffer);
+    WINAPI_PRE u32 WINAPI_POST GetTempPathW(u32 buffer_length, u16 *buffer);
 
-    WINAPI_PRE Handle WINAPI_POST CreateFileA(
-        u8* file_name,              // Zero-terminated string
+    WINAPI_PRE Handle WINAPI_POST CreateFileW(
+        u16 *file_name,             // Zero-terminated string
         u32 access,                 // GENERIC_READ/WRITE/EXECUTE
         u32 share_mode,             // 0
-        void* security_attributes,  // We don't use this, so it can be null
+        void *security_attributes,  // We don't use this, so it can be null
         u32 creation_disposition,   // OPEN_EXISTING, etc
         u32 flags_and_attributes,   // FILE_ATTRIBUTE_NORMAL
         Handle template_file        // null
     );
-    WINAPI_PRE bool WINAPI_POST DeleteFileA(u8 *file_name);
+    WINAPI_PRE bool WINAPI_POST DeleteFileW(u16 *file_name);
 
     WINAPI_PRE bool WINAPI_POST CloseHandle(Handle handle);
 
@@ -168,20 +168,28 @@ IO_Result delete_file(u8 *file_name);
     #define INVALID_HANDLE_VALUE  ((Handle)-1)
     #define FILE_ATTRIBUTE_NORMAL 0x80
 
+    WINAPI_PRE bool WINAPI_POST WriteConsoleW(
+        Handle console,
+        u16 *buffer,
+        u32 chars_to_write,
+        u32 *chars_written,
+        void *reserved
+    );
+
     typedef struct Startup_Info Startup_Info;
     typedef struct Process_Info Process_Info;
 
-    WINAPI_PRE bool WINAPI_POST CreateProcessA(
-      u8* application_name,
-      u8* arguments,
-      void* process_attributes,
-      void* thread_attributes,
+    WINAPI_PRE bool WINAPI_POST CreateProcessW(
+      u16 *application_name,
+      u16 *arguments,
+      void *process_attributes,
+      void *thread_attributes,
       bool inherit_handles,
       u32 creation_flags,
-      void* environment,
-      u8* current_directory,
-      Startup_Info* startup_info,
-      Process_Info* process_info
+      void *environment,
+      u16 *current_directory,
+      Startup_Info *startup_info,
+      Process_Info *process_info
     );
 
     struct Startup_Info {
@@ -214,11 +222,11 @@ IO_Result delete_file(u8 *file_name);
     // NB these functions in reality take a LARGE_INTEGER*, but LARGE_INTEGER is a union of a single
     // 64 bit int and two 32 bit ints, to make the function work on windows. That means we can just use
     // a single 64 bit int.
-    WINAPI_PRE bool WINAPI_POST QueryPerformanceCounter(i64* counter);
-    WINAPI_PRE bool WINAPI_POST QueryPerformanceFrequency(i64* frequency);
+    WINAPI_PRE bool WINAPI_POST QueryPerformanceCounter(i64 *counter);
+    WINAPI_PRE bool WINAPI_POST QueryPerformanceFrequency(i64 *frequency);
 
     WINAPI_PRE void WINAPI_POST DebugBreak();
-    WINAPI_PRE void WINAPI_POST OutputDebugStringA(u8* string);
+    WINAPI_PRE void WINAPI_POST OutputDebugStringW(u16 *string);
 
 
     typedef struct System_Info {
@@ -249,8 +257,27 @@ IO_Result delete_file(u8 *file_name);
 
     WINAPI_PRE void WINAPI_POST GetSystemTimeAsFileTime(File_Time *time);
 
-    WINAPI_PRE u8* WINAPI_POST GetCommandLineA(void);
+    WINAPI_PRE u8* WINAPI_POST GetCommandLineA();
     WINAPI_PRE u32 WINAPI_POST GetEnvironmentVariableA(u8 *name, u8 *buffer, u32 size);
+
+    typedef struct Win32_Find_Data {
+        u32 file_attributes;
+        File_Time creation_time;
+        File_Time last_access_time;
+        File_Time last_write_time;
+        u32 file_size_high;
+        u32 file_size_low;
+        u32 reserved0;
+        u32 reserved1;
+        u8 file_name[0x104];
+        u8 alternate_file_name[14];
+        u32 file_type;
+        u32 creator_type;
+        u16 finder_flags;
+    } Win32_Find_Data;
+    WINAPI_PRE Handle WINAPI_POST FindFirstFileW(u16 *directory, Win32_Find_Data *find_data);
+    WINAPI_PRE bool WINAPI_POST FindNextFileW(Handle file, Win32_Find_Data *find_data);
+    WINAPI_PRE bool WINAPI_POST FindClose(Handle file);
 
     Handle stdout;
     Handle process_heap;
@@ -295,17 +322,83 @@ IO_Result delete_file(u8 *file_name);
         return HeapFree(process_heap, 0, mem);
     }
 
+    u64 utf8_to_wide(u8 *input, u64 input_length, u16 *output, u64 output_length) {
+        u64 actual_length = 0;
+
+        for (u64 i = 0; i < input_length; i += 1)  {
+            u8 byte = input[i];
+            u32 codepoint;
+
+            if ((byte & 0xe0) == 0xc0) {
+                if (i + 1 >= input_length) return null;
+                u8 second = input[i + 1];
+                i += 1;
+
+                codepoint = (((u32) byte & 0x1f) << 6) | ((u32) second & 0x3f);
+            } else if ((byte & 0xf0) == 0xe0) {
+                if (i + 2 >= input_length) return null;
+                u8 second = input[i + 1];
+                u8 third  = input[i + 2];
+                i += 2;
+
+                codepoint = ((((u32) byte) & 0x0f) << 12) | ((((u32) second) & 0x3f) << 6) | (((u32) third) & 0x3f);
+            } else if ((byte & 0xf8) == 0xf0) {
+                if (i + 3 >= input_length) return null;
+                u8 second = input[i + 1];
+                u8 third  = input[i + 2];
+                u8 fourth = input[i + 3];
+                i += 3;
+
+                codepoint = ((((u32) byte) & 0x07) << 18) | ((((u32) second) & 0x3f) << 12) | ((((u32) third) & 0x3f) << 6) | (((u32) fourth) & 0x3f);
+            } else {
+                codepoint = (u16) (byte & 0x7f);
+            }
+
+            if ((codepoint & 0xffff) == codepoint) {
+                output[actual_length++] = (u16) codepoint;
+            } else {
+                codepoint -= 0x10000;
+                u16 high = 0xd800 | ((codepoint >> 10) & 0x03ff);
+                u16 low  = 0xdc00 | (codepoint & 0x03ff);
+                output[actual_length++] = (u16) high;
+                output[actual_length++] = (u16) low;
+            }
+        }
+
+        return actual_length;
+    }
+
+    u16 *utf8_to_wide_cstr(u8 *input) {
+        u64 input_length = 0;
+        for (u8 *p = input; *p != 0; p += 1) input_length += 1;
+
+        u16 *result = (u16*) sc_alloc((input_length + 1) * sizeof(u16));
+        u64 result_length = utf8_to_wide(input, input_length, result, input_length + 1);
+        result[result_length] = 0;
+        return result;
+    }
+
     void print(u8 *buffer, u32 buffer_length) {
+        static u16 *wide_buffer = null;
+        static u32 wide_buffer_capacity = 0;
+        if (buffer_length > wide_buffer_capacity) {
+            if (wide_buffer != null) sc_free(wide_buffer);
+            wide_buffer_capacity = max(max(wide_buffer_capacity*2, buffer_length+1), 128);
+            wide_buffer = sc_alloc(sizeof(u16) * wide_buffer_capacity);
+        }
+
+        u64 wide_length = utf8_to_wide(buffer, buffer_length, wide_buffer, wide_buffer_capacity);
+
         u32 written = 0;
-        i32 success = WriteFile(stdout, buffer, buffer_length, &written, null);
-        if (!success || written != buffer_length) {
+        i32 success = WriteConsoleW(stdout, wide_buffer, (u32) wide_length, &written, null);
+        if (!success || written != wide_length) {
             u32 error_code = GetLastError();
             ExitProcess(error_code);
         }
-    }
 
-    void print_debug(u8 *buffer) {
-        OutputDebugStringA(buffer);
+        #ifdef DEBUG
+        OutputDebugStringW(wide_buffer);
+        #endif
     }
 
     IO_Result get_temp_path(u8 *path_into, u32 *length) {
@@ -321,7 +414,10 @@ IO_Result delete_file(u8 *file_name);
     }
 
     IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length) {
-        Handle file = CreateFileA(file_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+        u16 *wide_name = utf8_to_wide_cstr(file_name);
+        Handle file = CreateFileW(wide_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+        sc_free(wide_name);
+
         if (file == INVALID_HANDLE_VALUE) {
             u32 error_code = GetLastError();
             switch (error_code) {
@@ -361,7 +457,10 @@ IO_Result delete_file(u8 *file_name);
     }
 
     IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length) {
-        Handle file = CreateFileA(file_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
+        u16 *wide_name = utf8_to_wide_cstr(file_name);
+        Handle file = CreateFileW(wide_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
+        sc_free(wide_name);
+
         if (file == INVALID_HANDLE_VALUE) {
             u32 error_code = GetLastError();
             switch (error_code) {
@@ -1008,14 +1107,7 @@ void printf_integer(u64 value, u8 base);
 u8 char_for_digit(u8 c);
 
 void printf_flush() {
-    #ifdef DEBUG
-    buf_push(printf_buf, '\0');
-    print_debug(printf_buf);
-    buf_pop(printf_buf);
-    #endif
-
     print(printf_buf, buf_length(printf_buf));
-
     buf_clear(printf_buf);
 }
 
