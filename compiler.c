@@ -13320,9 +13320,19 @@ bool parse_library(Context *context, Library_Import* import) {
     u8 *file;
     u32 file_length;
 
-    IO_Result read_result;
+    typedef struct Checked_Path Checked_Path;
+    struct Checked_Path {
+        u8 *path;
+        Checked_Path *next;
+    };
+    Checked_Path *checked_first = null, *checked_head = null;
 
+    IO_Result read_result;
     read_result = read_entire_file(path, &file, &file_length);
+
+    Checked_Path *checked_path = arena_new(&context->stack, Checked_Path);
+    checked_path->path = path;
+    checked_head = checked_first == null? (checked_first = checked_path) : (checked_head->next = checked_path);
 
     if (read_result == IO_NOT_FOUND) {
         if (context->lib_paths == null) {
@@ -13334,11 +13344,25 @@ bool parse_library(Context *context, Library_Import* import) {
             u8 *system_lib_folder = context->lib_paths[i];
             path = path_join(&context->stack, system_lib_folder, raw_lib_name);
             read_result = read_entire_file(path, &file, &file_length);
+
+            Checked_Path *checked_path = arena_new(&context->stack, Checked_Path);
+            checked_path->path = path;
+            checked_head = checked_first == null? (checked_first = checked_path) : (checked_head->next = checked_path);
         }
     }
 
     if (read_result != IO_OK) {
-        printf("Couldn't open \"%s\": %s\n", path, io_result_message(read_result));
+        if (read_result == IO_NOT_FOUND) {
+            printf("Couldn't find a library named \"%s\". Tried the following paths:\n", raw_lib_name);
+
+            assert(checked_first != null);
+            while (checked_first != null) {
+                printf("    %s\n", checked_first->path);
+                checked_first = checked_first->next;
+            }
+        } else {
+            printf("Couldn't open \"%s\": %s\n", path, io_result_message(read_result));
+        }
         return false;
     }
 
