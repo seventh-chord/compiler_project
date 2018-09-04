@@ -9,6 +9,12 @@ Other
     some static access errors still are obtuse
     'GetCommandArgsA' and 'GetEnvironmentVariableA': Use widechar versions
     use various registry calls etc. to get the location of windows libraries
+    when we don't find a library we only print the last path we looked for it in
+            This is confusing, as it will be a windows library path, even when we expect the library to be
+            a local file (i.e. relative to the source code location). The compiler can of course not know where
+            whe expect it to find libraries (though on a side note, this probably is something we want to specify,
+            e.g. by saying "windows:kernel32").
+            The proper solution is to print all paths where we searched for libraries.
 
 Language features
     c-style for loops, for e.g. link list iteration
