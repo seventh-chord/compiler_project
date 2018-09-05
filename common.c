@@ -1,5 +1,5 @@
-#ifndef COMMON_C
-#define COMMON_C
+#ifndef SC_COMMON_C
+#define SC_COMMON_C
 
 #define null 0
 #define true 1
@@ -417,6 +417,7 @@ IO_Result delete_file(u8 *file_name);
 
         u16 *wide_result = wide_buffer;
         u64 wide_length = utf8_to_wide(buffer, buffer_length, wide_result, wide_buffer_capacity);
+        wide_result[wide_length] = 0; // For 'OutputDebugStringW'
 
         if (wide_length == U64_MAX) {
             wide_result = u"<invalid utf8>";
@@ -1401,4 +1402,4 @@ void *memcpy(void *dest, void *src, u64 count) {
 }
 */
 
-#endif // COMMON_C ...
+#endif // SC_COMMON_C

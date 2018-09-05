@@ -1,4 +1,7 @@
 
+// Design notes:
+// Combine new_<type> and key_direct, we (almost?) only use them together, so we can simplify. Internally we still want to keep an actual key though (?)
+
 #include "common.c"
 
 typedef enum Reg {
@@ -131,7 +134,7 @@ typedef enum Inst_Kind {
     INST_REP_MOVSD,
     INST_REP_MOVSQ,
 
-    INST_ZERO_AH,
+    INST_XOR_AH_AH,
     
     INST_MOV,
     INST_LEA,
@@ -209,7 +212,7 @@ u8 *INST_NAMES[INST_COUNT] = {
     [INST_REP_MOVSD] = "rep movsd",
     [INST_REP_MOVSQ] = "rep movsq",
 
-    [INST_ZERO_AH] = "xor ah, ah",
+    [INST_XOR_AH_AH] = "xor ah, ah",
 
     [INST_JE]   = "je",
     [INST_JNE]  = "jne",
@@ -504,8 +507,14 @@ void code_builder_insert_insts(
 Key *new_key(Code_Builder *builder, int kind, u32 size, u32 alignment) {
     if (kind == KEY_INTEGER) {
         assert(size == 1 || size == 2 || size == 4 || size == 8);
+        assert(alignment == size);
     } else if (kind == KEY_FLOAT) {
         assert(size == 4 || size == 8);
+        assert(alignment == size);
+    } else if (kind == KEY_COMPOUND) {
+        assert(alignment == 1 || alignment == 2 || alignment == 4 || alignment == 8);
+    } else {
+        assert(false);
     }
 
     Key *key = arena_new(builder->arena, Key);
@@ -518,6 +527,7 @@ Key *new_key(Code_Builder *builder, int kind, u32 size, u32 alignment) {
 }
 
 Place key_deref(Key *key, u32 size) {
+    assert(key->kind == KEY_INTEGER && key->size == POINTER_SIZE);
     return (Place) { PLACE_KEY_ADDRESS, size, .key = key };
 }
 
@@ -1037,7 +1047,7 @@ void end_function(Code_Builder *builder) {
                     
                     if (inst->kind == INST_DIV) {
                         if (inst_size == 1) {
-                            prefix_array[prefix_index++] = (Inst) { INST_ZERO_AH };
+                            prefix_array[prefix_index++] = (Inst) { INST_XOR_AH_AH };
                         } else {
                             Place d_place = { PLACE_REG, inst_size, .reg = RDX };
                             prefix_array[prefix_index++] = (Inst) { INST_XOR, { d_place, d_place } };
@@ -1410,15 +1420,7 @@ typedef struct Encoded_Insts {
 void print_encoded_inst(Encoded_Inst encoded);
 
 
-enum {
-    // These are the absolute maxima for x64. Min length is for a jump to an immediate 8-bit offset,
-    // max length is for an indirect jump to a modrm+sib+32-bit offset memory address, which requires
-    // a rex prefix to encode.
-    ENCODING_JMP_MAX_LENGTH = 8,
-    ENCODING_JMP_MIN_LENGTH = 2,
-};
-
-const Encoded_Inst ZERO_AH_ENCODING = { 2, { 0x30, 0xe4 } };
+const Encoded_Inst XOR_AH_AH_ENCODING = { 2, { 0x30, 0xe4 } };
 
 Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_CALL] = {
@@ -1453,7 +1455,7 @@ Encoding ENCODING_TABLE[INST_COUNT][ENCODING_MODE_COUNT] = {
     [INST_REP_MOVSD] = { [ENCODE_NO_PARAMS] = { 1, 0xa5, ENCODING_FLAGS_REP_PREFIX } },
     [INST_REP_MOVSQ] = { [ENCODE_NO_PARAMS] = { 1, 0xa5, ENCODING_FLAGS_REP_PREFIX | ENCODING_FLAGS_REX_W } },
 
-    [INST_ZERO_AH] = { [ENCODE_NO_PARAMS] = { 1, 0 } }, // Just returns ZERO_AH_ENCODING
+    [INST_XOR_AH_AH] = { [ENCODE_NO_PARAMS] = { 1, 0 } }, // Just returns XOR_AH_AH_ENCODING
 
     [INST_JE]  = { [ENCODE_I1] = { 1, 0x74 }, [ENCODE_I4] = { 1, 0x84, ENCODING_FLAGS_SECONDARY } },
     [INST_JNE] = { [ENCODE_I1] = { 1, 0x75 }, [ENCODE_I4] = { 1, 0x85, ENCODING_FLAGS_SECONDARY } },
@@ -1849,8 +1851,8 @@ Encoded_Inst encode_inst(Inst *inst) {
         }
     }
 
-    if (inst->kind == INST_ZERO_AH) {
-        return ZERO_AH_ENCODING;
+    if (inst->kind == INST_XOR_AH_AH) {
+        return XOR_AH_AH_ENCODING;
     }
 
     enum {
@@ -2069,49 +2071,78 @@ Encoded_Inst encode_inst(Inst *inst) {
 }
 
 Encoded_Insts encode_insts(Code_Builder *builder) {
-    u64 bytecode_length = 0;
+    u64 bytecode_length;
 
-    for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
-        if (block->jump_to != null) block->jump_to->relative_bytecode_pos = bytecode_length;
+    // TODO also, if we need to run this loop a lot of times, become pesimistic, make jumps just use 32 bit immediates,
+    // and avoid doing multiple passes that way.
 
-        u16 l = block->jump_from == null? block->length : block->length - 1;
-        for (u16 i = 0; i < l; i += 1) {
-            Encoded_Inst encoded = encode_inst(&block->insts[i]);
-            bytecode_length += (u64) encoded.length;
-        }
+    while (true) {
+        bytecode_length = 0;
+        bool any_out_of_order_issue = false;
 
-        if (block->jump_from != null) {
-            assert(block->jump_from->jump_to != null);
-            u64 target_pos = block->jump_from->jump_to->relative_bytecode_pos;
+        for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
+            if (block->jump_to != null) {
+                u64 old_pos = block->jump_to->relative_bytecode_pos;
 
-            Inst *inst = &block->insts[block->length - 1];
+                if (old_pos != U64_MAX && old_pos != bytecode_length) {
+                    // We moved the bytecode position of this label
+                    any_out_of_order_issue = true;
+                }
 
-            if (target_pos == U64_MAX) {
-                unimplemented(); // TODO backwards jumps require us to iterate with a speculative encoded size range
-            } else {
-                i64 offset = target_pos - bytecode_length;
+                block->jump_to->relative_bytecode_pos = bytecode_length;
+            }
 
-                inst->imm.size = 1;
-                inst->imm.value = offset;
-                Encoded_Inst encoded = encode_inst(inst);
-                assert(encoded.length == ENCODING_JMP_MIN_LENGTH);
+            // NB 'jmp' and 'jcc' instructions allways represent the end of a block, so this first loop never actually iterates
+            // through any kind of jump instruction.
+            u16 l = block->jump_from == null? block->length : block->length - 1;
+            for (u16 i = 0; i < l; i += 1) {
+                Inst *inst = &block->insts[i];
+                assert(inst->kind != INST_JMP && !(inst->kind >= INST_JCC_FIRST && inst->kind <= INST_JCC_LAST));
+                Encoded_Inst encoded = encode_inst(&block->insts[i]);
+                bytecode_length += (u64) encoded.length;
+            }
 
-                if (offset - 2 >= I8_MIN && offset - 2 <= I8_MAX) {
-                    inst->imm.size = 1;
-                    inst->imm.value = offset - 2;
+            // Deal with the trailing 'jmp' or 'jcc' instruction, if there is one
+            if (block->jump_from != null) {
+                assert(block->jump_from->jump_to != null);
+                u64 target_pos = block->jump_from->jump_to->relative_bytecode_pos;
 
-                    assert(encoded.length == 2);
-                    bytecode_length += 2;
-                } else {
+                Inst *inst = &block->insts[block->length - 1];
+
+                if (target_pos == U64_MAX) {
                     inst->imm.size = 4;
                     Encoded_Inst encoded = encode_inst(inst);
-                    assert(offset - encoded.length >= I32_MIN && offset - encoded.length <= I32_MAX);
-
-                    inst->imm.value = offset - encoded.length;
-
                     bytecode_length += encoded.length;
+
+                    any_out_of_order_issue = true;
+                } else {
+                    i64 offset = target_pos - bytecode_length;
+
+                    inst->imm.size = 1;
+                    inst->imm.value = offset;
+                    Encoded_Inst encoded = encode_inst(inst);
+
+                    if (offset - 2 >= I8_MIN && offset - 2 <= I8_MAX) {
+                        inst->imm.size = 1;
+                        inst->imm.value = offset - 2;
+
+                        assert(encoded.length == 2);
+                        bytecode_length += 2;
+                    } else {
+                        inst->imm.size = 4;
+                        Encoded_Inst encoded = encode_inst(inst);
+                        assert(offset - encoded.length >= I32_MIN && offset - encoded.length <= I32_MAX);
+
+                        inst->imm.value = offset - encoded.length;
+
+                        bytecode_length += encoded.length;
+                    }
                 }
             }
+        }
+
+        if (!any_out_of_order_issue) {
+            break;
         }
     }
 
@@ -2252,14 +2283,26 @@ void print_inst(Inst *inst) {
     }
 }
 
-void print_encoded_inst(Encoded_Inst encoded) {
+void print_encoded_inst_with_padding(Inst *inst) {
+    Encoded_Inst encoded = encode_inst(inst);
+    i32 padding = 30;
     for (u8 i = 0; i < encoded.length; i += 1) {
-        printf("%x ", encoded.bytes[i]);
+        u8 byte = encoded.bytes[i];
+        u8 high = byte >> 4;
+        u8 low  = byte & 15;
+        high = high > 9? 'a' + high - 10 : '0' + high;
+        low  = low  > 9? 'a' + low  - 10 : '0' + low;
+        printf("%c%c ", high, low);
+        padding -= 3;
     }
-    printf("\n");
+
+    if (padding > 0) {
+        u8 *PADDING_STR = "                                                                           ";
+        printf(PADDING_STR + 75 - padding);
+    }
 }
 
-void dump_instructions(Code_Builder *builder) {
+void dump_instructions(Code_Builder *builder, bool show_bytecode) {
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         if (block->jump_to != null) {
             printf("%s:\n", block->jump_to->debug_name);
@@ -2271,14 +2314,21 @@ void dump_instructions(Code_Builder *builder) {
         }
 
         for (u16 i = 0; i < print_length; i += 1) {
+            Inst *inst = &block->insts[i];
+
             printf("    ");
-            print_inst(&block->insts[i]);
+            if (show_bytecode) print_encoded_inst_with_padding(inst);
+            print_inst(inst);
         }
 
         if (block->jump_from != null) {
             Inst *jmp_inst = &block->insts[block->length - 1];
             assert(jmp_inst->kind == INST_JMP || (jmp_inst->kind >= INST_JCC_FIRST && jmp_inst->kind <= INST_JCC_LAST));
-            printf("    %s ", INST_NAMES[jmp_inst->kind]);
+
+            printf("    ");
+            if (show_bytecode) print_encoded_inst_with_padding(jmp_inst);
+            printf("%s ", INST_NAMES[jmp_inst->kind]);
+
             if (block->jump_from->jump_to != null) {
                 printf(block->jump_from->jump_to->debug_name);
             } else {
@@ -2476,6 +2526,19 @@ void compound_test(Code_Builder *code_builder) {
     set_return(code_builder, KEY_INTEGER, key_direct(result));
 }
 
+void forward_jump_test(Code_Builder *code_builder) {
+    Key *result = new_i32(code_builder, 3);
+
+    Jump_From *jump = add_jump(code_builder, CONDITION_NONE);
+
+    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(result), key_direct(new_i32(code_builder, 7)));
+
+    Jump_To *end_label = add_label(code_builder, "end");
+    link_jump(code_builder, jump, end_label);
+
+    set_return(code_builder, KEY_INTEGER, key_direct(result));
+}
+
 
 void run_test(u8 *test_name, void (*test_generator)(Code_Builder*), i32 expected) {
     Arena arena = {0}, stack = {0};
@@ -2486,17 +2549,14 @@ void run_test(u8 *test_name, void (*test_generator)(Code_Builder*), i32 expected
     (*test_generator)(code_builder);
 
     printf("\n; input\n");
-    dump_instructions(code_builder);
+    dump_instructions(code_builder, false);
 
     end_function(code_builder);
-
-    printf("\n; output\n");
-    dump_instructions(code_builder);
-
-    printf("\n");
     Encoded_Insts encoded = encode_insts(code_builder);
 
-    printf("Encoded %u bytes of machinecode\n", encoded.length);
+    printf("\n; output\n");
+    dump_instructions(code_builder, true);
+    printf("\nEncoded %u bytes of machinecode\n", encoded.length);
     assert(encoded.length > 0);
 
     u8 *executable_memory = VirtualAlloc(null, encoded.length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -2532,6 +2592,7 @@ void main() {
     run_test("encoding_test", &encoding_test, -2);
     run_test("address_test", &address_test, 28);
     run_test("compound_test", &compound_test, 43);
+    run_test("forward_jump_test", &forward_jump_test, 3);
 }
 
 #endif // TESTING_BACKEND
