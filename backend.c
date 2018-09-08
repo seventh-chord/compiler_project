@@ -364,6 +364,8 @@ typedef struct Code_Builder {
     Inst_Block_Group inst_blocks;
 } Code_Builder;
 
+void print_all_insts(Code_Builder *builder, bool show_bytecode);
+
 
 Code_Builder *code_builder_new(Arena *arena, Arena *stack) {
     Code_Builder *builder = arena_new(arena, Code_Builder);
@@ -1417,8 +1419,6 @@ typedef struct Encoded_Insts {
     u64 length;
 } Encoded_Insts;
 
-void print_encoded_inst(Encoded_Inst encoded);
-
 
 const Encoded_Inst XOR_AH_AH_ENCODING = { 2, { 0x30, 0xe4 } };
 
@@ -2073,10 +2073,19 @@ Encoded_Inst encode_inst(Inst *inst) {
 Encoded_Insts encode_insts(Code_Builder *builder) {
     u64 bytecode_length;
 
-    // TODO also, if we need to run this loop a lot of times, become pesimistic, make jumps just use 32 bit immediates,
-    // and avoid doing multiple passes that way.
+
+    // We iterate because we need to know the position of instructions in order to encode jumps and RIP
+    // addressing modes, but can't know the position of instructions without knowing the size of the
+    // relative offset (If the offset is small enough we can encode it as in 8 bits, otherwise we habve
+    // to use 32 bits).
+    // We don't want to loop too often on pathological input cases, so when we exceed 'MAX_ITERATION',
+    // we stop trying to replace 32-bit offsets with 8-bit offsets.
+    enum { MAX_ENCODE_ITERATIONS = 5 };
+    u32 encode_iterations = 0;
 
     while (true) {
+        encode_iterations += 1;
+
         bytecode_length = 0;
         bool any_out_of_order_issue = false;
 
@@ -2102,7 +2111,7 @@ Encoded_Insts encode_insts(Code_Builder *builder) {
                 bytecode_length += (u64) encoded.length;
             }
 
-            // Deal with the trailing 'jmp' or 'jcc' instruction, if there is one
+            // Deal with the trailing 'jmp' or 'jcc' instruction, if there is one for this block
             if (block->jump_from != null) {
                 assert(block->jump_from->jump_to != null);
                 u64 target_pos = block->jump_from->jump_to->relative_bytecode_pos;
@@ -2111,6 +2120,7 @@ Encoded_Insts encode_insts(Code_Builder *builder) {
 
                 if (target_pos == U64_MAX) {
                     inst->imm.size = 4;
+                    inst->imm.value = 0xdeadbeef;
                     Encoded_Inst encoded = encode_inst(inst);
                     bytecode_length += encoded.length;
 
@@ -2118,24 +2128,25 @@ Encoded_Insts encode_insts(Code_Builder *builder) {
                 } else {
                     i64 offset = target_pos - bytecode_length;
 
-                    inst->imm.size = 1;
-                    inst->imm.value = offset;
-                    Encoded_Inst encoded = encode_inst(inst);
-
-                    if (offset - 2 >= I8_MIN && offset - 2 <= I8_MAX) {
-                        inst->imm.size = 1;
-                        inst->imm.value = offset - 2;
-
-                        assert(encoded.length == 2);
-                        bytecode_length += 2;
+                    if (encode_iterations < MAX_ENCODE_ITERATIONS) {
+                        u8 old_imm_size = inst->imm.size;
+                        inst->imm.size = ((offset - 2) >= I8_MIN && (offset - 2) <= I8_MAX)? sizeof(i8) : sizeof(i32);
+                        assert(old_imm_size == 0 || inst->imm.size <= old_imm_size);
                     } else {
-                        inst->imm.size = 4;
-                        Encoded_Inst encoded = encode_inst(inst);
+                        inst->imm.size = sizeof(i32);
+                    }
+
+                    Encoded_Inst encoded = encode_inst(inst); // NB we only call 'encode_inst' to get 'encoded.length' here!
+                    inst->imm.value = offset - encoded.length;
+                    bytecode_length += encoded.length;
+
+                    if (inst->imm.size == 1) {
+                        assert(encoded.length == 2);
+                        assert(offset - encoded.length >= I8_MIN && offset - encoded.length <= I8_MAX);
+                    } else if (inst->imm.size == 4) {
                         assert(offset - encoded.length >= I32_MIN && offset - encoded.length <= I32_MAX);
-
-                        inst->imm.value = offset - encoded.length;
-
-                        bytecode_length += encoded.length;
+                    } else {
+                        assert(false);
                     }
                 }
             }
@@ -2302,7 +2313,7 @@ void print_encoded_inst_with_padding(Inst *inst) {
     }
 }
 
-void dump_instructions(Code_Builder *builder, bool show_bytecode) {
+void print_all_insts(Code_Builder *builder, bool show_bytecode) {
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         if (block->jump_to != null) {
             printf("%s:\n", block->jump_to->debug_name);
@@ -2529,12 +2540,26 @@ void compound_test(Code_Builder *code_builder) {
 void forward_jump_test(Code_Builder *code_builder) {
     Key *result = new_i32(code_builder, 3);
 
-    Jump_From *jump = add_jump(code_builder, CONDITION_NONE);
+    enum { JUMPS = 40, PADDING = 4 };
+    Jump_From *jumps[JUMPS];
+    for (int i = 0; i < JUMPS; i += 1) {
+        jumps[i] = add_jump(code_builder, CONDITION_NONE);
+    }
 
     binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(result), key_direct(new_i32(code_builder, 7)));
 
+    // In the future, 'new_i64' probably will get optimized out, but for now each of these instructions
+    // is ten bytes, so it creates great padding to force some of the jumps to be 32 bit and some of them
+    // to be 8 bit
+    for (int i = 0; i < PADDING; i += 1) {
+        Key *zero = new_i64(code_builder, 0);
+    }
+
     Jump_To *end_label = add_label(code_builder, "end");
-    link_jump(code_builder, jump, end_label);
+
+    for (int i = 0; i < JUMPS; i += 1) {
+        link_jump(code_builder, jumps[i], end_label);
+    }
 
     set_return(code_builder, KEY_INTEGER, key_direct(result));
 }
@@ -2549,13 +2574,13 @@ void run_test(u8 *test_name, void (*test_generator)(Code_Builder*), i32 expected
     (*test_generator)(code_builder);
 
     printf("\n; input\n");
-    dump_instructions(code_builder, false);
+    print_all_insts(code_builder, false);
 
     end_function(code_builder);
     Encoded_Insts encoded = encode_insts(code_builder);
 
     printf("\n; output\n");
-    dump_instructions(code_builder, true);
+    print_all_insts(code_builder, true);
     printf("\nEncoded %u bytes of machinecode\n", encoded.length);
     assert(encoded.length > 0);
 
