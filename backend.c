@@ -1,7 +1,4 @@
 
-// Design notes:
-// Combine new_<type> and key_direct, we (almost?) only use them together, so we can simplify. Internally we still want to keep an actual key though (?)
-
 #include "common.c"
 
 typedef enum Reg {
@@ -827,7 +824,7 @@ void end_function(Code_Builder *builder) {
                         *assigned_place = (Place) { PLACE_REG, key->size, .reg = reg };
                         reg_sizes = set_reg_size(reg_sizes, reg, key->size);
                     } else if (key->kind == KEY_FLOAT) {
-                        unimplemented(); // TODO allocate a gpr
+                        unimplemented(); // TODO allocate a xmm register
                     } else {
                         assert(false);
                     }
@@ -872,7 +869,7 @@ void end_function(Code_Builder *builder) {
                     if (place->kind == PLACE_MEM) {
                         pointer_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                         if (pointer_reg == REG_NONE)  {
-                            unimplemented(); // TODO We need a register, flush something
+                            unimplemented(); // TODO (2) We need a register, flush something
                         }
 
                         prefix_array[prefix_index++] = (Inst) { INST_MOV, { { PLACE_REG, POINTER_SIZE, .reg = pointer_reg }, *place } };
@@ -917,7 +914,7 @@ void end_function(Code_Builder *builder) {
 
                             Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                             if (imm_reg == REG_NONE)  {
-                                unimplemented(); // TODO We need a register, flush something
+                                unimplemented(); // TODO (2) We need a register, flush something
                             }
                             Place imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
 
@@ -945,7 +942,7 @@ void end_function(Code_Builder *builder) {
                         if (a_flush_reg != REG_NONE)  {
                             a_flush_place = (Place) { PLACE_REG, flush_size, .reg = a_flush_reg };
                         } else {
-                            unimplemented(); // Get a place on the stack
+                            unimplemented(); // (1) Get a place on the stack
                         }
 
                         Place a_place = { PLACE_REG, a_flush_place.size, .reg = RAX };
@@ -962,7 +959,7 @@ void end_function(Code_Builder *builder) {
                         if (d_flush_reg != REG_NONE)  {
                             d_flush_place = (Place) { PLACE_REG, flush_size, .reg = d_flush_reg };
                         } else {
-                            unimplemented(); // Get a place on the stack
+                            unimplemented(); // (1) Get a place on the stack
                         }
 
                         Place d_place = { PLACE_REG, d_flush_place.size, .reg = RDX };
@@ -1002,7 +999,7 @@ void end_function(Code_Builder *builder) {
                         } else {
                             Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                             if (imm_reg == REG_NONE)  {
-                                unimplemented(); // TODO We need a register, flush something
+                                unimplemented(); // TODO (2) We need a register, flush something
                             }
                             imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
                         }
@@ -1025,7 +1022,7 @@ void end_function(Code_Builder *builder) {
                         } else {
                             Reg divider_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                             if (divider_reg == REG_NONE)  {
-                                unimplemented(); // TODO We need a register, flush something
+                                unimplemented(); // TODO (2) We need a register, flush something
                             }
                             divider_place = (Place) { PLACE_REG, inst_size, .reg = divider_reg };
                             Place d_place = (Place) { PLACE_REG, inst_size, .reg = RDX };
@@ -1080,7 +1077,7 @@ void end_function(Code_Builder *builder) {
                             if (c_flush_reg != REG_NONE)  {
                                 c_flush_place = (Place) { PLACE_REG, flush_size, .reg = c_flush_reg };
                             } else {
-                                unimplemented(); // Get a place on the stack
+                                unimplemented(); // (1) Get a place on the stack
                             }
 
                             Place c_place = { PLACE_REG, c_flush_place.size, .reg = RCX };
@@ -1136,7 +1133,7 @@ void end_function(Code_Builder *builder) {
                             if (flush_reg != REG_NONE)  {
                                 flush_place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
                             } else {
-                                unimplemented(); // Get a place on the stack
+                                unimplemented(); // (1) Get a place on the stack
                             }
 
                             Place place = { PLACE_REG, flush_place.size, .reg = reg };
@@ -1201,7 +1198,7 @@ void end_function(Code_Builder *builder) {
                             if (flush_reg != REG_NONE)  {
                                 flush_place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
                             } else {
-                                unimplemented(); // Get a place on the stack
+                                unimplemented(); // (1) Get a place on the stack
                             }
 
                             Place place = { PLACE_REG, flush_place.size, .reg = reg };
@@ -1242,7 +1239,7 @@ void end_function(Code_Builder *builder) {
             if (inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_MEM) {
                 Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                 if (temp_reg == REG_NONE) {
-                    unimplemented(); // TODO We need a register, flush something
+                    unimplemented(); // TODO (2) We need a register, flush something
                 }
 
                 Place temp_place = { PLACE_REG, inst->places[1].size, .reg = temp_reg };
@@ -1256,7 +1253,7 @@ void end_function(Code_Builder *builder) {
 
                 Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
                 if (temp_reg == REG_NONE) {
-                    unimplemented(); // TODO We need a register, flush something
+                    unimplemented(); // TODO (2) We need a register, flush something
                 }
 
                 Place temp_place = { PLACE_REG, inst->imm.size, .reg = temp_reg };
@@ -2128,23 +2125,29 @@ Encoded_Insts encode_insts(Code_Builder *builder) {
                 } else {
                     i64 offset = target_pos - bytecode_length;
 
-                    if (encode_iterations < MAX_ENCODE_ITERATIONS) {
-                        u8 old_imm_size = inst->imm.size;
-                        inst->imm.size = ((offset - 2) >= I8_MIN && (offset - 2) <= I8_MAX)? sizeof(i8) : sizeof(i32);
-                        assert(old_imm_size == 0 || inst->imm.size <= old_imm_size);
+                    u8 old_imm_size = inst->imm.size;
+                    u8 new_imm_size = ((offset - 2) >= I8_MIN && (offset - 2) <= I8_MAX)? sizeof(i8) : sizeof(i32);
+                    assert(old_imm_size == 0 || new_imm_size <= old_imm_size);
+
+                    if (encode_iterations >= MAX_ENCODE_ITERATIONS) {
+                        // After a certain number of instructions, stop trying to decrease
+                        // instruction size, so we don't move labels and thus don't cause
+                        // further out of order issues.
+                        inst->imm.size = max(new_imm_size, old_imm_size);
+                        assert(inst->imm.size == sizeof(i8) || inst->imm.size == sizeof(i32));
                     } else {
-                        inst->imm.size = sizeof(i32);
+                        inst->imm.size = new_imm_size;
                     }
 
-                    Encoded_Inst encoded = encode_inst(inst); // NB we only call 'encode_inst' to get 'encoded.length' here!
-                    inst->imm.value = offset - encoded.length;
-                    bytecode_length += encoded.length;
+                    u8 encoded_length = encode_inst(inst).length;
+                    inst->imm.value = offset - encoded_length;
+                    bytecode_length += encoded_length;
 
                     if (inst->imm.size == 1) {
-                        assert(encoded.length == 2);
-                        assert(offset - encoded.length >= I8_MIN && offset - encoded.length <= I8_MAX);
+                        assert(encoded_length == 2);
+                        assert(offset - encoded_length >= I8_MIN && offset - encoded_length <= I8_MAX);
                     } else if (inst->imm.size == 4) {
-                        assert(offset - encoded.length >= I32_MIN && offset - encoded.length <= I32_MAX);
+                        assert(offset - encoded_length >= I32_MIN && offset - encoded_length <= I32_MAX);
                     } else {
                         assert(false);
                     }
@@ -2621,3 +2624,65 @@ void main() {
 }
 
 #endif // TESTING_BACKEND
+
+
+/*
+
+Working notes
+
+Function calls, 'set_return'
+How do we indicate which sets of keys we want to use as registers?
+Reordering the way in which those keys are initialized might permit us to do
+better register allocation. Do we want to bother with getting that working?
+It seems like an optimization which would be rather complicated, but it
+could potentially remove multiple extra instructions in certain cases.
+'my_function(x, y << z)' is one such case:
+x must be in RCX, as dictated by calling convention,
+but z must be in CL for us to compute the shift.
+
+'copy' and 'clear'
+Optimizing these into efficient sequences of instructions must happen
+during 'end_function', after register allocation, because we only then
+know what the alignment of keys will be on the stack.
+I can't remember whether I allready did some work towards this goal...
+
+Temporary places for executing unwieldy instructions
+Currently, there are a bunch of 'unimplemented' cases here, where we havent
+thought out what to do when we run out of free registers.
+  * Knowing how this should work is tricky, because it has to interact with
+    register allocation
+  * ...but, I think we want to make sure this works before we do smart register
+    allocation, because that will allow us to more easily test some of the
+    pathological cases which we want to make sure we handle.
+There are two cases we want to solve:
+ 1. We need to flush a specific register so we can use it directly. Here, we can either
+    flush the register to another register, or flush it to the stack. (In practice,
+    we are probably never going to flush to a register, because if there are free
+    registers the register allocator has done a bad job. This is an argument
+    for working on this part before we do register allocation)
+ 2. We need any register, because we generated a memory/immediate operand in a place
+    where we can only use a register operand. Here we can use any register, but we
+    might have to flush one.
+    Should the register allocator also have something to say here? Maybe it doesn't
+    matter: If there are no free registers, the allocator has failed and we are in
+    the worst case anyways.
+
+Using x64 addressing modes
+I think we can do this through approximately the same code pahts as those we will use
+to infer that a key has a constant value.
+
+Register allocation
+  * We have some initial hard constraints on which registers we can allocate, based on which instructions
+    we use a key in (e.g. RHS of a shift must be an immediate or CL)
+  * Certain keys will have to be in different registers at different times, if there are multiple
+    hard constraints on a single key
+  * Because of our previous work regarding fixing up instructions, hard constraints are not actually
+    hard, but we still want to do our best to acomodate them
+
+Floating point
+This is, as far as I can think, not a major concern, as the SSE instruction set is a lot
+more uniform than amd64 in general. Casting will be a bit nasty. Negating a float is also
+a bit tricky, as it requires referncing a memory location (PXOR with '-0.0', where '-0.0'
+must be in memory as there are no immediates operand variants for PXOR).
+
+*/
