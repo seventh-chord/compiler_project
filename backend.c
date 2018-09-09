@@ -1,5 +1,67 @@
 
+/*
+
+Working notes
+
+Function calls, 'set_return'
+How do we indicate which sets of keys we want to use as registers?
+Reordering the way in which those keys are initialized might permit us to do
+better register allocation. Do we want to bother with getting that working?
+It seems like an optimization which would be rather complicated, but it
+could potentially remove multiple extra instructions in certain cases.
+'my_function(x, y << z)' is one such case:
+x must be in RCX, as dictated by calling convention,
+but z must be in CL for us to compute the shift.
+
+'copy' and 'clear'
+Optimizing these into efficient sequences of instructions must happen
+during 'end_function', after register allocation, because we only then
+know what the alignment of keys will be on the stack.
+I can't remember whether I allready did some work towards this goal...
+
+Temporary places for executing unwieldy instructions
+Currently, there are a bunch of 'unimplemented' cases here, where we havent
+thought out what to do when we run out of free registers.
+  * Knowing how this should work is tricky, because it has to interact with
+    register allocation
+  * ...but, I think we want to make sure this works before we do smart register
+    allocation, because that will allow us to more easily test some of the
+    pathological cases which we want to make sure we handle.
+There are two cases we want to solve:
+ 1. We need to flush a specific register so we can use it directly. Here, we can either
+    flush the register to another register, or flush it to the stack. (In practice,
+    we are probably never going to flush to a register, because if there are free
+    registers the register allocator has done a bad job. This is an argument
+    for working on this part before we do register allocation)
+ 2. We need any register, because we generated a memory/immediate operand in a place
+    where we can only use a register operand. Here we can use any register, but we
+    might have to flush one.
+    Should the register allocator also have something to say here? Maybe it doesn't
+    matter: If there are no free registers, the allocator has failed and we are in
+    the worst case anyways.
+
+Using x64 addressing modes
+I think we can do this through approximately the same code pahts as those we will use
+to infer that a key has a constant value.
+
+Register allocation
+  * We have some initial hard constraints on which registers we can allocate, based on which instructions
+    we use a key in (e.g. RHS of a shift must be an immediate or CL)
+  * Certain keys will have to be in different registers at different times, if there are multiple
+    hard constraints on a single key
+  * Because of our previous work regarding fixing up instructions, hard constraints are not actually
+    hard, but we still want to do our best to acomodate them
+
+Floating point
+This is, as far as I can think, not a major concern, as the SSE instruction set is a lot
+more uniform than amd64 in general. Casting will be a bit nasty. Negating a float is also
+a bit tricky, as it requires referncing a memory location (PXOR with '-0.0', where '-0.0'
+must be in memory as there are no immediates operand variants for PXOR).
+
+*/
+
 #include "common.c"
+#include "backend.h"
 
 typedef enum Reg {
     REG_NONE = 0,
@@ -59,8 +121,6 @@ Reg_Kind reg_kind(Reg reg) {
     return 0;
 }
 
-enum { POINTER_SIZE = 8 };
-
 typedef struct Address {
     u8 base, index; // Reg
     u8 scale; // Must be 1, 2, 4 or 8
@@ -77,17 +137,19 @@ enum Key_Flags {
     KEY_FLAG_ADDRESSABLE  = 2,
 };
 
-typedef struct Key {
+// NB defined in header
+struct Key {
     u64 index;
     u32 flags;
 
     u32 alignment;
     u32 size;
-    enum { KEY_INTEGER, KEY_FLOAT, KEY_COMPOUND } kind;
-} Key;
+    Key_Kind kind;
+};
 
 
-typedef struct Place {
+// NB defined in header
+struct Place {
     enum {
         PLACE_NONE,
 
@@ -105,7 +167,7 @@ typedef struct Place {
         Reg reg;
         Address address;
     };
-} Place;
+};
 
 typedef enum Inst_Kind {
     INST_INVALID = 0,
@@ -274,25 +336,6 @@ typedef struct Inst {
 } Inst;
 
 
-typedef enum Condition {
-    CONDITION_NONE = 0,
-
-    CONDITION_E,
-    CONDITION_NE,
-    CONDITION_P,
-    CONDITION_NP,
-    CONDITION_A,
-    CONDITION_AE,
-    CONDITION_B,
-    CONDITION_BE,
-    CONDITION_L,
-    CONDITION_LE,
-    CONDITION_G,
-    CONDITION_GE,
-
-    CONDITION_COUNT,
-} Condition;
-
 Inst_Kind JMP_FOR_CONDITION[CONDITION_COUNT] = {
     [CONDITION_NONE] = INST_JMP,
     [CONDITION_E]    = INST_JE,
@@ -312,17 +355,18 @@ Inst_Kind JMP_FOR_CONDITION[CONDITION_COUNT] = {
 
 typedef struct Inst_Block Inst_Block;
 
-typedef struct Jump_To {
+// typedefed in header
+struct Jump_To {
     u8 *debug_name;
     Inst_Block *block;
 
     u64 relative_bytecode_pos;
-} Jump_To;
+};
 
-typedef struct Jump_From {
+struct Jump_From {
     Jump_To *jump_to;
     Inst_Block *block;
-} Jump_From;
+};
 
 
 enum { DEFAULT_INST_BLOCK_CAPACITY = 16 };
@@ -353,6 +397,7 @@ typedef struct Inst_Block_Group {
     Inst_Block *start, *head;
 } Inst_Block_Group;
 
+// NB defined in header
 typedef struct Code_Builder {
     Arena *arena, *stack;
     u64 next_key_index;
@@ -361,10 +406,9 @@ typedef struct Code_Builder {
     Inst_Block_Group inst_blocks;
 } Code_Builder;
 
-void print_all_insts(Code_Builder *builder, bool show_bytecode);
 
-
-Code_Builder *code_builder_new(Arena *arena, Arena *stack) {
+// NB defined in header
+Code_Builder *new_code_builder(Arena *arena, Arena *stack) {
     Code_Builder *builder = arena_new(arena, Code_Builder);
     builder->arena = arena;
     builder->stack = stack;
@@ -503,6 +547,7 @@ void code_builder_insert_insts(
 }
 
 
+// NB defined in header
 Key *new_key(Code_Builder *builder, int kind, u32 size, u32 alignment) {
     if (kind == KEY_INTEGER) {
         assert(size == 1 || size == 2 || size == 4 || size == 8);
@@ -520,21 +565,13 @@ Key *new_key(Code_Builder *builder, int kind, u32 size, u32 alignment) {
     key->index = builder->next_key_index;
     builder->next_key_index += 1;
     key->size = size;
+    key->alignment = alignment;
     key->kind = kind;
     builder->next_key_index;
     return key;
 }
 
-Place key_deref(Key *key, u32 size) {
-    assert(key->kind == KEY_INTEGER && key->size == POINTER_SIZE);
-    return (Place) { PLACE_KEY_ADDRESS, size, .key = key };
-}
-
-Place key_direct(Key *key) {
-    return (Place) { PLACE_KEY, key->size, .key = key };
-}
-
-
+// NB all of these functions are also defined in header
 #define GEN_NEW_INT_FUNCTION(name, type) \
 Key *name(Code_Builder *builder, type value) { \
     Key *key = new_key(builder, KEY_INTEGER, sizeof(type), sizeof(type)); \
@@ -542,7 +579,6 @@ Key *name(Code_Builder *builder, type value) { \
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst); \
     return key; \
 }
-
 GEN_NEW_INT_FUNCTION(new_i8,  i8)
 GEN_NEW_INT_FUNCTION(new_i16, i16)
 GEN_NEW_INT_FUNCTION(new_i32, i32)
@@ -552,9 +588,21 @@ GEN_NEW_INT_FUNCTION(new_u16, u16)
 GEN_NEW_INT_FUNCTION(new_u32, u32)
 GEN_NEW_INT_FUNCTION(new_u64, u64)
 GEN_NEW_INT_FUNCTION(new_pointer, u64)
-
 #undef GEN_NEW_INT_FUNCTION
 
+// NB defined in header
+Place key_deref(Key *key, u32 size) {
+    assert(key->kind == KEY_INTEGER && key->size == POINTER_SIZE);
+    return (Place) { PLACE_KEY_ADDRESS, size, .key = key };
+}
+
+// NB defined in header
+Place key_direct(Key *key) {
+    return (Place) { PLACE_KEY, key->size, .key = key };
+}
+
+
+// NB defined in header
 Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
     Jump_To *result = arena_new(builder->arena, Jump_To);
     result->relative_bytecode_pos = U64_MAX;
@@ -570,6 +618,7 @@ Jump_To *add_label(Code_Builder *builder, u8 *debug_name) {
     return result;
 }
 
+// NB defined in header
 Jump_From *add_jump(Code_Builder *builder, Condition condition) {
     Jump_From *result = arena_new(builder->arena, Jump_From);
 
@@ -588,6 +637,7 @@ Jump_From *add_jump(Code_Builder *builder, Condition condition) {
     return result;
 }
 
+// NB defined in header
 void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
     assert(from->jump_to == null);
     from->jump_to = to;
@@ -608,6 +658,7 @@ void link_jump(Code_Builder *builder, Jump_From *from, Jump_To *to) {
     builder->link_list_head->length += 1;
 }
 
+// NB defined in header
 void clear(Code_Builder *builder, Place place) {
     assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS);
 
@@ -632,6 +683,7 @@ void clear(Code_Builder *builder, Place place) {
     }
 }
 
+// NB defined in header
 void copy(Code_Builder *builder, Place source, Place destination) {
     assert(source.kind == PLACE_KEY || source.kind == PLACE_KEY_ADDRESS);
     assert(destination.kind == PLACE_KEY || destination.kind == PLACE_KEY_ADDRESS);
@@ -648,7 +700,8 @@ void copy(Code_Builder *builder, Place source, Place destination) {
     }
 }
 
-void set_return(Code_Builder *builder, int kind, Place place) {
+// NB defined in header
+void set_return(Code_Builder *builder, Key_Kind kind, Place place) {
     // TODO This function is to simplistic. We would preferably couple it with
     // how we generate the 'ret' instruction, or alternatively with how we
     // handle register allocation, so we can verify that the generated 'mov rax, ...'
@@ -668,24 +721,7 @@ void set_return(Code_Builder *builder, int kind, Place place) {
 }
 
 
-enum {
-    BINARY_MOV,
-    BINARY_ADD,
-    BINARY_SUB,
-    BINARY_MUL,
-    BINARY_DIV,
-    BINARY_IMUL,
-    BINARY_IDIV,
-    BINARY_AND,
-    BINARY_OR,
-    BINARY_XOR,
-    BINARY_CMP,
-    BINARY_SHL,
-    BINARY_SHR,
-    BINARY_SAR,
-};
-
-void binary(Code_Builder *builder, int kind, int binary, Place left, Place right) {
+void binary(Code_Builder *builder, Key_Kind kind, Binary_Kind binary, Place left, Place right) {
     assert(left.size == right.size);
     if (left.kind == PLACE_KEY) {
         assert(left.key->kind == kind);
@@ -732,14 +768,8 @@ void binary(Code_Builder *builder, int kind, int binary, Place left, Place right
     inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
 }
 
-enum {
-    UNARY_NEG,
-    UNARY_NOT,
-    UNARY_INC,
-    UNARY_DEC,
-};
-
-void unary(Code_Builder *builder, int kind, int unary, Place place) {
+// NB defined in header
+void unary(Code_Builder *builder, Key_Kind kind, Unary_Kind unary, Place place) {
     if (place.kind == PLACE_KEY) {
         assert(place.key->kind == kind);
     } else if (place.kind == PLACE_KEY_ADDRESS) {
@@ -769,6 +799,7 @@ void unary(Code_Builder *builder, int kind, int unary, Place place) {
 
 // Produces a new key, which contains the pointer to the given value
 // This generates a lea instruction
+// NB defined in header
 Key *address_of(Code_Builder *builder, Key *value) {
     value->flags |= KEY_FLAG_ADDRESSABLE;
 
@@ -781,6 +812,28 @@ Key *address_of(Code_Builder *builder, Key *value) {
 }
 
 
+typedef struct {
+    i32 next, max;
+} Stack_Space_Allocator;
+
+i32 stack_space_alloc(Stack_Space_Allocator *allocator, bool temporary, i32 size, i32 align) {
+    if (size == 0) return 0;
+    assert(align == 1 || align == 2 || align == 4 || align == 8);
+
+    i32 place = allocator->next;
+    place = (i32) round_to_next((i32) place, align);
+
+    if (!temporary) {
+        allocator->next += size;
+    }
+    allocator->max = max(place + size, allocator->max);
+
+    assert(place <= I32_MAX);
+    return place;
+}
+
+
+// NB defined in header
 void end_function(Code_Builder *builder) {
     arena_stack_push(builder->stack);
 
@@ -791,7 +844,7 @@ void end_function(Code_Builder *builder) {
 
     // Worst register allocator ever!
     Reg next_gpr = RAX;
-    u32 next_stack_index = 0;
+    Stack_Space_Allocator stack_space_allocator = {0};
 
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
@@ -809,12 +862,9 @@ void end_function(Code_Builder *builder) {
                         u32 size = key->size;
                         u32 align = key->alignment;
 
-                        next_stack_index = (u64) round_to_next((u64) next_stack_index, (u64) align);
-                        i32 stack_index = next_stack_index;
-                        next_stack_index += size;
-                        assert(next_stack_index <= I32_MAX);
+                        i32 stack_offset = stack_space_alloc(&stack_space_allocator, false, size, align);
 
-                        Address address = { RSP, REG_NONE, 0, stack_index };
+                        Address address = { RSP, REG_NONE, 0, stack_offset };
                         *assigned_place = (Place) { PLACE_MEM, size, .address = address };
                     } else if (key->kind == KEY_INTEGER) {
                         Reg reg = next_gpr;
@@ -1293,11 +1343,11 @@ void end_function(Code_Builder *builder) {
 
 
     // TODO also, if we need to save/restore registers, we need to insert a stack frame
-    if (next_stack_index > 0) {
+    if (stack_space_allocator.max > 0) {
         Inst_Block_Group prolog = {0}, epilog = {0};
 
 
-        i32 stack_size = next_stack_index;
+        i32 stack_size = stack_space_allocator.max;
         stack_size = ((stack_size + 7) & ~15) + 8; // Rounds to a multiple of 16, offset by 8
 
         Place place_rsp = { PLACE_REG, POINTER_SIZE, .reg = RSP };
@@ -1406,15 +1456,11 @@ typedef struct Encoding {
     u8 modrm_flag;
 } Encoding;
 
+// NB defined in header
 typedef struct Encoded_Inst {
     u8 length;
     u8 bytes[15]; // NB x64 instructions can be at most 15 bytes long
 } Encoded_Inst;
-
-typedef struct Encoded_Insts {
-    u8 *bytes;
-    u64 length;
-} Encoded_Insts;
 
 
 const Encoded_Inst XOR_AH_AH_ENCODING = { 2, { 0x30, 0xe4 } };
@@ -1730,6 +1776,7 @@ u8 REG_INDEX_MAP[REG_COUNT] = {
     [R15] = 15,
 };
 
+// NB defined in header
 Encoded_Inst encode_inst(Inst *inst) {
     Encoding encoding;
     {
@@ -2178,6 +2225,7 @@ Encoded_Insts encode_insts(Code_Builder *builder) {
     return result;
 }
 
+
 u8 *REG_NAMES[REG_COUNT][4] = {
     [RAX] = { "al",   "ax",   "eax",  "rax" },
     [RCX] = { "cl",   "cx",   "ecx",  "rcx" },
@@ -2316,6 +2364,7 @@ void print_encoded_inst_with_padding(Inst *inst) {
     }
 }
 
+// NB defined in header
 void print_all_insts(Code_Builder *builder, bool show_bytecode) {
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         if (block->jump_to != null) {
@@ -2351,338 +2400,4 @@ void print_all_insts(Code_Builder *builder, bool show_bytecode) {
             printf("\n");
         }
     }
-}
-
-
-#ifdef TESTING_BACKEND
-
-void fibonachi(Code_Builder *code_builder) {
-    i32 iterations = 10;
-
-    Key *m = new_i32(code_builder, 1);
-    Key *n = new_i32(code_builder, 1);
-
-    Key *counter = new_i32(code_builder, iterations);
-    binary(code_builder, KEY_INTEGER, BINARY_SUB, key_direct(counter), key_direct(new_i32(code_builder, 2)));
-    Jump_To *loop_start = add_label(code_builder, "start");
-
-    Key *old_m = new_i32(code_builder, 0);
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(old_m), key_direct(m));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(m), key_direct(n));
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(n), key_direct(old_m));
-
-    unary(code_builder, KEY_INTEGER, UNARY_DEC, key_direct(counter));
-    binary(code_builder, KEY_INTEGER, BINARY_CMP, key_direct(counter), key_direct(new_i32(code_builder, 0)));
-    Jump_From *loop_end = add_jump(code_builder, CONDITION_G);
-    link_jump(code_builder, loop_end, loop_start);
-}
-
-void not_fibonachi(Code_Builder *code_builder) {
-    i32 iterations = 3;
-
-    Key *a = new_i32(code_builder, 2);
-    Key *b = new_i32(code_builder, 2);
-
-    Key *counter = new_i32(code_builder, 0);
-    Jump_To *loop_start = add_label(code_builder, "start");
-
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(a), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(b), key_direct(a));
-
-    unary(code_builder, KEY_INTEGER, UNARY_INC, key_direct(counter));
-    binary(code_builder, KEY_INTEGER, BINARY_CMP, key_direct(counter), key_direct(new_i32(code_builder, iterations)));
-    Jump_From *loop_end = add_jump(code_builder, CONDITION_L);
-    link_jump(code_builder, loop_end, loop_start);
-}
-
-void nasty_mul_test(Code_Builder *code_builder) {
-    Key *a = new_i32(code_builder, 1);
-    Key *c = new_i32(code_builder, 2);
-    Key *d = new_i32(code_builder, 3);
-    Key *b = new_i32(code_builder, 4);
-
-    add_label(code_builder, "1");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(b));
-    add_label(code_builder, "2");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(d));
-    add_label(code_builder, "3");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(b));
-    add_label(code_builder, "4");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(a), key_direct(d));
-    add_label(code_builder, "5");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(a));
-    add_label(code_builder, "6");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(a));
-    add_label(code_builder, "7");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(a), key_direct(a));
-    add_label(code_builder, "8");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(c), key_direct(c));
-    add_label(code_builder, "9");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(d));
-
-    add_label(code_builder, "10");
-    binary(code_builder, KEY_INTEGER, BINARY_MUL, key_direct(d), key_direct(new_i32(code_builder, 3)));
-
-    add_label(code_builder, "ensure_regs_are_used");
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(a), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(c), key_direct(d));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(c));
-}
-
-void nasty_imul_test(Code_Builder *code_builder) {
-    Key *a = new_i32(code_builder, 1);
-    Key *c = new_i32(code_builder, 2);
-    Key *d = new_i32(code_builder, 3);
-    Key *b = new_i32(code_builder, 4);
-
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(d));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(a), key_direct(d));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(a));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(a));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(a), key_direct(a));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(c));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(d));
-
-    add_label(code_builder, "imms");
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(c), key_direct(new_i32(code_builder, 3)));
-    binary(code_builder, KEY_INTEGER, BINARY_IMUL, key_direct(d), key_direct(new_i32(code_builder, 3)));
-
-    add_label(code_builder, "ensure_regs_are_used");
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(a), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(c), key_direct(d));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(c));
-}
-
-void nasty_div_test(Code_Builder *code_builder) {
-    Key *a = new_i32(code_builder, 17745);
-    Key *c = new_i32(code_builder, 65);
-    Key *d = new_i32(code_builder, 7);
-    Key *b = new_i32(code_builder, 5);
-
-    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(c), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(c));
-    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(c));
-    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(d));
-    binary(code_builder, KEY_INTEGER, BINARY_IDIV, key_direct(a), key_direct(b));
-}
-
-void encoding_test(Code_Builder *code_builder) {
-    Inst insts[4] = { { INST_CBW }, { INST_CWD }, { INST_CDQ }, { INST_CQO } };
-    for (u32 i = 0; i < 4; i += 1) {
-        inst_block_group_add_inst(code_builder, &code_builder->inst_blocks, insts[i]);
-    }
-
-    add_label(code_builder, "shifty_shafts");
-    Key *a = new_i32(code_builder, -32);
-    Key *c = new_i32(code_builder, 3);
-    Key *d = new_i32(code_builder, 456);
-    Key *b = new_i32(code_builder, 4);
-
-    binary(code_builder, KEY_INTEGER, BINARY_SAR, key_direct(a), key_direct(b));
-    binary(code_builder, KEY_INTEGER, BINARY_SAR, key_direct(c), key_direct(d));
-    binary(code_builder, KEY_INTEGER, BINARY_SAR, key_direct(c), key_direct(c));
-
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(b), key_direct(a));
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(d), key_direct(a));
-
-    add_label(code_builder, "no_reps_no_gains");
-    Key *big = new_key(code_builder, KEY_COMPOUND, 256*sizeof(i32), sizeof(i32));
-    clear(code_builder, key_direct(big));
-}
-
-void address_test(Code_Builder *code_builder) {
-    Key *my_value = new_i32(code_builder, 196);
-    Key *pointer = address_of(code_builder, my_value);
-    Key *pointer_to_pointer = address_of(code_builder, pointer);
-    Key *pointer_to_pointer_to_pointer = address_of(code_builder, pointer_to_pointer);
-
-    Key *not_seven_yet = new_i32(code_builder, 8);
-    Key *pointer_to_seven = address_of(code_builder, not_seven_yet);
-
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_deref(pointer_to_seven, 4), key_direct(new_i32(code_builder, 7)));
-
-    add_label(code_builder, "div_start");
-    binary(code_builder, KEY_INTEGER, BINARY_DIV, key_deref(pointer, 4), key_deref(pointer_to_seven, 4));
-    add_label(code_builder, "div_end");
-
-    Key *pointer_to_pointer_copy = new_pointer(code_builder, 0);
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(pointer_to_pointer_copy), key_deref(pointer_to_pointer_to_pointer, POINTER_SIZE));
-
-    Key *pointer_copy = new_pointer(code_builder, 0);
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(pointer_copy), key_deref(pointer_to_pointer_copy, POINTER_SIZE));
-
-    Key *copy = new_i32(code_builder, 0);
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(copy), key_deref(pointer_copy, 4));
-
-    set_return(code_builder, KEY_INTEGER, key_direct(copy));
-}
-
-void compound_test(Code_Builder *code_builder) {
-    Key *array = new_key(code_builder, KEY_COMPOUND, 4 * sizeof(i32), sizeof(i32));
-    clear(code_builder, key_direct(array));
-
-    Key *array_pointer = address_of(code_builder, array);
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(array_pointer), key_direct(new_i64(code_builder, 1 * sizeof(i32))));
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_deref(array_pointer, sizeof(i32)), key_direct(new_i32(code_builder, 43)));
-
-    Key *other_array = new_key(code_builder, KEY_COMPOUND, 4 * sizeof(i32), sizeof(i32));
-    copy(code_builder, key_direct(array), key_direct(other_array));
-
-    Key *result = new_key(code_builder, KEY_INTEGER, sizeof(i32), sizeof(i32));
-    Key *other_array_pointer = address_of(code_builder, other_array);
-    binary(code_builder, KEY_INTEGER, BINARY_ADD, key_direct(other_array_pointer), key_direct(new_i64(code_builder, 1 * sizeof(i32))));
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(result), key_deref(other_array_pointer, sizeof(i32)));
-
-    set_return(code_builder, KEY_INTEGER, key_direct(result));
-}
-
-void forward_jump_test(Code_Builder *code_builder) {
-    Key *result = new_i32(code_builder, 3);
-
-    enum { JUMPS = 40, PADDING = 4 };
-    Jump_From *jumps[JUMPS];
-    for (int i = 0; i < JUMPS; i += 1) {
-        jumps[i] = add_jump(code_builder, CONDITION_NONE);
-    }
-
-    binary(code_builder, KEY_INTEGER, BINARY_MOV, key_direct(result), key_direct(new_i32(code_builder, 7)));
-
-    // In the future, 'new_i64' probably will get optimized out, but for now each of these instructions
-    // is ten bytes, so it creates great padding to force some of the jumps to be 32 bit and some of them
-    // to be 8 bit
-    for (int i = 0; i < PADDING; i += 1) {
-        Key *zero = new_i64(code_builder, 0);
-    }
-
-    Jump_To *end_label = add_label(code_builder, "end");
-
-    for (int i = 0; i < JUMPS; i += 1) {
-        link_jump(code_builder, jumps[i], end_label);
-    }
-
-    set_return(code_builder, KEY_INTEGER, key_direct(result));
-}
-
-
-void run_test(u8 *test_name, void (*test_generator)(Code_Builder*), i32 expected) {
-    Arena arena = {0}, stack = {0};
-    Code_Builder *code_builder = code_builder_new(&arena, &stack);
-
-    printf("\n\n--- Running test: %s\n", test_name);
-
-    (*test_generator)(code_builder);
-
-    printf("\n; input\n");
-    print_all_insts(code_builder, false);
-
-    end_function(code_builder);
-    Encoded_Insts encoded = encode_insts(code_builder);
-
-    printf("\n; output\n");
-    print_all_insts(code_builder, true);
-    printf("\nEncoded %u bytes of machinecode\n", encoded.length);
-    assert(encoded.length > 0);
-
-    u8 *executable_memory = VirtualAlloc(null, encoded.length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (executable_memory == null) {
-        panic("Failed to allocate memory for executing bytecode: %x\n", (u64) GetLastError());
-    }
-
-    mem_copy(encoded.bytes, executable_memory, encoded.length);
-
-    u32 old_permissions;
-    if (!VirtualProtect(executable_memory, encoded.length, PAGE_EXECUTE_READWRITE, &old_permissions)) {
-        printf("Failed to set execute permissions on memory: %x\n", (u64) GetLastError());
-    }
-
-    i32 (*generated_function)() = (void*) executable_memory;
-    i32 result = (*generated_function)();
-    printf("Generated function returned %i, expected %i\n", (i64) result, (i64) expected);
-    assert(result == expected);
-
-    VirtualFree(executable_memory, 0, MEM_RELEASE);
-
-    arena_free(&arena);
-    arena_free(&stack);
-}
-
-
-void main() {
-    run_test("fibonachi", &fibonachi, 55);
-    run_test("not_fibonachi", &not_fibonachi, 8192);
-    run_test("nasty_mul_test", &nasty_mul_test, 148);
-    run_test("nasty_imul_test", &nasty_imul_test, 148);
-    run_test("nasty_div_test", &nasty_div_test, 3);
-    run_test("encoding_test", &encoding_test, -2);
-    run_test("address_test", &address_test, 28);
-    run_test("compound_test", &compound_test, 43);
-    run_test("forward_jump_test", &forward_jump_test, 3);
-}
-
-#endif // TESTING_BACKEND
-
-
-/*
-
-Working notes
-
-Function calls, 'set_return'
-How do we indicate which sets of keys we want to use as registers?
-Reordering the way in which those keys are initialized might permit us to do
-better register allocation. Do we want to bother with getting that working?
-It seems like an optimization which would be rather complicated, but it
-could potentially remove multiple extra instructions in certain cases.
-'my_function(x, y << z)' is one such case:
-x must be in RCX, as dictated by calling convention,
-but z must be in CL for us to compute the shift.
-
-'copy' and 'clear'
-Optimizing these into efficient sequences of instructions must happen
-during 'end_function', after register allocation, because we only then
-know what the alignment of keys will be on the stack.
-I can't remember whether I allready did some work towards this goal...
-
-Temporary places for executing unwieldy instructions
-Currently, there are a bunch of 'unimplemented' cases here, where we havent
-thought out what to do when we run out of free registers.
-  * Knowing how this should work is tricky, because it has to interact with
-    register allocation
-  * ...but, I think we want to make sure this works before we do smart register
-    allocation, because that will allow us to more easily test some of the
-    pathological cases which we want to make sure we handle.
-There are two cases we want to solve:
- 1. We need to flush a specific register so we can use it directly. Here, we can either
-    flush the register to another register, or flush it to the stack. (In practice,
-    we are probably never going to flush to a register, because if there are free
-    registers the register allocator has done a bad job. This is an argument
-    for working on this part before we do register allocation)
- 2. We need any register, because we generated a memory/immediate operand in a place
-    where we can only use a register operand. Here we can use any register, but we
-    might have to flush one.
-    Should the register allocator also have something to say here? Maybe it doesn't
-    matter: If there are no free registers, the allocator has failed and we are in
-    the worst case anyways.
-
-Using x64 addressing modes
-I think we can do this through approximately the same code pahts as those we will use
-to infer that a key has a constant value.
-
-Register allocation
-  * We have some initial hard constraints on which registers we can allocate, based on which instructions
-    we use a key in (e.g. RHS of a shift must be an immediate or CL)
-  * Certain keys will have to be in different registers at different times, if there are multiple
-    hard constraints on a single key
-  * Because of our previous work regarding fixing up instructions, hard constraints are not actually
-    hard, but we still want to do our best to acomodate them
-
-Floating point
-This is, as far as I can think, not a major concern, as the SSE instruction set is a lot
-more uniform than amd64 in general. Casting will be a bit nasty. Negating a float is also
-a bit tricky, as it requires referncing a memory location (PXOR with '-0.0', where '-0.0'
-must be in memory as there are no immediates operand variants for PXOR).
-
-*/
+} 
