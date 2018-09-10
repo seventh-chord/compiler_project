@@ -2345,15 +2345,27 @@ void print_inst(Inst *inst) {
     }
 }
 
-void print_encoded_inst_with_padding(Inst *inst) {
+void print_encoded_inst_with_padding(Inst *inst, u64 *bytecode_index) {
+    enum { BYECODE_INDEX_DISPLAY_LENGTH = 4 };
+    u64 index = *bytecode_index;
+    u8 bytecode_index_chars[BYECODE_INDEX_DISPLAY_LENGTH];
+    for (u8 i = 0; i < BYECODE_INDEX_DISPLAY_LENGTH; i += 1) {
+        u8 c = index & 0xf;
+        index >>= 4;
+        bytecode_index_chars[BYECODE_INDEX_DISPLAY_LENGTH - i - 1] = c <= 9? ('0' + c) : ('a' + c - 10);
+    }
+    printf("%z:  ", BYECODE_INDEX_DISPLAY_LENGTH, &bytecode_index_chars);
+
     Encoded_Inst encoded = encode_inst(inst);
+    *bytecode_index += encoded.length;
+
     i32 padding = 30;
     for (u8 i = 0; i < encoded.length; i += 1) {
         u8 byte = encoded.bytes[i];
         u8 high = byte >> 4;
         u8 low  = byte & 15;
-        high = high > 9? 'a' + high - 10 : '0' + high;
-        low  = low  > 9? 'a' + low  - 10 : '0' + low;
+        high = high <= 9? ('0' + high) : ('a' + high - 10);
+        low  = low  <= 9? ('0' + low)  : ('a' + low  - 10);
         printf("%c%c ", high, low);
         padding -= 3;
     }
@@ -2366,6 +2378,8 @@ void print_encoded_inst_with_padding(Inst *inst) {
 
 // NB defined in header
 void print_all_insts(Code_Builder *builder, bool show_bytecode) {
+    u64 bytecode_index = 0;
+
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         if (block->jump_to != null) {
             printf("%s:\n", block->jump_to->debug_name);
@@ -2380,7 +2394,7 @@ void print_all_insts(Code_Builder *builder, bool show_bytecode) {
             Inst *inst = &block->insts[i];
 
             printf("    ");
-            if (show_bytecode) print_encoded_inst_with_padding(inst);
+            if (show_bytecode) print_encoded_inst_with_padding(inst, &bytecode_index);
             print_inst(inst);
         }
 
@@ -2389,7 +2403,7 @@ void print_all_insts(Code_Builder *builder, bool show_bytecode) {
             assert(jmp_inst->kind == INST_JMP || (jmp_inst->kind >= INST_JCC_FIRST && jmp_inst->kind <= INST_JCC_LAST));
 
             printf("    ");
-            if (show_bytecode) print_encoded_inst_with_padding(jmp_inst);
+            if (show_bytecode) print_encoded_inst_with_padding(jmp_inst, &bytecode_index);
             printf("%s ", INST_NAMES[jmp_inst->kind]);
 
             if (block->jump_from->jump_to != null) {
