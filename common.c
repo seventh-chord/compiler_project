@@ -409,7 +409,7 @@ IO_Result delete_file(u8 *file_name);
     void print(u8 *buffer, u32 buffer_length) {
         static u16 *wide_buffer = null;
         static u32 wide_buffer_capacity = 0;
-        if (buffer_length > wide_buffer_capacity) {
+        if (buffer_length + 1 > wide_buffer_capacity) {
             if (wide_buffer != null) sc_free(wide_buffer);
             wide_buffer_capacity = max(max(wide_buffer_capacity*2, buffer_length+1), 128);
             wide_buffer = sc_alloc(sizeof(u16) * wide_buffer_capacity);
