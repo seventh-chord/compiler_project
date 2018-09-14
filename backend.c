@@ -82,6 +82,12 @@ typedef enum Reg {
     REG_COUNT
 } Reg;
 
+void print_reg(Reg reg, u8 size);
+
+
+// This keeps track of which sub-register (AL, AX, EAX or RAX) of a specific
+// register we are currently using, so we can allocate the minimal amount of
+// stack space needed when flushing a register to the stack
 typedef u64 Reg_Sizes;
 u8 get_reg_size(Reg_Sizes sizes, Reg reg) {
     assert(reg >= RAX && reg <= XMM15);
@@ -168,6 +174,8 @@ struct Place {
         Address address;
     };
 };
+
+void print_place(Place *place);
 
 typedef enum Inst_Kind {
     INST_INVALID = 0,
@@ -334,6 +342,8 @@ typedef struct Inst {
 
     u16 index;
 } Inst;
+
+void print_inst(Inst *inst);
 
 
 Inst_Kind JMP_FOR_CONDITION[CONDITION_COUNT] = {
@@ -823,9 +833,7 @@ i32 stack_space_alloc(Stack_Space_Allocator *allocator, bool temporary, i32 size
     i32 place = allocator->next;
     place = (i32) round_to_next((i32) place, align);
 
-    if (!temporary) {
-        allocator->next += size;
-    }
+    if (!temporary) allocator->next = place + size;
     allocator->max = max(place + size, allocator->max);
 
     assert(place <= I32_MAX);
@@ -859,13 +867,9 @@ void end_function(Code_Builder *builder) {
                 Place *assigned_place = &key_places[key->index];
                 if (assigned_place->kind == PLACE_NONE) {
                     if (key->kind == KEY_COMPOUND || (key->flags & KEY_FLAG_ADDRESSABLE)) {
-                        u32 size = key->size;
-                        u32 align = key->alignment;
-
-                        i32 stack_offset = stack_space_alloc(&stack_space_allocator, false, size, align);
-
+                        i32 stack_offset = stack_space_alloc(&stack_space_allocator, false, key->size, key->alignment);
                         Address address = { RSP, REG_NONE, 0, stack_offset };
-                        *assigned_place = (Place) { PLACE_MEM, size, .address = address };
+                        *assigned_place = (Place) { PLACE_MEM, key->size, .address = address };
                     } else if (key->kind == KEY_INTEGER) {
                         Reg reg = next_gpr;
                         assert(reg <= R15);
