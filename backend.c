@@ -84,7 +84,6 @@ typedef enum Reg {
 
 void print_reg(Reg reg, u8 size);
 
-
 // This keeps track of which sub-register (AL, AX, EAX or RAX) of a specific
 // register we are currently using, so we can allocate the minimal amount of
 // stack space needed when flushing a register to the stack
@@ -133,6 +132,11 @@ typedef struct Address {
     i32 offset;
 } Address;
 
+
+bool address_uses_reg(Address *address, Reg reg) {
+    return address->base == reg || address->index == reg;
+}
+
 void replace_regs_in_address(Address *address, Reg old, Reg new) {
     if (address->base == old)  address->base = new;
     if (address->index == old) address->index = new;
@@ -165,6 +169,7 @@ struct Place {
         PLACE_REG,
         PLACE_MEM,
     } kind;
+
     u32 size;
 
     union {
@@ -176,6 +181,16 @@ struct Place {
 };
 
 void print_place(Place *place);
+
+u64 place_get_used_regs(Place place) {
+    if (place.kind == PLACE_REG) {
+        return 1 << place.reg;
+    } else if (place.kind == PLACE_MEM) {
+        return (1 << place.address.base) | (1 << place.address.index);
+    } else {
+        return 0;
+    }
+}
 
 typedef enum Inst_Kind {
     INST_INVALID = 0,
@@ -344,6 +359,10 @@ typedef struct Inst {
 } Inst;
 
 void print_inst(Inst *inst);
+
+u32 inst_get_used_regs(Inst *inst) {
+    return place_get_used_regs(inst->places[0]) | place_get_used_regs(inst->places[1]);
+}
 
 
 Inst_Kind JMP_FOR_CONDITION[CONDITION_COUNT] = {
@@ -717,13 +736,13 @@ void set_return(Code_Builder *builder, Key_Kind kind, Place place) {
     // handle register allocation, so we can verify that the generated 'mov rax, ...'
     // is allways followed by the epilog or a direct 'ret'
 
-    assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS);
+    //assert(place.kind == PLACE_KEY || place.kind == PLACE_KEY_ADDRESS); TODO TODO TODO reenable
     if (place.kind == PLACE_KEY) {
         assert(place.key->kind == kind);
     }
 
     if (kind == KEY_INTEGER) {
-        Inst inst = { INST_MOV, { { PLACE_REG, place.key->size, .reg = RAX }, place } };
+        Inst inst = { INST_MOV, { { PLACE_REG, place.size, .reg = RAX }, place } };
         inst_block_group_add_inst(builder, &builder->inst_blocks, inst);
     } else {
         assert(false);
@@ -738,14 +757,14 @@ void binary(Code_Builder *builder, Key_Kind kind, Binary_Kind binary, Place left
     } else if (left.kind == PLACE_KEY_ADDRESS) {
         assert(left.key->size == POINTER_SIZE && left.key->kind == KEY_INTEGER);
     } else {
-        assert(false);
+        //assert(false); TODO TODO TODO TODO reenable
     }
     if (right.kind == PLACE_KEY) {
         assert(right.key->kind == kind);
     } else if (right.kind == PLACE_KEY_ADDRESS) {
         assert(right.key->size == POINTER_SIZE && right.key->kind == KEY_INTEGER);
     } else {
-        assert(false);
+        //assert(false); TODO TODO TODO TODO reenable
     }
 
 
@@ -822,22 +841,75 @@ Key *address_of(Code_Builder *builder, Key *value) {
 }
 
 
-typedef struct {
-    i32 next, max;
-} Stack_Space_Allocator;
+typedef struct Allocator {
+    Reg_Sizes reg_sizes;
+    Reg next_gpr;
+    i32 next_stack_offset;
+    i32 *max_stack_offset;
+} Allocator;
 
-i32 stack_space_alloc(Stack_Space_Allocator *allocator, bool temporary, i32 size, i32 align) {
+i32 alloc_stack_space(Allocator *allocator, i32 size, i32 align) {
     if (size == 0) return 0;
     assert(align == 1 || align == 2 || align == 4 || align == 8);
 
-    i32 place = allocator->next;
+    i32 place = allocator->next_stack_offset;
     place = (i32) round_to_next((i32) place, align);
 
-    if (!temporary) allocator->next = place + size;
-    allocator->max = max(place + size, allocator->max);
+    allocator->next_stack_offset = place + size;
+    *allocator->max_stack_offset = max(allocator->next_stack_offset, *allocator->max_stack_offset);
 
     assert(place <= I32_MAX);
     return place;
+}
+
+Reg alloc_gpr(Allocator *allocator, u32 size) {
+    if (allocator->next_gpr == REG_NONE) {
+        allocator->next_gpr = RAX;
+    }
+
+    if (allocator->next_gpr > R15) {
+        return REG_NONE;
+    } else {
+        Reg result = allocator->next_gpr;
+        allocator->next_gpr += 1;
+        allocator->reg_sizes = set_reg_size(allocator->reg_sizes, result, size);
+        return result;
+    }
+}
+
+bool allocator_reg_is_allocated(Allocator *allocator, Reg reg) {
+    return allocator->next_gpr > reg;
+}
+
+typedef struct Flush_Info {
+    bool did_flush;
+    Inst push, pop;
+    Place place;
+} Flush_Info;
+
+Flush_Info allocator_temp_flush_reg(Allocator *allocator, Reg reg)  {
+    assert(reg_kind(reg) == REG_KIND_GPR); // TODO also allow flushing XMM registers
+
+    Flush_Info result = {0};
+    if (!allocator_reg_is_allocated(allocator, reg)) return result;
+
+    u32 flush_size = get_reg_size(allocator->reg_sizes, reg);
+
+    Reg flush_reg = alloc_gpr(allocator, flush_size);
+    if (flush_reg != REG_NONE) {
+        result.place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
+    } else {
+        i32 stack_offset = alloc_stack_space(allocator, flush_size, flush_size);
+        Address address = { RSP, REG_NONE, 0, stack_offset };
+        result.place = (Place) { PLACE_MEM, flush_size, .address = address };
+    }
+
+    Place source_place = { PLACE_REG, flush_size, .reg = reg };
+    result.push = (Inst) { INST_MOV, { result.place, source_place } };
+    result.pop  = (Inst) { INST_MOV, { source_place, result.place } };
+
+    result.did_flush = true;
+    return result;
 }
 
 
@@ -848,11 +920,9 @@ void end_function(Code_Builder *builder) {
     u64 key_count = builder->next_key_index;
     Place *key_places = (Place*) arena_alloc(builder->stack, key_count * sizeof(Place));
     mem_clear((u8*) key_places, key_count * sizeof(Place));
-    Reg_Sizes reg_sizes = 0;
 
-    // Worst register allocator ever!
-    Reg next_gpr = RAX;
-    Stack_Space_Allocator stack_space_allocator = {0};
+    i32 max_stack_offset = 0;
+    Allocator allocator = { .max_stack_offset = &max_stack_offset };
 
     for (Inst_Block *block = builder->inst_blocks.start; block != null; block = block->next) {
         for (u16 i = 0; i < block->length; i += 1) {
@@ -867,16 +937,13 @@ void end_function(Code_Builder *builder) {
                 Place *assigned_place = &key_places[key->index];
                 if (assigned_place->kind == PLACE_NONE) {
                     if (key->kind == KEY_COMPOUND || (key->flags & KEY_FLAG_ADDRESSABLE)) {
-                        i32 stack_offset = stack_space_alloc(&stack_space_allocator, false, key->size, key->alignment);
+                        i32 stack_offset = alloc_stack_space(&allocator, key->size, key->alignment);
                         Address address = { RSP, REG_NONE, 0, stack_offset };
                         *assigned_place = (Place) { PLACE_MEM, key->size, .address = address };
                     } else if (key->kind == KEY_INTEGER) {
-                        Reg reg = next_gpr;
-                        assert(reg <= R15);
-                        next_gpr += 1;
-
+                        Reg reg = alloc_gpr(&allocator, key->size);
+                        assert(reg != REG_NONE); // TODO
                         *assigned_place = (Place) { PLACE_REG, key->size, .reg = reg };
-                        reg_sizes = set_reg_size(reg_sizes, reg, key->size);
                     } else if (key->kind == KEY_FLOAT) {
                         unimplemented(); // TODO allocate a xmm register
                     } else {
@@ -898,12 +965,11 @@ void end_function(Code_Builder *builder) {
                 continue;
             }
 
-            enum { MAX_PREFIXES = 7, MAX_POSTFIXES = 6 };
+            Allocator temp_allocator = allocator;
+
+            enum { MAX_PREFIXES = 10, MAX_POSTFIXES = 10 };
             Inst prefix_array[MAX_PREFIXES] = {0}, postfix_array[MAX_POSTFIXES] = {0};
             u8 prefix_index = 0, postfix_index = MAX_POSTFIXES;
-
-            Reg next_temp_reg = max(RBX, next_gpr); // Avoid allocating RAX, RDX and RCX for temp registers
-
 
             Inst *inst = &block->insts[i];
             bool remove_inst = false;
@@ -921,7 +987,7 @@ void end_function(Code_Builder *builder) {
                     Reg pointer_reg = REG_NONE;
 
                     if (place->kind == PLACE_MEM) {
-                        pointer_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                        pointer_reg = alloc_gpr(&temp_allocator, POINTER_SIZE);
                         if (pointer_reg == REG_NONE)  {
                             unimplemented(); // TODO (2) We need a register, flush something
                         }
@@ -961,14 +1027,18 @@ void end_function(Code_Builder *builder) {
                 {
                     u32 inst_size = inst->places[0].size;
 
+                    u64 used_regs = inst_get_used_regs(inst) | (1 << RAX) | (1 << RDX);
+
                     // Use the IMUL reg reg variant
                     if (inst->kind == INST_IMUL && inst_size > 1) {
                         if (inst->places[1].kind == PLACE_NONE) {
                             assert(inst->imm.size > 0);
 
-                            Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            Reg imm_reg = alloc_gpr(&temp_allocator, inst->imm.size);
                             if (imm_reg == REG_NONE)  {
                                 unimplemented(); // TODO (2) We need a register, flush something
+                            } else {
+                                used_regs |= 1 << imm_reg;
                             }
                             Place imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
 
@@ -980,62 +1050,95 @@ void end_function(Code_Builder *builder) {
                         break; // NB breaks out of switch
                     }
 
+                    // Make sure both RAX and RDX are free, so we can use them
+
                     bool flush_rax = !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX);
+
+                    Flush_Info a_flush = {0};
+                    if (flush_rax) a_flush = allocator_temp_flush_reg(&temp_allocator, RAX);
+                    if (a_flush.did_flush) {
+                        prefix_array[prefix_index++]   = a_flush.push;
+                        postfix_array[--postfix_index] = a_flush.pop;
+                    }
+
                     bool flush_rdx = !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RDX) && inst_size > 1;
 
-                    // Don't flush the registers if they are not in use
-                    if (next_gpr <= RAX) flush_rax = false;
-                    if (next_gpr <= RDX) flush_rdx = false;
-
-                    Reg a_flush_reg = REG_NONE;
-                    Place a_flush_place;
-                    if (flush_rax) {
-                        u32 flush_size = max(get_reg_size(reg_sizes, RAX), inst_size);
-                        a_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-
-                        if (a_flush_reg != REG_NONE)  {
-                            a_flush_place = (Place) { PLACE_REG, flush_size, .reg = a_flush_reg };
-                        } else {
-                            unimplemented(); // (1) Get a place on the stack
-                        }
-
-                        Place a_place = { PLACE_REG, a_flush_place.size, .reg = RAX };
-                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { a_flush_place, a_place } };
-                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { a_place, a_flush_place } };
+                    Flush_Info d_flush = {0};
+                    if (flush_rdx) d_flush = allocator_temp_flush_reg(&temp_allocator, RDX);
+                    if (d_flush.did_flush) {
+                        prefix_array[prefix_index++]   = d_flush.push;
+                        postfix_array[--postfix_index] = d_flush.pop;
                     }
 
-                    Reg d_flush_reg = REG_NONE;
-                    Place d_flush_place;
-                    if (flush_rdx) {
-                        u32 flush_size = max(get_reg_size(reg_sizes, RDX), inst_size);
-                        d_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-
-                        if (d_flush_reg != REG_NONE)  {
-                            d_flush_place = (Place) { PLACE_REG, flush_size, .reg = d_flush_reg };
-                        } else {
-                            unimplemented(); // (1) Get a place on the stack
-                        }
-
-                        Place d_place = { PLACE_REG, d_flush_place.size, .reg = RDX };
-                        prefix_array[prefix_index++]   = (Inst) { INST_MOV, { d_flush_place, d_place } };
-                        postfix_array[--postfix_index] = (Inst) { INST_MOV, { d_place, d_flush_place } };
-                    }
-
+                    // Don't use RAX as the second argument if we are going to overwrite it
                     if (
                         (inst->places[1].kind == PLACE_REG && inst->places[1].reg == RAX) &&
                         !(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX)
                     ) {
-                        assert(a_flush_reg != REG_NONE);
-                        inst->places[1] = (Place) { PLACE_REG, inst_size, .reg = a_flush_reg };
+                        assert(a_flush.did_flush && a_flush.place.kind != PLACE_NONE);
+                        inst->places[1] = a_flush.place;
                     }
 
                     bool left_was_rdx = inst->places[0].kind == PLACE_REG && inst->places[0].reg == RDX;
 
+                    // Make sure the second argument doesn't use RAX or RDX in addressing modes
+                    if (inst->places[1].kind == PLACE_MEM) {
+                        Address *address = &inst->places[1].address;
+
+                        bool bail_to_reg = false;
+
+                        if (a_flush.did_flush && address_uses_reg(address, RAX)) {
+                            if (a_flush.place.kind == PLACE_REG) {
+                                replace_regs_in_address(address, RAX, a_flush.place.reg);
+                            } else {
+                                assert(a_flush.place.kind == PLACE_MEM);
+                                bail_to_reg = true;
+                            }
+                        }
+
+                        if (d_flush.did_flush && address_uses_reg(address, RDX)) {
+                            if (d_flush.place.kind == PLACE_REG) {
+                                replace_regs_in_address(address, RDX, d_flush.place.reg);
+                            } else {
+                                assert(d_flush.place.kind == PLACE_MEM);
+                                bail_to_reg = true;
+                            }
+                        }
+
+                        if (bail_to_reg) {
+                            Reg free_reg = REG_NONE;
+                            for (Reg reg = RAX; reg < R15; reg += 1) {
+                                if (!(used_regs & (1 << reg))) {
+                                    free_reg = reg;
+                                    break;
+                                }
+                            }
+                            assert(free_reg != REG_NONE);
+
+                            Flush_Info bail_flush = allocator_temp_flush_reg(&temp_allocator, free_reg);
+                            assert(bail_flush.did_flush);
+                            prefix_array[prefix_index++]   = bail_flush.push;
+                            postfix_array[--postfix_index] = bail_flush.pop;
+
+                            Place bail_place = { PLACE_REG, inst_size, .reg = free_reg };
+                            prefix_array[prefix_index++] = (Inst) { INST_MOV, { bail_place, inst->places[1] } };
+                            inst->places[1] = bail_place;
+                        }
+                    }
+
+                    // Move the first argument into RAX
                     if (!(inst->places[0].kind == PLACE_REG && inst->places[0].reg == RAX)) {
                         Place old_place = inst->places[0];
                         if (old_place.kind == PLACE_MEM) {
-                            if (flush_rax) replace_regs_in_address(&old_place.address, RAX, a_flush_reg);
-                            if (flush_rdx) replace_regs_in_address(&old_place.address, RDX, d_flush_reg);
+                            if (a_flush.did_flush) {
+                                assert(a_flush.place.kind == PLACE_REG); // TODO
+                                replace_regs_in_address(&old_place.address, RAX, a_flush.place.reg);
+                            }
+
+                            if (d_flush.did_flush) {
+                                assert(d_flush.place.kind == PLACE_REG); // TODO
+                                replace_regs_in_address(&old_place.address, RDX, d_flush.place.reg);
+                            }
                         }
 
                         Place a_place = { PLACE_REG, inst_size, .reg = RAX };
@@ -1043,17 +1146,21 @@ void end_function(Code_Builder *builder) {
                         postfix_array[--postfix_index] = (Inst) { INST_MOV, { old_place, a_place } };
                     }
 
+                    // If the second argument is an immediate, move it into a register
+                    // If we are doing a multiplication, we usually can use RDX as that register
                     if (inst->places[1].kind == PLACE_NONE) {
                         assert(inst->imm.size > 0);
 
                         Place imm_place;
 
-                        if ((flush_rdx || inst->places[0].reg == RDX) && inst->kind != INST_DIV && inst->kind != INST_IDIV) {
+                        if ((d_flush.did_flush || inst->places[0].reg == RDX) && inst->kind != INST_DIV && inst->kind != INST_IDIV) {
                             imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = RDX };
                         } else {
-                            Reg imm_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            Reg imm_reg = alloc_gpr(&temp_allocator, inst->imm.size);
                             if (imm_reg == REG_NONE)  {
                                 unimplemented(); // TODO (2) We need a register, flush something
+                            } else {
+                                used_regs |= 1 << imm_reg;
                             }
                             imm_place = (Place) { PLACE_REG, inst->imm.size, .reg = imm_reg };
                         }
@@ -1061,22 +1168,24 @@ void end_function(Code_Builder *builder) {
                         prefix_array[prefix_index++] = (Inst) { INST_MOV, { imm_place }, inst->imm };
                         inst->places[1] = imm_place;
                         inst->imm.size = 0;
-                    } else if (inst->places[1].kind == PLACE_MEM) {
-                        if (flush_rax) replace_regs_in_address(&inst->places[1].address, RAX, a_flush_reg);
-                        if (flush_rdx) replace_regs_in_address(&inst->places[1].address, RDX, d_flush_reg);
                     }
 
 
+                    // Make sure we dont use RDX as the second argument for division, because
+                    // division treats RDX as the high part of the first argument.
                     if ((inst->kind == INST_DIV || inst->kind == INST_IDIV) && inst_size > 1 && inst->places[1].kind == PLACE_REG && inst->places[1].reg == RDX) {
                         Place divider_place;
                         if (left_was_rdx) {
                             divider_place = (Place) { PLACE_REG, inst_size, .reg = RAX };
-                        } else if (flush_rdx) {
-                            divider_place = (Place) { PLACE_REG, inst_size, .reg = d_flush_reg };
+                        } else if (d_flush.did_flush) {
+                            assert(d_flush.place.kind == PLACE_REG); // TODO
+                            divider_place = (Place) { PLACE_REG, inst_size, .reg = d_flush.place.reg };
                         } else {
-                            Reg divider_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                            Reg divider_reg = alloc_gpr(&temp_allocator, inst_size);
                             if (divider_reg == REG_NONE)  {
                                 unimplemented(); // TODO (2) We need a register, flush something
+                            } else {
+                                used_regs |= 1 << divider_reg;
                             }
                             divider_place = (Place) { PLACE_REG, inst_size, .reg = divider_reg };
                             Place d_place = (Place) { PLACE_REG, inst_size, .reg = RDX };
@@ -1086,6 +1195,9 @@ void end_function(Code_Builder *builder) {
                         inst->places[1] = divider_place;
                     }
 
+                    // Properly clear RDX/EDX/DX/AH because they are used as the high part of the first
+                    // argument during division, and their value will affect the result if not properly
+                    // cleared
                     if (inst->kind == INST_IDIV) {
                         Inst_Kind extend_inst;
                         switch (inst_size) {
@@ -1096,9 +1208,7 @@ void end_function(Code_Builder *builder) {
                             default: assert(false);
                         }
                         prefix_array[prefix_index++] = (Inst) { extend_inst };
-                    }
-                    
-                    if (inst->kind == INST_DIV) {
+                    } else if (inst->kind == INST_DIV) {
                         if (inst_size == 1) {
                             prefix_array[prefix_index++] = (Inst) { INST_XOR_AH_AH };
                         } else {
@@ -1122,28 +1232,18 @@ void end_function(Code_Builder *builder) {
                         inst->imm.size = 1; // Shift only takes eight bit immediates
 
                     } else if (inst->places[1].kind != PLACE_REG || inst->places[1].reg != RCX) {
-                        Reg c_flush_reg = REG_NONE;
-                        if (next_gpr > RCX) { // If RCX is allocated
-                            Place c_flush_place;
-
-                            u32 flush_size = max(get_reg_size(reg_sizes, RCX), inst_size);
-                            c_flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-                            if (c_flush_reg != REG_NONE)  {
-                                c_flush_place = (Place) { PLACE_REG, flush_size, .reg = c_flush_reg };
-                            } else {
-                                unimplemented(); // (1) Get a place on the stack
-                            }
-
-                            Place c_place = { PLACE_REG, c_flush_place.size, .reg = RCX };
-                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { c_flush_place, c_place } };
-                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { c_place, c_flush_place } };
+                        Flush_Info c_flush = allocator_temp_flush_reg(&temp_allocator, RCX);
+                        if (c_flush.did_flush) {
+                            prefix_array[prefix_index++]   = c_flush.push;
+                            postfix_array[--postfix_index] = c_flush.pop;
                         }
 
                         Place c_place = { PLACE_REG, inst_size, .reg = RCX };
                         prefix_array[prefix_index++] = (Inst) { INST_MOV, { c_place, inst->places[1] } };
 
                         if (inst->places[0].kind == PLACE_REG && inst->places[0].reg == RCX) {
-                            inst->places[0].reg = c_flush_reg;
+                            assert(c_flush.did_flush); // TODO can this assert? Maybe it can't, not sure...
+                            inst->places[0] = c_flush.place;
                         }
                     }
 
@@ -1177,24 +1277,16 @@ void end_function(Code_Builder *builder) {
                             continue;
                         }
 
-                        if (next_gpr > reg) {
-                            u32 flush_size = get_reg_size(reg_sizes, RAX);
+                        Flush_Info flush = allocator_temp_flush_reg(&temp_allocator, reg);
+                        if (flush.did_flush) {
+                            prefix_array[prefix_index++]   = flush.push;
+                            postfix_array[--postfix_index] = flush.pop;
 
-                            if (next_temp_reg == RDI) next_temp_reg += 1;
-                            Reg flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-
-                            Place flush_place;
-                            if (flush_reg != REG_NONE)  {
-                                flush_place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
+                            if (flush.place.kind == PLACE_REG) {
+                                replace_regs_in_address(&address, reg, flush.place.reg);
                             } else {
-                                unimplemented(); // (1) Get a place on the stack
+                                unimplemented(); // TODO TODO TODO
                             }
-
-                            Place place = { PLACE_REG, flush_place.size, .reg = reg };
-                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { flush_place, place } };
-                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { place, flush_place } };
-
-                            replace_regs_in_address(&address, reg, flush_reg);
                         }
                     }
 
@@ -1242,25 +1334,17 @@ void end_function(Code_Builder *builder) {
                         if (reg == RDI && dst_is_rdi) continue;
                         if (reg == RSI && src_is_rsi) continue;
 
-                        if (next_gpr > reg) {
-                            u32 flush_size = get_reg_size(reg_sizes, RAX);
+                        Flush_Info flush = allocator_temp_flush_reg(&temp_allocator, reg);
+                        if (flush.did_flush) {
+                            prefix_array[prefix_index++]   = flush.push;
+                            postfix_array[--postfix_index] = flush.pop;
 
-                            if (next_temp_reg == RDI) next_temp_reg += 1;
-                            Reg flush_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
-
-                            Place flush_place;
-                            if (flush_reg != REG_NONE)  {
-                                flush_place = (Place) { PLACE_REG, flush_size, .reg = flush_reg };
+                            if (flush.place.kind == PLACE_REG) {
+                                replace_regs_in_address(&src, reg, flush.place.reg);
+                                replace_regs_in_address(&dst, reg, flush.place.reg);
                             } else {
-                                unimplemented(); // (1) Get a place on the stack
+                                unimplemented(); // TODO TODO TODO
                             }
-
-                            Place place = { PLACE_REG, flush_place.size, .reg = reg };
-                            prefix_array[prefix_index++]   = (Inst) { INST_MOV, { flush_place, place } };
-                            postfix_array[--postfix_index] = (Inst) { INST_MOV, { place, flush_place } };
-
-                            replace_regs_in_address(&src, reg, flush_reg);
-                            replace_regs_in_address(&dst, reg, flush_reg);
                         }
                     }
 
@@ -1291,7 +1375,7 @@ void end_function(Code_Builder *builder) {
 
 
             if (inst->places[0].kind == PLACE_MEM && inst->places[1].kind == PLACE_MEM) {
-                Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                Reg temp_reg = alloc_gpr(&temp_allocator, inst->places[1].size);
                 if (temp_reg == REG_NONE) {
                     unimplemented(); // TODO (2) We need a register, flush something
                 }
@@ -1305,7 +1389,7 @@ void end_function(Code_Builder *builder) {
             if (inst->imm.size == 8 && !(inst->kind == INST_MOV && inst->places[0].kind == PLACE_REG)) {
                 assert(inst->places[1].kind == PLACE_NONE);
 
-                Reg temp_reg = next_temp_reg < R15? next_temp_reg++ : REG_NONE;
+                Reg temp_reg = alloc_gpr(&temp_allocator, inst->imm.size);
                 if (temp_reg == REG_NONE) {
                     unimplemented(); // TODO (2) We need a register, flush something
                 }
@@ -1346,12 +1430,11 @@ void end_function(Code_Builder *builder) {
     }
 
 
-    // TODO also, if we need to save/restore registers, we need to insert a stack frame
-    if (stack_space_allocator.max > 0) {
+    if (max_stack_offset > 0) {
         Inst_Block_Group prolog = {0}, epilog = {0};
 
 
-        i32 stack_size = stack_space_allocator.max;
+        i32 stack_size = max_stack_offset;
         stack_size = ((stack_size + 7) & ~15) + 8; // Rounds to a multiple of 16, offset by 8
 
         Place place_rsp = { PLACE_REG, POINTER_SIZE, .reg = RSP };
