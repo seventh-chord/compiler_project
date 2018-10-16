@@ -32,6 +32,9 @@ const i64 I64_MIN = -9223372036854775808ll;
 
 #define max(a, b)  ((a) > (b)? (a) : (b))
 #define min(a, b)  ((a) > (b)? (b) : (a))
+#define abs(a)     ((a) > 0? (a) : -(a))
+
+#define array_length(x) (sizeof((x)) / sizeof((x)[0]))
 
 int _fltused; // To make floating point work without the crt
 
@@ -41,8 +44,12 @@ int _fltused; // To make floating point work without the crt
 
 
 // NB These are platform independent
+void buf_printf(u8 **buffer, u8 *string, ...);
+
 void printf(u8* string, ...);
 void printf_flush();
+
+void buf_printf_internal(u8 **buffer, u8 *string, va_list args);
 
 typedef enum IO_Result {
     IO_OK = 0,
@@ -56,8 +63,9 @@ u8 *io_result_message(IO_Result result);
 
 // Forward declarations for platform dependent stuff
 i64 perf_frequency;
-i64 perf_time();
-u64 unix_time();
+i64 perf_time(); // divide by 'perf_frequency' to get value in seconds
+u64 unix_time(); // in seconds
+void sleep(u32 milliseconds); // in milliseconds
 
 void print(u8 *buffer, u32 buffer_length);
 void print_debug(u8 *buffer);
@@ -74,7 +82,10 @@ IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length);
 IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length);
 IO_Result delete_file(u8 *file_name);
 
+
 // Our substitute for windows.h
+// NB We have another '#if WINDOWS' block further down, for implementing the
+// functions we forward declared above
 #if WINDOWS
     // NB Im not sure if we need these, stuff works just fine without them it seems...
     #define WINAPI_PRE  __declspec(dllimport)
@@ -257,6 +268,7 @@ IO_Result delete_file(u8 *file_name);
     } File_Time;
 
     WINAPI_PRE void WINAPI_POST GetSystemTimeAsFileTime(File_Time *time);
+    WINAPI_PRE void WINAPI_POST Sleep(u32 milliseconds);
 
     WINAPI_PRE u8* WINAPI_POST GetCommandLineA();
     WINAPI_PRE u32 WINAPI_POST GetEnvironmentVariableA(u8 *name, u8 *buffer, u32 size);
@@ -280,287 +292,11 @@ IO_Result delete_file(u8 *file_name);
     WINAPI_PRE bool WINAPI_POST FindNextFileW(Handle file, Win32_Find_Data *find_data);
     WINAPI_PRE bool WINAPI_POST FindClose(Handle file);
 
-    Handle stdout;
-    Handle process_heap;
-
-    void main();
-    void program_entry() {
-        stdout = GetStdHandle(STD_OUTPUT_HANDLE);
-        process_heap = GetProcessHeap();
-        QueryPerformanceFrequency(&perf_frequency);
-        main();
-        printf_flush();
-        ExitProcess(0);
-    }
-
     #ifdef DEBUG
     #define trap_or_exit()   (DebugBreak(), ExitProcess(-1))
     #else
     #define trap_or_exit()   (ExitProcess(-1))
     #endif
-
-    i64 perf_time() {
-        i64 result = 0;
-        QueryPerformanceCounter(&result);
-        return result;
-    }
-
-    u64 unix_time() {
-        // This is a mess, but it's not my fault
-       File_Time t;
-       GetSystemTimeAsFileTime(&t);
-       u64 ticks = t.lo | (((u64) t.hi) << 32);
-       return (ticks - 0x019db1ded53e8000) / 10000000;
-    }
-
-    void *sc_alloc(u64 size) {
-        return HeapAlloc(process_heap, 0, size);
-    }
-    void *sc_realloc(void *mem, u64 size) {
-        return HeapReAlloc(process_heap, 0, mem, size);
-    }
-    bool sc_free(void *mem) {
-        return HeapFree(process_heap, 0, mem);
-    }
-
-    u64 utf8_to_wide(u8 *input, u64 input_length, u16 *output, u64 output_length) {
-        u64 actual_length = 0;
-
-        for (u64 i = 0; i < input_length; i += 1)  {
-            u8 byte = input[i];
-            u32 codepoint;
-
-            if ((byte & 0xe0) == 0xc0) {
-                if (i + 1 >= input_length) return U64_MAX;
-
-                u8 second = input[i + 1];
-                i += 1;
-
-                if ((second & 0xc09) != 0x80) return U64_MAX;
-
-                codepoint = (((u32) byte & 0x1f) << 6) | ((u32) second & 0x3f);
-            } else if ((byte & 0xf0) == 0xe0) {
-                if (i + 2 >= input_length) return U64_MAX;
-
-                u8 second = input[i + 1];
-                u8 third  = input[i + 2];
-                i += 2;
-
-                if (
-                    ((second & 0xc09) != 0x80) &&
-                    ((third  & 0xc09) != 0x80)
-                ) {
-                    return U64_MAX;
-                }
-
-                codepoint = ((((u32) byte) & 0x0f) << 12) | ((((u32) second) & 0x3f) << 6) | (((u32) third) & 0x3f);
-            } else if ((byte & 0xf8) == 0xf0) {
-                if (i + 3 >= input_length) return U64_MAX;
-                u8 second = input[i + 1];
-                u8 third  = input[i + 2];
-                u8 fourth = input[i + 3];
-                i += 3;
-
-                if (
-                    ((second & 0xc09) != 0x80) &&
-                    ((third  & 0xc09) != 0x80) &&
-                    ((fourth & 0xc09) != 0x80)
-                ) {
-                    return U64_MAX;
-                }
-
-                codepoint = ((((u32) byte) & 0x07) << 18) | ((((u32) second) & 0x3f) << 12) | ((((u32) third) & 0x3f) << 6) | (((u32) fourth) & 0x3f);
-            } else {
-                codepoint = (u16) (byte & 0x7f);
-            }
-
-            if ((codepoint & 0xffff) == codepoint) {
-                output[actual_length++] = (u16) codepoint;
-            } else {
-                codepoint -= 0x10000;
-                u16 high = 0xd800 | ((codepoint >> 10) & 0x03ff);
-                u16 low  = 0xdc00 | (codepoint & 0x03ff);
-                output[actual_length++] = (u16) high;
-                output[actual_length++] = (u16) low;
-            }
-        }
-
-        if (actual_length <= output_length) {
-            return actual_length;
-        } else {
-            return U64_MAX;
-        }
-    }
-
-    u16 *utf8_to_wide_cstr(u8 *input) {
-        u64 input_length = 0;
-        for (u8 *p = input; *p != 0; p += 1) input_length += 1;
-
-        u16 *result = (u16*) sc_alloc((input_length + 1) * sizeof(u16));
-        u64 result_length = utf8_to_wide(input, input_length, result, input_length + 1);
-        if (result_length == U64_MAX) {
-            return null;
-        } else {
-            result[result_length] = 0;
-            return result;
-        }
-    }
-
-    void print(u8 *buffer, u32 buffer_length) {
-        static u16 *wide_buffer = null;
-        static u32 wide_buffer_capacity = 0;
-        if (buffer_length + 1 > wide_buffer_capacity) {
-            if (wide_buffer != null) sc_free(wide_buffer);
-            wide_buffer_capacity = max(max(wide_buffer_capacity*2, buffer_length+1), 128);
-            wide_buffer = sc_alloc(sizeof(u16) * wide_buffer_capacity);
-        }
-
-        u16 *wide_result = wide_buffer;
-        u64 wide_length = utf8_to_wide(buffer, buffer_length, wide_result, wide_buffer_capacity);
-        wide_result[wide_length] = 0; // For 'OutputDebugStringW'
-
-        if (wide_length == U64_MAX) {
-            wide_result = u"<invalid utf8>";
-            wide_length = 14;
-        }
-
-        u32 written = 0;
-        i32 success = WriteConsoleW(stdout, wide_result, (u32) wide_length, &written, null);
-        if (!success || written != wide_length) {
-            u32 error_code = GetLastError();
-            ExitProcess(error_code);
-        }
-
-        #ifdef DEBUG
-        OutputDebugStringW(wide_result);
-        #endif
-    }
-
-    IO_Result get_temp_path(u8 *path_into, u32 *length) {
-        *length = GetTempPathA(*length, path_into);
-        if (*length == 0) {
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                default: return IO_ERROR;
-            }
-        } else {
-            return IO_OK;
-        }
-    }
-
-    IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length) {
-        u16 *wide_name = utf8_to_wide_cstr(file_name);
-        if (wide_name == null) {
-            return IO_INVALID_FILE_PATH_ENCODING;
-        }
-
-        Handle file = CreateFileW(wide_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
-        sc_free(wide_name);
-
-        if (file == INVALID_HANDLE_VALUE) {
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                case 2:  return IO_NOT_FOUND; // File not found
-                case 3:  return IO_NOT_FOUND; // Path not found
-                default: return IO_ERROR;
-            }
-        }
-
-        i64 file_size;
-        if (!GetFileSizeEx(file, &file_size)) {
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                default: return IO_ERROR;
-            }
-        }
-
-        *contents = sc_alloc(file_size);
-
-        u32 read = 0;
-        i32 success = ReadFile(file, *contents, file_size, &read, null);
-        if (!success || read != file_size) {
-            sc_free(*contents);
-            *contents = null;
-
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                default: return IO_ERROR;
-            }
-        }
-
-        *length = file_size;
-
-        CloseHandle(file);
-
-        return IO_OK;
-    }
-
-    IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length) {
-        u16 *wide_name = utf8_to_wide_cstr(file_name);
-        if (wide_name == null) {
-            return IO_INVALID_FILE_PATH_ENCODING;
-        }
-
-        Handle file = CreateFileW(wide_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
-        sc_free(wide_name);
-
-        if (file == INVALID_HANDLE_VALUE) {
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                case 2:  return IO_NOT_FOUND; // File not found
-                case 3:  return IO_NOT_FOUND; // Path not found
-                case 32: return IO_ALREADY_OPEN;
-                default: return IO_ERROR;
-            }
-        }
-
-        u32 written = 0;
-        i32 success = WriteFile(file, contents, length, &written, null);
-        if (!success || written != length) {
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                default: return IO_ERROR;
-            }
-        }
-
-        CloseHandle(file);
-
-        return IO_OK;
-    }
-
-    IO_Result delete_file(u8 *file_name) {
-        bool result = DeleteFileA(file_name);
-        if (!result) {
-            u32 error_code = GetLastError();
-            switch (error_code) {
-                case 2:  return IO_NOT_FOUND; // File not found
-                case 3:  return IO_NOT_FOUND; // Path not found
-                default: return IO_ERROR;
-            }
-        } else {
-            return IO_OK;
-        }
-    }
-
-    bool run_executable(u8 *exe_path) {
-        Startup_Info startup_info = {0};
-        startup_info.size = sizeof(Startup_Info);
-        Process_Info process_info = {0};
-        bool result = CreateProcessA(exe_path, "", null, null, false, 0, null, null, &startup_info, &process_info);
-        if (!result) return false;
-
-        WaitForSingleObject(process_info.process, U32_MAX);
-
-        return true;
-    }
-
-    u8 *get_cmd_args() {
-        return GetCommandLineA();
-    }
-
-    u32 get_env_variable(u8 *name, u8 *buffer, u32 buffer_length) {
-        return GetEnvironmentVariableA(name, buffer, buffer_length);
-    }
 #endif
 
 #if !defined(trap_or_exit)
@@ -570,6 +306,7 @@ IO_Result delete_file(u8 *file_name);
 #define assert(x)        ((x)? (null) : (printf("%s(%u): assert(%s)\n", __FILE__, (u64) __LINE__, #x), printf_flush(), trap_or_exit(), null))
 #define panic(x, ...)    (printf("%s(%u): Panic: ", __FILE__, (u64) __LINE__), printf(x, __VA_ARGS__), printf_flush(), trap_or_exit())
 #define unimplemented()  (printf("%s(%u): Reached unimplemented code\n", __FILE__, (u64) __LINE__), printf_flush(), trap_or_exit(), null)
+
 
 
 void mem_copy(u8 *from, u8 *to, u64 count) {
@@ -667,6 +404,97 @@ u64 str_length(u8* s) {
         length += 1;
     }
     return length;
+}
+
+// Returns 1-4 for bytes which are at the start of a codepoint,
+// and 0 for bytes which are in the middle of a multi-byte codepoint.
+//
+// Returns -1 for bytes which can never appear in a utf8 sequence,
+// including the start-byte for 2-long overlong sequences (0xc0 and 0xc1).
+// We can NOT detect other overlong sequences without looking at the
+// entire string though!
+i32 utf8_byte_length(u8 byte) {
+    if ((byte & 0x80) == 0x00) return  1; // 0x00 to 0x7f
+    if ((byte & 0x40) == 0x00) return  0; // 0x80 to 0xbf
+    if (byte == 0xc0 || byte == 0xc1 || byte >= 0xf6) return -1; // Invalid sequences (either overlong, or larger than unicode max values)
+    if ((byte & 0x20) == 0x00) return  2; // 0xc2 to 0xdf
+    if ((byte & 0x10) == 0x00) return  3; // 0xe0 to 0xef
+    assert((byte & 0x08) == 0x00);
+    return  4; // 0xf0 to 0xf4
+}
+
+bool utf8_byte_is_continuation(u8 byte) {
+    return (byte & 0xc0) == 0x80;
+}
+
+// Counts the number of utf8 codepoints (a codepoint is one to four bytes)
+// If the string is not valid utf8, we return U64_MAX.
+u64 utf8_codepoint_count(u8 *string, u64 length) {
+    u64 utf32_length = 0;
+
+    for (u64 i = 0; i < length; i += 1)  {
+        utf32_length += 1;
+
+        u32 codepoint = 0;
+
+        u8 first = string[i];
+        i32 encoded_length = utf8_byte_length(first);
+        switch (encoded_length) {
+            case 1: {
+                codepoint = first;
+            } break;
+
+            case 2: {
+                if (i + 1 >= length) return U64_MAX;
+                u8 second = string[++i];
+
+                if (!utf8_byte_is_continuation(second)) return U64_MAX;
+
+                codepoint = ((first & 0x1f) << 6) | (second & 0x3f);
+            } break;
+
+            case 3: {
+                if (i + 2 >= length) return U64_MAX;
+                u8 second = string[++i];
+                u8 third  = string[++i];
+
+                if (!utf8_byte_is_continuation(second)) return U64_MAX;
+                if (!utf8_byte_is_continuation(third))  return U64_MAX;
+
+                codepoint = ((first & 0x0f) << 12) | ((second & 0x3f) << 6) | (third & 0x3f);
+            } break;
+
+            case 4: {
+                if (i + 3 >= length) return U64_MAX;
+                u8 second = string[++i];
+                u8 third  = string[++i];
+                u8 fourth = string[++i];
+
+                if (!utf8_byte_is_continuation(second)) return U64_MAX;
+                if (!utf8_byte_is_continuation(third))  return U64_MAX;
+                if (!utf8_byte_is_continuation(fourth)) return U64_MAX;
+
+                codepoint = ((first & 0x07) << 18) | ((second & 0x3f) << 12) | ((third & 0x3f) << 6) | (fourth & 0x3f);
+            } break;
+
+            case 0:
+            case -1:
+            {
+                return U64_MAX;
+            } break;
+        }
+
+        // Overlong encodings
+        // if (encoded_length == 2 && codepoint <= 0x7f) return U64_MAX; // We check for this in 'utf8_byte_length'
+        if (encoded_length == 3 && codepoint <= 0x7ff) return U64_MAX;
+        if (encoded_length == 4 && codepoint <= 0xffff) return U64_MAX;
+
+        // Codepoints reserved for utf16 surogate pairs
+        // With this, we are utf8 compliant, without it we are wtf8 compliant
+        if (codepoint >= 0xd800 && codepoint <= 0xdfff) return U64_MAX;
+    }
+
+    return utf32_length;
 }
 
 bool str_cmp(u8 *a, u8 *b) {
@@ -824,6 +652,8 @@ typedef struct Buf_Header {
 
 #define buf_foreach(t, x, b)     for (t* x = (b); x != buf_end(b); x += 1)
 #define buf_foreach_remove(b, x) (_buf_remove((b), (x), sizeof(*(b))), (x) -= 1)
+
+#define buf_reserve(b, n)  ((b) = _buf_grow((b), (n), sizeof(*(b))))
 
 void *_buf_grow(void *buf, u64 new_len, u64 element_size) {
     Buf_Header *new_header;
@@ -1146,7 +976,6 @@ u8 *str_join(Arena *arena, u8 *left, u8 *right) {
 
 u8 *printf_buf; // Heh, this is gnarly af.
 
-void printf_integer(u64 value, u8 base);
 u8 char_for_digit(u8 c);
 
 void printf_flush() {
@@ -1155,17 +984,64 @@ void printf_flush() {
 }
 
 void printf(u8* string, ...) {
-    bool flush = false;
-
     va_list args = {0};
     va_start(args, string);
+    buf_printf_internal(&printf_buf, string, args); 
+    va_end(args);
 
+    bool contains_newline = false;
+    for (u8 *c = string; *c != 0; c += 1) {
+        if (*c == '\n') {
+            contains_newline = true;
+            break;
+        }
+    }
+
+    if (buf_length(printf_buf) > 10000 || contains_newline > 0) {
+        printf_flush();
+    }
+}
+
+u8 char_for_digit(u8 c) {
+    if (c <= 9) {
+        return '0' + c;
+    } else {
+        return 'a' + (c - 10);
+    }
+}
+
+void buf_printf(u8 **buffer, u8 *string, ...) {
+    va_list args = {0};
+    va_start(args, string);
+    buf_printf_internal(buffer, string, args); 
+    va_end(args);
+}
+
+void buf_printf_integer(u8 **buffer, u64 value, u8 base) {
+    u64 start_index = buf_length(*buffer);
+    u64 length = 0;
+    do {
+        u8 digit = value % base;
+        value = value / base;
+
+        buf_push(*buffer, char_for_digit(digit));
+
+        length += 1;
+    } while (value != 0);
+
+    for (u64 i = 0; i < length/2; i += 1) {
+        u64 a = start_index + i;
+        u64 b = start_index + length - i - 1;
+        u8 temp = (*buffer)[b];
+        (*buffer)[b] = (*buffer)[a];
+        (*buffer)[a] = temp;
+    }
+}
+
+void buf_printf_internal(u8 **buffer, u8 *string, va_list args) {
     for (u8* t = string; *t != '\0'; t += 1) {
         if (*t != '%') {
-            if (*t == '\n') {
-                flush = true;
-            }
-            buf_push(printf_buf, *t);
+            buf_push(*buffer, *t);
         } else {
             u8 type = *(t + 1);
 
@@ -1173,27 +1049,27 @@ void printf(u8* string, ...) {
                 case 'i': {
                     i64 value = va_arg(args, i64);
                     if (value < 0) {
-                        buf_push(printf_buf, '-');
+                        buf_push(*buffer, '-');
                         value = -value;
                     }
-                    printf_integer(value, 10);
+                    buf_printf_integer(buffer, value, 10);
                 } break;
 
                 case 'u': {
                     u64 value = va_arg(args, u64);
-                    printf_integer(value, 10);
+                    buf_printf_integer(buffer, value, 10);
                 } break;
 
                 // Format numbers as 1st, 2nd, 3rd, 4th, etc...
                 case 'n': {
                     u64 value = va_arg(args, u64);
-                    printf_integer(value, 10);
+                    buf_printf_integer(buffer, value, 10);
 
                     switch (value) {
-                        case 1:  buf_push(printf_buf, 's'); buf_push(printf_buf, 't'); break;
-                        case 2:  buf_push(printf_buf, 'n'); buf_push(printf_buf, 'd'); break;
-                        case 3:  buf_push(printf_buf, 'r'); buf_push(printf_buf, 'd'); break;
-                        default: buf_push(printf_buf, 't'); buf_push(printf_buf, 'h'); break;
+                        case 1:  buf_push(*buffer, 's'); buf_push(*buffer, 't'); break;
+                        case 2:  buf_push(*buffer, 'n'); buf_push(*buffer, 'd'); break;
+                        case 3:  buf_push(*buffer, 'r'); buf_push(*buffer, 'd'); break;
+                        default: buf_push(*buffer, 't'); buf_push(*buffer, 'h'); break;
                     }
                 } break;
 
@@ -1201,25 +1077,25 @@ void printf(u8* string, ...) {
                     u8 value = va_arg(args, u8);
 
                     if (value >= 0x20) {
-                        buf_push(printf_buf, value);
+                        buf_push(*buffer, value);
                     } else {
-                        buf_push(printf_buf, '\\');
+                        buf_push(*buffer, '\\');
 
                         switch (value) {
 
-                        case '\n': buf_push(printf_buf, 'n'); break;
-                        case '\r': buf_push(printf_buf, 'r'); break;
-                        case '\t': buf_push(printf_buf, 't'); break;
+                        case '\n': buf_push(*buffer, 'n'); break;
+                        case '\r': buf_push(*buffer, 'r'); break;
+                        case '\t': buf_push(*buffer, 't'); break;
 
                         default: {
-                            buf_push(printf_buf, 'x');
+                            buf_push(*buffer, 'x');
 
                             u8 hi = (value & 0xf0) >> 4;
-                            if (hi > 9)  buf_push(printf_buf, 'a' + hi);
-                            else         buf_push(printf_buf, '0' + hi);
+                            if (hi > 9)  buf_push(*buffer, 'a' + hi);
+                            else         buf_push(*buffer, '0' + hi);
                             u8 lo = (value & 0x0f);
-                            if (lo > 9)  buf_push(printf_buf, 'a' + lo);
-                            else         buf_push(printf_buf, '0' + lo);
+                            if (lo > 9)  buf_push(*buffer, 'a' + lo);
+                            else         buf_push(*buffer, '0' + lo);
                         } break;
 
                         }
@@ -1231,16 +1107,16 @@ void printf(u8* string, ...) {
                     f64 value = va_arg(args, f64);
                     u64 bits = *((u64*) &value);
 
-                    buf_push(printf_buf, '0');
-                    buf_push(printf_buf, 'x');
-                    printf_integer(bits, 16);
+                    buf_push(*buffer, '0');
+                    buf_push(*buffer, 'x');
+                    buf_printf_integer(buffer, bits, 16);
                 } break;
 
                 case 'x': {
-                    buf_push(printf_buf, '0');
-                    buf_push(printf_buf, 'x');
+                    buf_push(*buffer, '0');
+                    buf_push(*buffer, 'x');
                     u64 value = va_arg(args, u64);
-                    printf_integer(value, 16);
+                    buf_printf_integer(buffer, value, 16);
                 } break;
 
                 case 'b': {
@@ -1249,69 +1125,34 @@ void printf(u8* string, ...) {
                     u8 hi = byte >> 4;
                     u8 lo = byte & 0x0f;
 
-                    buf_push(printf_buf, char_for_digit(hi));
-                    buf_push(printf_buf, char_for_digit(lo));
+                    buf_push(*buffer, char_for_digit(hi));
+                    buf_push(*buffer, char_for_digit(lo));
                 } break;
 
                 case 's': {
                     u8* other_string = va_arg(args, u8*);
                     assert(other_string != null);
-                    str_push_cstr(&printf_buf, other_string);
+                    str_push_cstr(buffer, other_string);
                 } break;
 
                 case 'z': {
                     u64 length = va_arg(args, u64);
                     u8* other_string = va_arg(args, u8*);
-                    str_push_str(&printf_buf, other_string, length);
+                    str_push_str(buffer, other_string, length);
                 } break;
 
                 case '%': {
-                    buf_push(printf_buf, '%');
+                    buf_push(*buffer, '%');
                 } break;
 
                 default: {
-                    buf_push(printf_buf, type);
-                    buf_push(printf_buf, '?');
+                    buf_push(*buffer, type);
+                    buf_push(*buffer, '?');
                 } break;
             }
 
             t += 1;
         }
-    }
-
-    va_end(args);
-
-    if (buf_length(printf_buf) > 10000 || flush) {
-        printf_flush();
-    }
-}
-
-void printf_integer(u64 value, u8 base) {
-    u64 start_index = buf_length(printf_buf);
-    u64 length = 0;
-    do {
-        u8 digit = value % base;
-        value = value / base;
-
-        buf_push(printf_buf, char_for_digit(digit));
-
-        length += 1;
-    } while (value != 0);
-
-    for (u64 i = 0; i < length/2; i += 1) {
-        u64 a = start_index + i;
-        u64 b = start_index + length - i - 1;
-        u8 temp = printf_buf[b];
-        printf_buf[b] = printf_buf[a];
-        printf_buf[a] = temp;
-    }
-}
-
-u8 char_for_digit(u8 c) {
-    if (c <= 9) {
-        return '0' + c;
-    } else {
-        return 'a' + (c - 10);
     }
 }
 
@@ -1388,6 +1229,324 @@ u64 round_to_next(u64 value, u64 step) {
 }
 
 
+#if WINDOWS
+    Handle stdout;
+    Handle process_heap;
+
+    void main();
+    void program_entry() {
+        stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        process_heap = GetProcessHeap();
+        QueryPerformanceFrequency(&perf_frequency);
+        main();
+        printf_flush();
+        ExitProcess(0);
+    }
+
+    i64 perf_time() {
+        i64 result = 0;
+        QueryPerformanceCounter(&result);
+        return result;
+    }
+
+    u64 unix_time() {
+        // This is a mess, but it's not my fault
+       File_Time t;
+       GetSystemTimeAsFileTime(&t);
+       u64 ticks = t.lo | (((u64) t.hi) << 32);
+       return (ticks - 0x019db1ded53e8000) / 10000000;
+    }
+
+    void sleep(u32 milliseconds) {
+        Sleep(milliseconds);
+    }
+
+    void *sc_alloc(u64 size) {
+        return HeapAlloc(process_heap, 0, size);
+    }
+    void *sc_realloc(void *mem, u64 size) {
+        return HeapReAlloc(process_heap, 0, mem, size);
+    }
+    bool sc_free(void *mem) {
+        return HeapFree(process_heap, 0, mem);
+    }
+
+    u64 utf8_to_wide(u8 *input, u64 input_length, u16 *output, u64 output_length) {
+        u64 actual_length = 0;
+
+        for (u64 i = 0; i < input_length; i += 1)  {
+            i32 codepoint; // Signed is fine, full unicode is less than 32 bits
+
+            u8 first = input[i];
+            i32 encoded_length = utf8_byte_length(first);
+            switch (encoded_length) {
+                case 1: {
+                    codepoint = first;
+                } break;
+
+                case 2: {
+                    if (i + 1 >= input_length) {
+                        codepoint = -1;
+                    } else {
+                        u8 second = input[i + 1];
+
+                        if (!utf8_byte_is_continuation(second)) {
+                            codepoint = -1;
+                        } else {
+                            codepoint = ((first & 0x1f) << 6) | (second & 0x3f);
+                            i += 1;
+                        }
+                    }
+                } break;
+
+                case 3: {
+                    if (i + 2 >= input_length) {
+                        codepoint = -1;
+                    } else {
+                        u8 second = input[i + 1];
+                        u8 third  = input[i + 2];
+
+                        if (!utf8_byte_is_continuation(second) || !utf8_byte_is_continuation(third)) {
+                            codepoint = -1;
+                        } else {
+                            codepoint = ((first & 0x0f) << 12) | ((second & 0x3f) << 6) | (third & 0x3f);
+                            i += 2;
+                        }
+                    }
+                } break;
+
+                case 4: {
+                    if (i + 3 >= input_length) {
+                        codepoint = -1;
+                    } else {
+                        u8 second = input[i + 1];
+                        u8 third  = input[i + 2];
+                        u8 fourth = input[i + 3];
+
+                        if (!utf8_byte_is_continuation(second) ||
+                            !utf8_byte_is_continuation(third) ||
+                            !utf8_byte_is_continuation(fourth)) {
+                            codepoint = -1;
+                        } else {
+                            codepoint = ((first & 0x07) << 18) | ((second & 0x3f) << 12) | ((third & 0x3f) << 6) | (fourth & 0x3f);
+                            i += 3;
+                        }
+                    }
+                } break;
+
+                case 0:
+                case -1:
+                {
+                    codepoint = -1;
+                } break;
+            }
+
+            // Overlong encodings
+            // if (encoded_length == 2 && codepoint <= 0x7f) codepoint = -1; // We check for this in 'utf8_byte_length'
+            if (encoded_length == 3 && codepoint <= 0x7ff) codepoint = -1;
+            if (encoded_length == 4 && codepoint <= 0xffff) codepoint = -1;
+
+            // Codepoints reserved for utf16 surogate pairs
+            //if (codepoint >= 0xd800 && codepoint <= 0xdfff) codepoint = -1;
+            // We keep these codepoints around, because apparently windows file names can contain
+            // them, which means we need to respect them.
+
+            if (codepoint == -1) {
+                output[actual_length++] = 0xfffd;
+
+                while (i < input_length && utf8_byte_is_continuation(input[i])) {
+                    i += 1;
+                }
+            } else if ((codepoint & 0xffff) == codepoint) {
+                output[actual_length++] = (u16) codepoint;
+            } else {
+                codepoint -= 0x10000;
+                u16 high = 0xd800 | ((codepoint >> 10) & 0x03ff);
+                u16 low  = 0xdc00 | (codepoint & 0x03ff);
+                output[actual_length++] = (u16) high;
+                output[actual_length++] = (u16) low;
+            }
+        }
+
+        if (actual_length <= output_length) {
+            return actual_length;
+        } else {
+            return U64_MAX;
+        }
+    }
+
+    u16 *utf8_to_wide_cstr(u8 *input) {
+        u64 input_length = 0;
+        for (u8 *p = input; *p != 0; p += 1) input_length += 1;
+
+        u16 *result = (u16*) sc_alloc((input_length + 1) * sizeof(u16));
+        u64 result_length = utf8_to_wide(input, input_length, result, input_length + 1);
+        if (result_length == U64_MAX) {
+            return null;
+        } else {
+            result[result_length] = 0;
+            return result;
+        }
+    }
+
+    void print(u8 *buffer, u32 buffer_length) {
+        static u16 *wide_buffer = null;
+        static u32 wide_buffer_capacity = 0;
+        if (buffer_length + 1 > wide_buffer_capacity) {
+            if (wide_buffer != null) sc_free(wide_buffer);
+            wide_buffer_capacity = max(max(wide_buffer_capacity*2, buffer_length+1), 128);
+            wide_buffer = sc_alloc(sizeof(u16) * wide_buffer_capacity);
+        }
+
+        u16 *wide_result = wide_buffer;
+        u64 wide_length = utf8_to_wide(buffer, buffer_length, wide_result, wide_buffer_capacity);
+        wide_result[wide_length] = 0; // For 'OutputDebugStringW'
+
+        if (wide_length == U64_MAX) {
+            wide_result = u"<invalid utf8>";
+            wide_length = 14;
+        }
+
+        u32 written = 0;
+        i32 success = WriteConsoleW(stdout, wide_result, (u32) wide_length, &written, null);
+        if (!success || written != wide_length) {
+            u32 error_code = GetLastError();
+            ExitProcess(error_code);
+        }
+
+        #ifdef DEBUG
+        OutputDebugStringW(wide_result);
+        #endif
+    }
+
+    IO_Result get_temp_path(u8 *path_into, u32 *length) {
+        *length = GetTempPathA(*length, path_into);
+        if (*length == 0) {
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                default: return IO_ERROR;
+            }
+        } else {
+            return IO_OK;
+        }
+    }
+
+    IO_Result read_entire_file(u8 *file_name, u8 **contents, u32 *length) {
+        u16 *wide_name = utf8_to_wide_cstr(file_name);
+        if (wide_name == null) {
+            return IO_INVALID_FILE_PATH_ENCODING;
+        }
+
+        Handle file = CreateFileW(wide_name, GENERIC_READ, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+        sc_free(wide_name);
+
+        if (file == INVALID_HANDLE_VALUE) {
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                case 2:  return IO_NOT_FOUND; // File not found
+                case 3:  return IO_NOT_FOUND; // Path not found
+                default: return IO_ERROR;
+            }
+        }
+
+        i64 file_size;
+        if (!GetFileSizeEx(file, &file_size)) {
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                default: return IO_ERROR;
+            }
+        }
+
+        *contents = sc_alloc(file_size);
+
+        u32 read = 0;
+        i32 success = ReadFile(file, *contents, file_size, &read, null);
+        if (!success || read != file_size) {
+            sc_free(*contents);
+            *contents = null;
+
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                default: return IO_ERROR;
+            }
+        }
+
+        *length = file_size;
+
+        CloseHandle(file);
+
+        return IO_OK;
+    }
+
+    IO_Result write_entire_file(u8 *file_name, u8 *contents, u32 length) {
+        u16 *wide_name = utf8_to_wide_cstr(file_name);
+        if (wide_name == null) {
+            return IO_INVALID_FILE_PATH_ENCODING;
+        }
+
+        Handle file = CreateFileW(wide_name, GENERIC_WRITE, 0, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
+        sc_free(wide_name);
+
+        if (file == INVALID_HANDLE_VALUE) {
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                case 2:  return IO_NOT_FOUND; // File not found
+                case 3:  return IO_NOT_FOUND; // Path not found
+                case 32: return IO_ALREADY_OPEN;
+                default: return IO_ERROR;
+            }
+        }
+
+        u32 written = 0;
+        i32 success = WriteFile(file, contents, length, &written, null);
+        if (!success || written != length) {
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                default: return IO_ERROR;
+            }
+        }
+
+        CloseHandle(file);
+
+        return IO_OK;
+    }
+
+    IO_Result delete_file(u8 *file_name) {
+        bool result = DeleteFileA(file_name);
+        if (!result) {
+            u32 error_code = GetLastError();
+            switch (error_code) {
+                case 2:  return IO_NOT_FOUND; // File not found
+                case 3:  return IO_NOT_FOUND; // Path not found
+                default: return IO_ERROR;
+            }
+        } else {
+            return IO_OK;
+        }
+    }
+
+    bool run_executable(u8 *exe_path) {
+        Startup_Info startup_info = {0};
+        startup_info.size = sizeof(Startup_Info);
+        Process_Info process_info = {0};
+        bool result = CreateProcessA(exe_path, "", null, null, false, 0, null, null, &startup_info, &process_info);
+        if (!result) return false;
+
+        WaitForSingleObject(process_info.process, U32_MAX);
+
+        return true;
+    }
+
+    u8 *get_cmd_args() {
+        return GetCommandLineA();
+    }
+
+    u32 get_env_variable(u8 *name, u8 *buffer, u32 buffer_length) {
+        return GetEnvironmentVariableA(name, buffer, buffer_length);
+    }
+#endif
+
+
 // We need these for when MSVC auto-inserts them in /O2 builds
 /*
 #pragma function(memset)
@@ -1401,5 +1560,6 @@ void *memcpy(void *dest, void *src, u64 count) {
     return ((u8*) dest) + count;
 }
 */
+
 
 #endif // SC_COMMON_C
